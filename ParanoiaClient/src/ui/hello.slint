@@ -1,0 +1,24 @@
+import { VerticalBox, Button, Text } from "std-widgets.slint";
+
+export component HelloScreen inherits VerticalBox {
+    callback connect();
+    callback install();
+
+    spacing: 20px;
+
+    Text {
+        text: "Paranoia";
+        font-size: 24px;
+        horizontal-alignment: center;
+    }
+
+    Button {
+        text: "Подключиться к серверу";
+        clicked => connect();
+    }
+
+    Button {
+        text: "Установить свой сервер";
+        clicked => install();
+    }
+}

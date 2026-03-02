@@ -1,0 +1,33 @@
+import { VerticalBox, LineEdit, Button, ProgressIndicator, Text } from "std-widgets.slint";
+
+export component InstallServerScreen inherits VerticalBox {
+
+    in property <string> domain;
+    in property <string> ip;
+    in property <string> user;
+    in property <string> pass;
+    in property <int> port: 1455;
+
+    in property <float> progress: 0.0;
+
+    callback start-install(string domain, string ip, string user, string pass, int port);
+
+    spacing: 8px;
+
+    Text { text: "Установка сервера"; font-size: 20px; }
+
+    LineEdit { placeholder-text: "Домен"; text <=> root.domain; }
+    LineEdit { placeholder-text: "IP"; text <=> root.ip; }
+    LineEdit { placeholder-text: "Username"; text <=> root.user; }
+    LineEdit { placeholder-text: "Password"; echo-mode: password; text <=> root.pass; }
+    LineEdit { placeholder-text: "Port"; text: root.port; }
+
+    Button {
+        text: "Установить";
+        clicked => root.start-install(root.domain, root.ip, root.user, root.pass, root.port);
+    }
+
+    ProgressIndicator {
+        progress: root.progress;
+    }
+}

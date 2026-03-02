@@ -1,0 +1,35 @@
+import { VerticalBox, HorizontalBox, Button } from "std-widgets.slint";
+
+export component MainTabs inherits VerticalBox {
+
+    in-out property <int> tab: 0;
+
+    spacing: 4px;
+
+    HorizontalBox {
+        spacing: 4px;
+
+        Button { text: "User"; clicked => root.tab = 0; }
+        Button { text: "Admin"; clicked => root.tab = 1; }
+        Button { text: "+"; clicked => root.tab = 2; }
+    }
+
+    if (root.tab == 0) {
+        DialogueView { }
+    }
+
+    if (root.tab == 1) {
+        VerticalBox {
+            Text { text: "Admin Panel"; }
+            Button { text: "Register user"; }
+        }
+    }
+
+    if (root.tab == 2) {
+        VerticalBox {
+            Text { text: "Add Dialogue"; }
+            Button { text: "Scan QR"; }
+            Button { text: "Show my QR"; }
+        }
+    }
+}
