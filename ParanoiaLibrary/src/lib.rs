@@ -1,15 +1,17 @@
+pub mod admin;
+pub mod client_cover;
+pub mod client_cover_food;
 pub mod crypto;
 pub mod dialogue;
 pub mod packet;
 pub mod store;
 pub mod transport;
 pub mod types;
-pub mod client_cover;
-pub mod client_cover_food;
 
 use anyhow::Result;
 use std::sync::Arc;
 
+pub use admin::AdminKeyPair;
 pub use dialogue::Dialogue;
 pub use types::{
     ClientConfig, DialogueConfig, DialogueKey, FileAttachment, Message, MessageContent,
@@ -17,8 +19,8 @@ pub use types::{
 };
 
 use client_cover_food::FoodDeliveryClientCover;
-use transport::Transport;
 use store::LocalStore;
+use transport::Transport;
 
 pub struct ParanoiaClient {
     config: Arc<ClientConfig>,
@@ -45,5 +47,9 @@ impl ParanoiaClient {
             Arc::clone(&self.transport),
             Arc::clone(&self.store),
         )
+    }
+
+    pub fn transport(&self) -> Arc<Transport> {
+        Arc::clone(&self.transport)
     }
 }
