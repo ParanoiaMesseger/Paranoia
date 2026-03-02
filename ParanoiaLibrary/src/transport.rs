@@ -1,4 +1,3 @@
-use crate::crypto;
 use crate::client_cover::ClientCover;
 use anyhow::Result;
 use reqwest::Client;

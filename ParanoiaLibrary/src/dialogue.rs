@@ -1,7 +1,5 @@
 use anyhow::Result;
 use chrono::Utc;
-use rand::Rng;
-use rusqlite::params;
 use std::sync::Arc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -349,7 +347,6 @@ impl Dialogue {
 }
 
 fn random_chunks(data: &[u8]) -> Vec<&[u8]> {
-    let mut rng = rand::thread_rng();
     let mut chunks = Vec::new();
     let mut offset = 0;
     while offset < data.len() {
@@ -357,7 +354,7 @@ fn random_chunks(data: &[u8]) -> Vec<&[u8]> {
         let size = if remaining <= CHUNK_SIZE_MIN {
             remaining
         } else {
-            rng.gen_range(CHUNK_SIZE_MIN..=CHUNK_SIZE_MAX.min(remaining))
+            rand::random_range(CHUNK_SIZE_MIN..=CHUNK_SIZE_MAX.min(remaining))
         };
         chunks.push(&data[offset..offset + size]);
         offset += size;

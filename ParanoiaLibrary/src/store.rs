@@ -1,7 +1,7 @@
 use crate::types::{DialogueKey, Message, MessageStatus};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::sync::Mutex;
 
 pub struct LocalStore {
@@ -147,7 +147,7 @@ impl LocalStore {
                 content_json,
                 msg.timestamp.to_rfc3339(),
                 serde_json::to_string(&msg.status)?,
-                msg.server_seq,
+                msg.server_seq.map(|s| s as i64),
             ],
         )?;
         if let Some(seq) = msg.server_seq {
@@ -195,6 +195,29 @@ impl LocalStore {
         Ok(count)
     }
 
+    pub fn get_message_by_seq(&self, dialogue: &DialogueKey, seq: u64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id
+             FROM messages
+             WHERE dialogue_a = ?1
+               AND dialogue_b = ?2
+               AND server_seq = ?3
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![
+            dialogue.a, dialogue.b,
+            seq as i64, // в БД server_seq уже как INTEGER/i64
+        ])?;
+
+        if let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            Ok(Some(id))
+        } else {
+            Ok(None)
+        }
+    }
+    
     pub fn get_messages(
         &self,
         dialogue: &DialogueKey,

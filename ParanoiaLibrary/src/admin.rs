@@ -1,7 +1,6 @@
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use rand_core::OsRng;
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use ed25519_dalek::{SecretKey, Signature, Signer, SigningKey, VerifyingKey};
 
 /// Пара ключей администратора в памяти.
 pub struct AdminKeyPair {
@@ -12,8 +11,9 @@ pub struct AdminKeyPair {
 impl AdminKeyPair {
     /// Сгенерировать новую пару ключей.
     pub fn generate() -> Self {
-        let mut rng = OsRng;
-        let sk = SigningKey::generate(&mut rng);
+        let mut secret = SecretKey::default();
+        rand::fill(&mut secret);
+        let sk = SigningKey::from_bytes(&secret);
         let pk = sk.verifying_key();
         Self { sk, pk }
     }
