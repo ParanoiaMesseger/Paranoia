@@ -31,7 +31,7 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
         Err(_) => {
-            m.pull_fail.inc();
+            m.inc_pull_fail();
             return fail("Bad sig encoding".into());
         }
     };
@@ -44,7 +44,7 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
         match (s, r) {
             (Some(s), Some(r)) => (s, r),
             _ => {
-                m.pull_fail.inc();
+                m.inc_pull_fail();
                 return fail("One user in pair not registered".into());
             }
         }
@@ -55,7 +55,7 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
         || crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok();
 
     if !valid {
-        m.pull_fail.inc();
+        m.inc_pull_fail();
         dbg!(
             "Invalid pull signature for dialogue {}<->{}",
             req.sender,
@@ -76,14 +76,14 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
                     })
                 })
                 .collect();
-            m.pull_success.inc();
+            m.inc_pull_success();
             ApiResponse {
                 success: true,
                 message: Value::Array(arr),
             }
         }
         Err(e) => {
-            m.pull_fail.inc();
+            m.inc_pull_fail();
             fail(format!("{e}"))
         }
     }

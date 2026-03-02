@@ -12,6 +12,10 @@ strip = "symbols"
 lto = true
 codegen-units = 1
 
+[features]
+default = ["metrics"]        # можно включать по умолчанию
+metrics = []                 # пустой маркерный флаг
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8.8", features = ["json"] }

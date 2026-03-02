@@ -30,7 +30,7 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
         Err(_) => {
-            m.determinate_fail.inc();
+            m.inc_determinate_fail();
             return fail("Bad sig encoding".into());
         }
     };
@@ -43,7 +43,7 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
         match (s, r) {
             (Some(s), Some(r)) => (s, r),
             _ => {
-                m.determinate_fail.inc();
+                m.inc_determinate_fail();
                 return fail("One user in pair not registered".into());
             }
         }
@@ -54,7 +54,7 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
         || crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok();
 
     if !valid {
-        m.determinate_fail.inc();
+        m.inc_determinate_fail();
         dbg!(
             "Invalid determinate signature for dialogue {}<->{}",
             req.sender,
@@ -66,7 +66,7 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
     match state.store.remove_until(&dialogue_id, req.cut_seq) {
         Ok(_) => {
-            m.determinate_success.inc();
+            m.inc_determinate_success();
             dbg!(
                 "Dialogue {}<->{}: removed up to seq {}",
                 req.sender,
@@ -76,7 +76,7 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
             ok("OK".into())
         }
         Err(e) => {
-            m.determinate_fail.inc();
+            m.inc_determinate_fail();
             fail(format!("{e}"))
         }
     }
