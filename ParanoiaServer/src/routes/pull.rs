@@ -1,21 +1,21 @@
-use std::sync::Arc;
+use crate::{crypto, AppState};
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::{AppState, crypto};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct PullRequest {
-    sender:    String,
-    recver:    String,
-    after_seq: u64,
-    sig:       String, // подпись от sender+recver+after_seq
+    pub sender: String,
+    pub recver: String,
+    pub after_seq: u64,
+    pub sig: String, // подпись от sender+recver+after_seq
 }
 
 #[derive(Serialize)]
 pub struct ApiResponse {
-    success: bool,
-    message: Value,
+    pub success: bool,
+    pub message: Value,
 }
 
 pub async fn handle(
@@ -30,7 +30,10 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
 
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
-        Err(_) => { m.pull_fail.inc(); return fail("Bad sig encoding".into()); }
+        Err(_) => {
+            m.pull_fail.inc();
+            return fail("Bad sig encoding".into());
+        }
     };
 
     // Подписать может любой из участников диалога — проверяем обоих
@@ -40,7 +43,10 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
         let r = cfg.user_pubkey_bytes(&req.recver);
         match (s, r) {
             (Some(s), Some(r)) => (s, r),
-            _ => { m.pull_fail.inc(); return fail("One user in pair not registered".into()); }
+            _ => {
+                m.pull_fail.inc();
+                return fail("One user in pair not registered".into());
+            }
         }
     };
 
@@ -50,7 +56,11 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
 
     if !valid {
         m.pull_fail.inc();
-        dbg!("Invalid pull signature for dialogue {}<->{}", req.sender, req.recver);
+        dbg!(
+            "Invalid pull signature for dialogue {}<->{}",
+            req.sender,
+            req.recver
+        );
         return fail("Invalid signature".into());
     }
 
@@ -59,18 +69,29 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
         Ok(packets) => {
             let arr: Vec<Value> = packets
                 .into_iter()
-                .map(|(seq, data)| serde_json::json!({
-                    "seq":     seq,
-                    "payload": crypto::encode_b64(&data),
-                }))
+                .map(|(seq, data)| {
+                    serde_json::json!({
+                        "seq":     seq,
+                        "payload": crypto::encode_b64(&data),
+                    })
+                })
                 .collect();
             m.pull_success.inc();
-            ApiResponse { success: true, message: Value::Array(arr) }
+            ApiResponse {
+                success: true,
+                message: Value::Array(arr),
+            }
         }
-        Err(e) => { m.pull_fail.inc(); fail(format!("{e}")) }
+        Err(e) => {
+            m.pull_fail.inc();
+            fail(format!("{e}"))
+        }
     }
 }
 
 fn fail(msg: String) -> ApiResponse {
-    ApiResponse { success: false, message: Value::String(msg) }
+    ApiResponse {
+        success: false,
+        message: Value::String(msg),
+    }
 }

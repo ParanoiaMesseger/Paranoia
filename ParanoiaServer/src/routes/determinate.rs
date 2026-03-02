@@ -1,20 +1,20 @@
-use std::sync::Arc;
+use crate::{crypto, AppState};
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
-use crate::{AppState, crypto};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct DeterminateRequest {
-    sender:  String,
-    recver:  String,
-    cut_seq: u64,
-    sig:     String, // подпись от sender+recver+cut_seq
+    pub sender: String,
+    pub recver: String,
+    pub cut_seq: u64,
+    pub sig: String, // подпись от sender+recver+cut_seq
 }
 
 #[derive(Serialize)]
 pub struct ApiResponse {
-    success: bool,
-    message: String,
+    pub success: bool,
+    pub message: String,
 }
 
 pub async fn handle(
@@ -29,7 +29,10 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
 
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
-        Err(_) => { m.determinate_fail.inc(); return fail("Bad sig encoding".into()); }
+        Err(_) => {
+            m.determinate_fail.inc();
+            return fail("Bad sig encoding".into());
+        }
     };
 
     // Удалить может любой участник диалога — проверяем обоих
@@ -39,7 +42,10 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
         let r = cfg.user_pubkey_bytes(&req.recver);
         match (s, r) {
             (Some(s), Some(r)) => (s, r),
-            _ => { m.determinate_fail.inc(); return fail("One user in pair not registered".into()); }
+            _ => {
+                m.determinate_fail.inc();
+                return fail("One user in pair not registered".into());
+            }
         }
     };
 
@@ -49,7 +55,11 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
 
     if !valid {
         m.determinate_fail.inc();
-        dbg!("Invalid determinate signature for dialogue {}<->{}", req.sender, req.recver);
+        dbg!(
+            "Invalid determinate signature for dialogue {}<->{}",
+            req.sender,
+            req.recver
+        );
         return fail("Invalid signature".into());
     }
 
@@ -57,12 +67,30 @@ async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiRes
     match state.store.remove_until(&dialogue_id, req.cut_seq) {
         Ok(_) => {
             m.determinate_success.inc();
-            dbg!("Dialogue {}<->{}: removed up to seq {}", req.sender, req.recver, req.cut_seq);
+            dbg!(
+                "Dialogue {}<->{}: removed up to seq {}",
+                req.sender,
+                req.recver,
+                req.cut_seq
+            );
             ok("OK".into())
         }
-        Err(e) => { m.determinate_fail.inc(); fail(format!("{e}")) }
+        Err(e) => {
+            m.determinate_fail.inc();
+            fail(format!("{e}"))
+        }
     }
 }
 
-fn ok(msg: String)   -> ApiResponse { ApiResponse { success: true,  message: msg } }
-fn fail(msg: String) -> ApiResponse { ApiResponse { success: false, message: msg } }
+fn ok(msg: String) -> ApiResponse {
+    ApiResponse {
+        success: true,
+        message: msg,
+    }
+}
+fn fail(msg: String) -> ApiResponse {
+    ApiResponse {
+        success: false,
+        message: msg,
+    }
+}

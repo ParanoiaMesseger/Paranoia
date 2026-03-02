@@ -1,41 +1,61 @@
-use std::sync::Arc;
+use crate::{crypto, AppState};
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::sync::Arc;
 use tracing::warn;
-use crate::{AppState, crypto};
 
 #[derive(Deserialize)]
 pub struct PushRequest {
-    sender:  String,
-    recver:  String,
-    seq:     u64,
-    payload: String, // base64
-    sig:     String, // base64, 64 bytes — подпись от sender+recver+seq+payload(base64)
+    pub(crate) sender: String,
+    pub(crate) recver: String,
+    pub(crate) seq: u64,
+    pub(crate) payload: String, // base64
+    pub(crate) sig: String,     // base64, 64 bytes — подпись от sender+recver+seq+payload(base64)
 }
 
 #[derive(Serialize)]
 pub struct ApiResponse {
-    success: bool,
-    message: String,
+    pub(crate) success: bool,
+    pub(crate) message: String,
 }
 
-pub async fn handle(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<PushRequest>,
-) -> Json<ApiResponse> {
-    Json(do_push(state, req).await)
+pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
+    // Cover → Core
+    let req = match state.cover.unwrap_push(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            state.metrics.push_fail.inc();
+            return Json(json!({
+                "ok": false,
+                "status": "error",
+                "message": format!("Bad cover: {e}"),
+            }));
+        }
+    };
+
+    // state по ссылке, не перемещаем
+    let core_resp = do_push(&state, req).await;
+    let wrapped = state.cover.wrap_push_response(&core_resp);
+    Json(wrapped)
 }
 
-async fn do_push(state: Arc<AppState>, req: PushRequest) -> ApiResponse {
+async fn do_push(state: &Arc<AppState>, req: PushRequest) -> ApiResponse {
     let m = &state.metrics;
 
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
-        Err(_) => { m.push_fail.inc(); return fail("Bad sig encoding".into()); }
+        Err(_) => {
+            m.push_fail.inc();
+            return fail("Bad sig encoding".into());
+        }
     };
     let payload_bytes = match crypto::decode_b64(&req.payload) {
         Ok(v) => v,
-        Err(_) => { m.push_fail.inc(); return fail("Bad payload encoding".into()); }
+        Err(_) => {
+            m.push_fail.inc();
+            return fail("Bad payload encoding".into());
+        }
     };
 
     // Проверяем регистрацию sender и recver
@@ -47,7 +67,10 @@ async fn do_push(state: Arc<AppState>, req: PushRequest) -> ApiResponse {
         }
         match cfg.user_pubkey_bytes(&req.sender) {
             Some(k) => k,
-            None => { m.push_fail.inc(); return fail("One user in pair not registered".into()); }
+            None => {
+                m.push_fail.inc();
+                return fail("One user in pair not registered".into());
+            }
         }
     };
 
@@ -61,10 +84,26 @@ async fn do_push(state: Arc<AppState>, req: PushRequest) -> ApiResponse {
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
     match state.store.push(&dialogue_id, req.seq, &payload_bytes) {
-        Ok(_)  => { m.push_success.inc(); ok("OK".into()) }
-        Err(e) => { m.push_fail.inc(); fail(format!("{e}")) }
+        Ok(_) => {
+            m.push_success.inc();
+            ok("OK".into())
+        }
+        Err(e) => {
+            m.push_fail.inc();
+            fail(format!("{e}"))
+        }
     }
 }
 
-fn ok(msg: String)   -> ApiResponse { ApiResponse { success: true,  message: msg } }
-fn fail(msg: String) -> ApiResponse { ApiResponse { success: false, message: msg } }
+fn ok(msg: String) -> ApiResponse {
+    ApiResponse {
+        success: true,
+        message: msg,
+    }
+}
+fn fail(msg: String) -> ApiResponse {
+    ApiResponse {
+        success: false,
+        message: msg,
+    }
+}

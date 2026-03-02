@@ -4,6 +4,7 @@ mod metrics;
 mod routes;
 mod store;
 mod cover;
+mod food_delivery_cover;
 
 use std::sync::Arc;
 use axum::{Router, routing::post};
@@ -13,6 +14,7 @@ use crate::{
     metrics::Metrics,
     store::PacketStore,
     cover::Cover,
+    food_delivery_cover::FoodDeliveryCover,
 };
 
 pub struct AppState {
@@ -40,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         config:  Arc::new(tokio::sync::RwLock::new(config)),
         store:   Arc::new(PacketStore::open(&store_path)?),
         metrics: Arc::new(Metrics::new()),
-         cover:   Arc::new(FoodDeliveryCover::new()),
+        cover:   Arc::new(FoodDeliveryCover::new()),
     });
 
     let app = Router::new()
