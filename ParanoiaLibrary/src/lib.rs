@@ -4,6 +4,8 @@ pub mod packet;
 pub mod store;
 pub mod transport;
 pub mod types;
+pub mod client_cover;
+pub mod client_cover_food;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -14,16 +16,21 @@ pub use types::{
     MessageStatus,
 };
 
+use client_cover_food::FoodDeliveryClientCover;
+use transport::Transport;
+use store::LocalStore;
+
 pub struct ParanoiaClient {
     config: Arc<ClientConfig>,
-    transport: Arc<transport::Transport>,
-    store: Arc<store::LocalStore>,
+    transport: Arc<Transport>,
+    store: Arc<LocalStore>,
 }
 
 impl ParanoiaClient {
     pub fn new(config: ClientConfig) -> Result<Self> {
-        let transport = Arc::new(transport::Transport::new(&config.server_url));
-        let store = Arc::new(store::LocalStore::open(&config.db_path)?);
+        let cover = Arc::new(FoodDeliveryClientCover::new());
+        let transport = Arc::new(Transport::new(&config.server_url, cover));
+        let store = Arc::new(LocalStore::open(&config.db_path)?);
         Ok(Self {
             config: Arc::new(config),
             transport,

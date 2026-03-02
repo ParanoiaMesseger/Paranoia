@@ -8,8 +8,9 @@ name = "paranoia"
 path = "src/main.rs"
 
 [profile.release]
+opt-level = 3
 strip = "symbols"
-lto = true
+lto = "fat"
 codegen-units = 1
 
 [features]
