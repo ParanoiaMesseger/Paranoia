@@ -5,6 +5,7 @@ import { ConnectScreen } from "connect.slint";
 import { RegisterScreen } from "register.slint";
 import { LoginScreen } from "login.slint";
 import { MainTabs } from "main_tabs.slint";
+import { HeaderWithBack } from "header.slint";
 
 export enum Screen {
     Hello,
@@ -22,21 +23,25 @@ export component MainWindow inherits Window {
 
     in-out property <Screen> current-screen: Screen.Hello;
 
+    /// Навигация со стеком
+    callback navigate_to(Screen);
+    callback go_back(); 
+    /// Навигация
+
     callback start-install(string, string, string, string, string);
     callback client_login(string, string);
 
     VerticalBox {
         padding: 16px;
         spacing: 8px;
+        HeaderWithBack {
+            back => go_back();
+        }
 
         if root.current-screen == Screen.Hello:
             HelloScreen {
-            connect => {
-                root.current-screen = Screen.Connect;
-            }
-            install => {
-                root.current-screen = Screen.Install;
-            }
+            connect => navigate_to(Screen.Connect);
+            install => navigate_to(Screen.Install);
         }
 
         if root.current-screen == Screen.Install:
@@ -48,19 +53,13 @@ export component MainWindow inherits Window {
 
         if root.current-screen == Screen.Connect:
             ConnectScreen {
-            admin => {
-                root.current-screen = Screen.Login;
-            }
-            client => {
-                root.current-screen = Screen.Register;
-            }
+            admin => navigate_to(Screen.Login);
+            client => navigate_to(Screen.Register);
         }
 
         if root.current-screen == Screen.Register:
             RegisterScreen {
-            done => {
-                root.current-screen = Screen.Login;
-            }
+            done => navigate_to(Screen.Login);
         }
 
         if root.current-screen == Screen.Login:

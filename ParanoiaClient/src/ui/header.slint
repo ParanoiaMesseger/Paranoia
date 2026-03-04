@@ -1,0 +1,24 @@
+import { HorizontalBox } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+
+export component HeaderWithBack inherits HorizontalBox {
+    in property <string> title: "Paranoia Client";
+    in property <bool> show-back: true;
+    
+    callback back();
+
+    spacing: 8px;
+
+    if show-back: Button {
+        text: "<-";
+        clicked => {
+            root.back();
+        }
+    }
+
+    Text {
+        font-size: 20px;
+        text: root.title;
+        vertical-alignment: center;
+    }
+}
