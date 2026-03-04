@@ -1,22 +1,24 @@
-import { VerticalBox, Button, Text } from "std-widgets.slint";
+import { VerticalBox, Button } from "std-widgets.slint";
 
 export component RegisterScreen inherits VerticalBox {
 
     in property <string> pubkey;
     callback done();
 
+    min-width: 640px;
+    min-height: 960px;
     spacing: 12px;
 
     Text { text: "Регистрация"; font-size: 20px; }
 
     Text {
         text: "Передайте администратору этот ключ:";
-        wrap: word;
+        wrap: word-wrap;
     }
 
     Text {
         text: root.pubkey;
-        wrap: word;
+        wrap: word-wrap;
         font-size: 12px;
     }
 

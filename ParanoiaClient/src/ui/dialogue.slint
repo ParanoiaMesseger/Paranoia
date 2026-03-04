@@ -1,28 +1,44 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, Text } from "std-widgets.slint";
+import {
+    VerticalBox,
+    HorizontalBox,
+    Button,
+    LineEdit,
+} from "std-widgets.slint";
 
 export component DialogueView inherits VerticalBox {
+    callback send(string);
 
-    in property <string> input-text;
-    callback send(string text);
-
-    spacing: 8px;
+    spacing: 5px;  
+    padding: 0;
 
     VerticalBox {
-        height: 550px;
-        Text { text: "Messages area"; }
+        min-width: 640px;
+        min-height: 800px;
+
+        Text {
+            text: "Messages area";
+        }
     }
 
-    HorizontalBox {
-        spacing: 4px;
+    Rectangle {
+        border-color: #ffffff;
+        HorizontalBox {
+            padding: 0;
+            spacing: 0px;
 
-        LineEdit {
-            placeholder-text: "Введите сообщение";
-            text <=> root.input-text;
-        }
+            input_text_edit := LineEdit {
+                opacity: 100;
+                placeholder-text: "Введите сообщение";
+            }
 
-        Button {
-            text: "Send";
-            clicked => root.send(root.input-text);
+            Button {
+                icon: @image-url("../icons/send.svg");
+                icon-size: 24px;
+                clicked => {
+                    debug("Text edited: ", input_text_edit.text);
+                    root.send(input_text_edit.text);
+                }
+            }
         }
     }
 }

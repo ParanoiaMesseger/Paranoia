@@ -1,11 +1,12 @@
-import { VerticalBox, Button, Text } from "std-widgets.slint";
+import { VerticalBox, Button} from "std-widgets.slint";
 
 export component HelloScreen inherits VerticalBox {
     callback connect();
     callback install();
 
     spacing: 20px;
-
+    min-width: 640px;
+    min-height: 960px;
     Text {
         text: "Paranoia";
         font-size: 24px;

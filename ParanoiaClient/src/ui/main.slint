@@ -1,10 +1,10 @@
 import { VerticalBox } from "std-widgets.slint";
-import "./hello.slint";
-import "./install_server.slint";
-import "./connect.slint";
-import "./register.slint";
-import "./login.slint";
-import "./main_tabs.slint";
+import { HelloScreen } from "hello.slint";
+import { InstallServerScreen } from "install_server.slint";
+import { ConnectScreen } from "connect.slint";
+import { RegisterScreen } from "register.slint";
+import { LoginScreen } from "login.slint";
+import { MainTabs } from "main_tabs.slint";
 
 export enum Screen {
     Hello,
@@ -16,53 +16,58 @@ export enum Screen {
 }
 
 export component MainWindow inherits Window {
-    width: 420px;
-    height: 720px;
+    min-width: 640px;
+    min-height: 960px;
     title: "Paranoia";
 
     in-out property <Screen> current-screen: Screen.Hello;
 
-    callback start-install(string domain, string ip, string user, string pass, int port);
-    callback client_login(string server, string key);
+    callback start-install(string, string, string, string, string);
+    callback client_login(string, string);
 
     VerticalBox {
         padding: 16px;
         spacing: 8px;
 
-        if (root.current-screen == Screen.Hello) {
+        if root.current-screen == Screen.Hello:
             HelloScreen {
-                connect => root.current-screen = Screen.Connect;
-                install => root.current-screen = Screen.Install;
+            connect => {
+                root.current-screen = Screen.Connect;
+            }
+            install => {
+                root.current-screen = Screen.Install;
             }
         }
 
-        if (root.current-screen == Screen.Install) {
+        if root.current-screen == Screen.Install:
             InstallServerScreen {
-                start-install => root.start-install(domain, ip, user, pass, port);
+            start-install(domain, ip, user, pass, port) => {
+                root.start-install(domain, ip, user, pass, port);
             }
         }
 
-        if (root.current-screen == Screen.Connect) {
+        if root.current-screen == Screen.Connect:
             ConnectScreen {
-                admin => root.current-screen = Screen.Login;
-                client => root.current-screen = Screen.Register;
+            admin => {
+                root.current-screen = Screen.Login;
+            }
+            client => {
+                root.current-screen = Screen.Register;
             }
         }
 
-        if (root.current-screen == Screen.Register) {
+        if root.current-screen == Screen.Register:
             RegisterScreen {
-                done => root.current-screen = Screen.Login;
+            done => {
+                root.current-screen = Screen.Login;
             }
         }
 
-        if (root.current-screen == Screen.Login) {
+        if root.current-screen == Screen.Login:
             LoginScreen {
-                login => root.client_login(server, key);
-            }
+            login(server, key) => root.client_login(server, key);
         }
 
-        if (root.current-screen == Screen.Main) {
-            MainTabs { }
-        }
+        if (root.current-screen == Screen.Main): MainTabs { }
     }
 }

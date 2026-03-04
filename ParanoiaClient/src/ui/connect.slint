@@ -1,13 +1,18 @@
-import { VerticalBox, Button, Text } from "std-widgets.slint";
+import { VerticalBox, Button } from "std-widgets.slint";
 
 export component ConnectScreen inherits VerticalBox {
 
     callback admin();
     callback client();
-
+    min-width: 640px;
+    min-height: 960px;
+    
     spacing: 12px;
 
-    Text { text: "Подключиться"; font-size: 20px; }
+    Text {
+        text: "Подключиться";
+        font-size: 20px;
+    }
 
     Button {
         text: "Админ";

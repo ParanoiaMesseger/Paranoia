@@ -1,30 +1,61 @@
-import { VerticalBox, LineEdit, Button, ProgressIndicator, Text } from "std-widgets.slint";
+import {
+    VerticalBox,
+    LineEdit,
+    Button,
+    ProgressIndicator,
+} from "std-widgets.slint";
 
 export component InstallServerScreen inherits VerticalBox {
-
-    in property <string> domain;
-    in property <string> ip;
-    in property <string> user;
-    in property <string> pass;
-    in property <int> port: 1455;
-
     in property <float> progress: 0.0;
 
-    callback start-install(string domain, string ip, string user, string pass, int port);
-
+    callback start-install(string, string, string, string, string);
+    min-width: 640px;
+    min-height: 960px;
     spacing: 8px;
 
-    Text { text: "Установка сервера"; font-size: 20px; }
+    Text {
+        text: "Установка сервера";
+        font-size: 20px;
+    }
 
-    LineEdit { placeholder-text: "Домен"; text <=> root.domain; }
-    LineEdit { placeholder-text: "IP"; text <=> root.ip; }
-    LineEdit { placeholder-text: "Username"; text <=> root.user; }
-    LineEdit { placeholder-text: "Password"; echo-mode: password; text <=> root.pass; }
-    LineEdit { placeholder-text: "Port"; text: root.port; }
+    inputBox := VerticalBox {
+        property <bool> input-enabled: true;
 
-    Button {
-        text: "Установить";
-        clicked => root.start-install(root.domain, root.ip, root.user, root.pass, root.port);
+        domain := LineEdit {
+            enabled: input-enabled;
+            placeholder-text: "Домен";
+        }
+
+        ip := LineEdit {
+            enabled: input-enabled;
+            placeholder-text: "IP";
+        }
+
+        user := LineEdit {
+            enabled: input-enabled;
+            placeholder-text: "Username";
+        }
+
+        pass := LineEdit {
+            enabled: input-enabled;
+            placeholder-text: "Password";
+            input-type: password;
+        }
+
+        port := LineEdit {
+            enabled: input-enabled;
+            placeholder-text: "Port";
+            input-type: decimal;
+            text: "1455";
+        }
+
+        install := Button {
+            text: "Установить";
+            clicked => {
+                root.start-install(domain.text, ip.text, user.text, pass.text, port.text);
+                inputBox.input-enabled = false;
+            }
+        }
     }
 
     ProgressIndicator {
