@@ -7,6 +7,7 @@ pub mod packet;
 pub mod store;
 pub mod transport;
 pub mod types;
+pub mod ffi;
 
 use anyhow::Result;
 use std::sync::Arc;

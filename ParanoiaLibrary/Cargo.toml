@@ -12,6 +12,7 @@ codegen-units = 1
 [lib]
 name = "paranoia_lib"
 path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

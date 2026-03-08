@@ -1,6 +1,6 @@
 echo GetCert
 sudo -n true
-
+sudo mkdir -p /var/www/certbot
 sudo cat > /etc/nginx/conf.d/paranoia.conf << 'EOF'
 server {
     listen 80;

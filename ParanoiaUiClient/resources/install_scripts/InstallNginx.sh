@@ -1,5 +1,5 @@
 echo "Установка nginx"
 sudo -n true
 sudo apt update
-sudo apt install nginx
+sudo apt install -y nginx certbot
 sudo service nginx restart

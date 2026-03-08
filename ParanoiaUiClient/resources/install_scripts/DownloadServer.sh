@@ -72,7 +72,7 @@ if [ "$HTTP_CODE" != "200" ]; then
 fi
 
 # --- Установка ---
-chmod +x "$TMP_FILE"
+sudo chmod +x "$TMP_FILE"
 
 if [ -w "$INSTALL_DIR" ]; then
     mv "$TMP_FILE" "${INSTALL_DIR}/${BINARY_NAME}"

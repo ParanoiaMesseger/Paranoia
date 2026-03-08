@@ -61,6 +61,7 @@ private slots:
     void on_scriptError(const QString &reason);
 
 private:
+    std::pair<QString, QString> genKayPair();
     void setStep(Step step, StepStatus status);
 
     Step currentStep = StepCount;
@@ -70,8 +71,8 @@ private:
     QString m_ip;
     QString m_username;
     QString m_password;
-    
-    QString public_admin_key = "empty key";
-    int m_port               = 1455;
-    bool m_running           = false;
+    QString private_admin_key = "private key";
+    QString public_admin_key  = "public key";
+    int m_port                = 1455;
+    bool m_running            = false;
 };

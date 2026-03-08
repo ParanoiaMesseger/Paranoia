@@ -1,5 +1,6 @@
 #include "ClientSSH.hpp"
 
+#include <iostream>
 #include <libssh2.h>
 #include <qlogging.h>
 #include <sys/socket.h>
@@ -173,6 +174,8 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
 
 void SshWorker::runScript(QByteArray scriptContent, const QString &localScriptPath)
 {
+    std::cout << "RUN>" << scriptContent.toStdString();
+    std::cout.flush();
     if (!connected_ || !session_) ERR_SCRIPT("Нет активного SSH-соединения");
 
     auto *sess = static_cast<LIBSSH2_SESSION *>(session_);
@@ -233,6 +236,8 @@ void SshWorker::runScript(QByteArray scriptContent, const QString &localScriptPa
             continue;
         }
         if (rc <= 0) break;
+        std::cout << "$>" << QString::fromUtf8(buf, rc).toStdString();
+        std::cout.flush();
         emit scriptOutput(QString::fromUtf8(buf, rc));
     }
 

@@ -1,14 +1,14 @@
 #include "InstallServerBackend.h"
 #include "ClientSSH.hpp"
 #include <QDebug>
-#include <cstdint>
 #include <unistd.h>
 #include <QFile>
 #include <QFileInfo>
+#include "adminStorage.hpp"
+#include "paranoia_lib.h"
 
 InstallServerBackend::InstallServerBackend(QObject *parent) : QObject{parent}
 {
-
     connect(&ssh, &ClientSSH::connected, this, &InstallServerBackend::on_connected);
     connect(&ssh, &ClientSSH::disconnected, this, &InstallServerBackend::on_disconnected);
     connect(&ssh, &ClientSSH::connectionError, this, &InstallServerBackend::on_connectionError);
@@ -17,21 +17,6 @@ InstallServerBackend::InstallServerBackend(QObject *parent) : QObject{parent}
     connect(&ssh, &ClientSSH::scriptFinished, this, &InstallServerBackend::on_scriptFinished);
     connect(&ssh, &ClientSSH::scriptError, this, &InstallServerBackend::on_scriptError);
 }
-
-/*
-
-AdminKeys                                           "Генерация ключей администратора",
-ConnectSSH                                          "Подключение по SSH",
-ssh.runScript(":/CreateConfig.sh")         "Создание /opt/Paranoia и конфигурации",
-ssh.runScript(":/InstallNginx.sh")                  "Установка nginx",
-ssh.runScript(":/GetCert.sh")                      "Получение TLS-сертификата",
-ssh.runScript(":/ConfigureNginx.sh")        "Настройка nginx → Paranoia",
-ssh.runScript(":/DownloadServer.sh")         "Загрузка paranoia-server",
-ssh.runScript(":/SystemdService.sh")        "Регистрация systemd-сервиса",
-ssh.runScript(":/StartServer.sh")                     "Запуск сервера",
-CheckConnection                                     "Проверка соединения",
-AddServerInList                                     "Добавление сервера в список"
-*/
 
 void InstallServerBackend::install(const QString &domain, const QString &ip, const QString &username,
                                    const QString &password, int port)
@@ -48,10 +33,16 @@ void InstallServerBackend::install(const QString &domain, const QString &ip, con
     // Сброс всех шагов в Pending
     for (int i = 0; i < StepCount; ++i) setStep(static_cast<Step>(i), Pending);
 
+    setStep(Step::StepGenerateKeys, Running);
+    auto [private_, public_] = genKayPair();
+    private_admin_key        = private_;
+    public_admin_key         = public_;
+    setStep(Step::StepGenerateKeys, Done);
+
     setStep(Step::StepSshConnect, Running);
     ssh.connectToHost({
         .host      = ip,
-        .port      = (uint16_t)port,
+        .port      = 22,
         .username  = username,
         .password  = password,
         .timeoutMs = 4000,
@@ -100,13 +91,35 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
     setStep(currentStep, Running);
     switch (currentStep) {
         case StepInstallNginx: ssh.runScript(":/InstallNginx.sh"); break;
-        case StepGetCert: ssh.runScript(":/GetCert.sh"); break;
-        case StepConfigureNginx: ssh.runScript(":/ConfigureNginx.sh"); break;
+        case StepGetCert: {
+            QByteArray scriptContent = ssh.getScriptContent(":/GetCert.sh");
+            scriptContent.replace(QByteArray("{DOMAIN}"), m_domain.toUtf8());
+            ssh.runScript(scriptContent, ":/GetCert.sh");
+        } break;
+        case StepConfigureNginx: {
+            QByteArray scriptContent = ssh.getScriptContent(":/ConfigureNginx.sh");
+            scriptContent.replace(QByteArray("{DOMAIN}"), m_domain.toUtf8());
+            scriptContent.replace(QByteArray("{PARANOIA_PORT}"), QString::number(m_port).toUtf8());
+            ssh.runScript(scriptContent, ":/ConfigureNginx.sh");
+        } break;
         case StepDownloadServer: ssh.runScript(":/DownloadServer.sh"); break;
-        case StepSystemdService: ssh.runScript(":/SystemdService.sh"); break;
+        case StepSystemdService: {
+            QByteArray scriptContent = ssh.getScriptContent(":/SystemdService.sh");
+            scriptContent.replace(QByteArray("{DOMAIN}"), m_domain.toUtf8());
+            ssh.runScript(scriptContent, ":/SystemdService.sh");
+        } break;
         case StepStartServer: ssh.runScript(":/StartServer.sh"); break;
-        case StepVerifyServer: break;
-        case StepRegisterServer: break;
+        case StepVerifyServer: {
+            admin::Admin{m_domain, private_admin_key}.regUser("admin", public_admin_key).then([this](bool res) {
+                if (res) {
+                    on_scriptFinished(0);
+                    admin::Admin::admins.push_back(admin::Admin{m_domain, private_admin_key});
+                    admin::Admin::saveAdmins();
+                } else
+                    installError(currentStep, "Error on check server.");
+            });
+        } break;
+        case StepRegisterServer: emit installFinished(m_domain); break;
         case StepCreateConfig:
         case StepSshConnect:
         case StepGenerateKeys:
@@ -115,3 +128,17 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
 }
 
 void InstallServerBackend::on_scriptError(const QString &reason) { installError(currentStep, reason); }
+
+std::pair<QString, QString> InstallServerBackend::genKayPair()
+{
+    char *secret = nullptr;
+    char *pubkey = nullptr;
+    paranoia_generate_keypair(&secret, &pubkey);
+    QString Secret = QString::fromUtf8(secret);
+    QString Pubkey = QString::fromUtf8(pubkey);
+    paranoia_free_string(secret);
+    paranoia_free_string(pubkey);
+    secret = nullptr;
+    pubkey = nullptr;
+    return {Secret, Pubkey};
+}

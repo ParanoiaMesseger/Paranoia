@@ -30,6 +30,8 @@ qt_add_qml_module(appParanoiaUiClient
     src/InstallServerBackend.cpp
     src/ClientSSH.hpp
     src/ClientSSH.cpp
+    src/adminStorage.hpp
+    src/adminStorage.cpp
     QML_FILES
     ui/Main.qml
     ui/Theme.qml
@@ -62,6 +64,7 @@ set_target_properties(appParanoiaUiClient PROPERTIES
 
 target_link_libraries(appParanoiaUiClient
     PRIVATE Qt6::Quick
+    Qt6::Concurrent
 )
 
 include(GNUInstallDirs)
@@ -72,3 +75,5 @@ install(TARGETS appParanoiaUiClient
 )
 include("${CMAKE_SOURCE_DIR}/deps/Libssh2.cmake")
 setup_libssh2(appParanoiaUiClient)
+include("${CMAKE_SOURCE_DIR}/deps/ParanoiaLib.cmake")
+setup_paranoia_lib(appParanoiaUiClient)
