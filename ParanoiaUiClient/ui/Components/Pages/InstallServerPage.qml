@@ -25,7 +25,7 @@ Rectangle {
         onInstallError: function(step, message) {
             root.setStepStatus(step, InstallServerBackend.Error)
             root.isInstalling = false
-            // можно завести errorText и показывать его
+            root.errorText = message
         }
     }
 
@@ -46,7 +46,7 @@ Rectangle {
 
     property var stepStatuses: Array(steps.length).fill(0)
     property bool isInstalling: false
-
+    property string errorText: ""
     ColumnLayout {
         anchors.fill:        parent
         spacing:             0
@@ -151,6 +151,16 @@ Rectangle {
                     }
                 }
 
+                // ── Ошибка ───────────────────────────────────
+                Text {
+                    Layout.fillWidth: true
+                    visible:          root.errorText.length > 0
+                    text:             root.errorText
+                    color:            Theme.error          // или Theme.accent / "#e05c5c"
+                    font.pixelSize:   13
+                    wrapMode:         Text.WordWrap
+                }
+
                 // ── Кнопка ───────────────────────────────────
                 ParaButton {
                     Layout.fillWidth: true
@@ -158,6 +168,7 @@ Rectangle {
                     enabled:          !root.isInstalling
                     onClicked: {
                         root.isInstalling = true
+                        root.errorText = ""
                         // Сигнал для C++/Python backend:
                         backend.install(domainInput.text, ipInput.text,
                              usernameInput.text, passwordInput.text,

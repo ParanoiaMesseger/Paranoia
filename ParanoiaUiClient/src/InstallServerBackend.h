@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ClientSSH.hpp"
 #include <QObject>
 #include <QString>
 #include <QQmlEngine>
@@ -18,18 +19,18 @@ public:
 
     // ── Индексы шагов ────────────────────────────────────────────────────────
     enum Step {
-        StepGenerateKeys   = 0,
-        StepSshConnect     = 1,
-        StepCreateConfig   = 2,
-        StepInstallNginx   = 3,
-        StepGetCert        = 4,
-        StepConfigureNginx = 5,
-        StepDownloadServer = 6,
-        StepSystemdService = 7,
-        StepStartServer    = 8,
-        StepVerifyServer   = 9,
-        StepRegisterServer = 10,
-        StepCount          = 11
+        StepGenerateKeys   = 0,  /// Генерация ключей администратора
+        StepSshConnect     = 1,  /// Подключение по SSH
+        StepCreateConfig   = 2,  /// Создание /opt/Paranoia и конфигурации
+        StepInstallNginx   = 3,  /// Установка nginx
+        StepGetCert        = 4,  /// Получение TLS-сертификата
+        StepConfigureNginx = 5,  /// Настройка nginx → Paranoia
+        StepDownloadServer = 6,  /// Загрузка paranoia-server
+        StepSystemdService = 7,  /// Регистрация systemd-сервиса
+        StepStartServer    = 8,  /// Запуск сервера
+        StepVerifyServer   = 9,  /// Проверка соединения
+        StepRegisterServer = 10, /// Добавление сервера в списо
+        StepCount          = 11  ///
     };
     Q_ENUM(Step)
 
@@ -50,13 +51,27 @@ signals:
     // ── Ошибка (шаг + человекочитаемое сообщение) ───────────────────────────
     void installError(int step, const QString &message);
 
+private slots:
+    void on_connected();
+    void on_disconnected();
+    void on_connectionError(const QString &reason);
+    void on_scriptStarted(const QString &scriptPath);
+    void on_scriptOutput(const QString &text);
+    void on_scriptFinished(int exitCode);
+    void on_scriptError(const QString &reason);
+
 private:
     void setStep(Step step, StepStatus status);
 
+    Step currentStep = StepCount;
+
+    ClientSSH ssh;
     QString m_domain;
     QString m_ip;
     QString m_username;
     QString m_password;
-    int m_port     = 1455;
-    bool m_running = false;
+    
+    QString public_admin_key = "empty key";
+    int m_port               = 1455;
+    bool m_running           = false;
 };

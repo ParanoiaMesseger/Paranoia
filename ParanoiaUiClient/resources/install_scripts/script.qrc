@@ -1,0 +1,11 @@
+<RCC>
+    <qresource prefix="/">
+        <file>CreateConfig.sh</file>
+        <file>InstallNginx.sh</file>
+        <file>GetCert.sh</file>
+        <file>ConfigureNginx.sh</file>
+        <file>DownloadServer.sh</file>
+        <file>SystemdService.sh</file>
+        <file>StartServer.sh</file>
+    </qresource>
+</RCC>

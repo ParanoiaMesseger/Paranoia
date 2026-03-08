@@ -45,10 +45,10 @@ Rectangle {
 
         // ── TabBar ────────────────────────────────────────
         TabBar {
-            id:               tabBar
+            id: tabBar
             Layout.fillWidth: true
             background: Rectangle { color: Theme.bgSecondary }
-            currentIndex:     hasUserAccess ? 0 : 1
+            currentIndex: hasUserAccess ? 0 : 1
 
             Repeater {
                 model: {
@@ -60,26 +60,30 @@ Rectangle {
                 }
 
                 TabButton {
+                    required property string modelData
+                    required property int    index
+
                     text: modelData
+
                     background: Rectangle {
-                        color: TabBar.tabBar.currentIndex === index
+                        color: tabBar.currentIndex === index
                                ? Theme.bgPrimary : Theme.bgSecondary
                         Rectangle {
                             anchors.bottom: parent.bottom
-                            width:  parent.width; height: 2
-                            color:  TabBar.tabBar.currentIndex === index
-                                    ? Theme.accent : "transparent"
+                            width: parent.width; height: 2
+                            color: tabBar.currentIndex === index
+                                   ? Theme.accent : "transparent"
                         }
                     }
                     contentItem: Text {
-                        text:               parent.text
-                        color:              TabBar.tabBar.currentIndex === index
-                                            ? Theme.accent : Theme.textSecondary
-                        font.pixelSize:     Theme.fontMd
-                        font.family:        Theme.fontFamily
-                        font.weight:        Font.Medium
+                        text:                parent.text
+                        color:               tabBar.currentIndex === index
+                                              ? Theme.accent : Theme.textSecondary
+                        font.pixelSize:      Theme.fontMd
+                        font.family:         Theme.fontFamily
+                        font.weight:         Font.Medium
                         horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment:  Text.AlignVCenter
+                        verticalAlignment:   Text.AlignVCenter
                     }
                 }
             }
