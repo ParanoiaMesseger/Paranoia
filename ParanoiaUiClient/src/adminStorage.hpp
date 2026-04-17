@@ -1,6 +1,8 @@
+#pragma once
 #include <QString>
 #include <vector>
 #include <QFuture>
+#include <QFile>
 
 namespace admin
 {

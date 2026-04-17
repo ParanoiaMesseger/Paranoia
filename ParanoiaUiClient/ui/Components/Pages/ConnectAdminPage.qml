@@ -9,8 +9,20 @@ Rectangle {
     signal back()
     signal connected()
 
-    property bool isConnecting: false
-    property string errorMsg:   ""
+    property bool   isConnecting: false
+    property string errorMsg:     ""
+
+    Connections {
+        target: Backend
+        function onAdminConnected() {
+            root.isConnecting = false
+            root.connected()
+        }
+        function onConnectError(msg) {
+            root.isConnecting = false
+            root.errorMsg     = msg
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -26,7 +38,8 @@ Rectangle {
 
         ColumnLayout {
             Layout.alignment:   Qt.AlignHCenter
-            Layout.margins:     24
+            Layout.leftMargin:  24
+            Layout.rightMargin: 24
             width:              320
             spacing:            16
 
@@ -48,17 +61,21 @@ Rectangle {
             // Ошибка
             Rectangle {
                 Layout.fillWidth: true
-                height:           36
+                height:           42
                 radius:           Theme.radiusSm
                 color:            "#2A1A1C"
                 visible:          root.errorMsg !== ""
 
                 Text {
                     anchors.centerIn: parent
+                    anchors.margins:  12
                     text:             root.errorMsg
                     color:            Theme.error
                     font.pixelSize:   Theme.fontSm
                     font.family:      Theme.fontFamily
+                    wrapMode:         Text.WordWrap
+                    width:            parent.width - 24
+                    horizontalAlignment: Text.AlignHCenter
                 }
             }
 
@@ -69,18 +86,19 @@ Rectangle {
                 text:             root.isConnecting ? "Подключение…" : "Войти"
                 enabled:          !root.isConnecting
                 onClicked: {
+                    let srv = endpointInput.text.trim()
+                    let key = privKeyInput.text.trim()
+                    if (srv === "" || key === "") {
+                        root.errorMsg = "Заполните все поля."
+                        return
+                    }
                     root.isConnecting = true
-                    root.errorMsg = ""
-                    // backend.connectAdmin(endpointInput.text, privKeyInput.text)
+                    root.errorMsg     = ""
+                    Backend.connectAdmin(srv, key)
                 }
             }
         }
 
         Item { Layout.fillHeight: true }
-    }
-
-    function onConnectError(msg) {
-        isConnecting = false
-        errorMsg = msg
     }
 }

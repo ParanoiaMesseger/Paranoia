@@ -7,21 +7,25 @@ Rectangle {
     id: root
     color: Theme.bgPrimary
 
-    property bool hasAdminAccess: false
-    property bool hasUserAccess:  true
+    property bool hasAdminAccess: Backend.hasAdminAccess
+    property bool hasUserAccess:  Backend.loggedIn
 
-    // ── Модель серверов (заглушка) ────────────────────────
-    ListModel {
-        id: serversModel
-        ListElement { serverName: "paranoia.example.com"; isAdmin: true }
-        ListElement { serverName: "chat.myserver.net";   isAdmin: false }
+    signal openChat(string peer)
+    signal addServer()
+    signal installNewServer()
+
+    Connections {
+        target: Backend
+        function onDialogsChanged()       { dialogsView.model = Backend.getDialogs() }
+        function onUserRegistered()       { regFeedback.text = "Пользователь зарегистрирован ✓"; registerUserPopup.close() }
+        function onRegisterUserError(msg) { regFeedback.text = msg }
     }
 
     ColumnLayout {
         anchors.fill: parent
         spacing:      0
 
-        // ── Заголовок главного экрана ─────────────────────
+        // ── Заголовок ─────────────────────────────────────
         Rectangle {
             Layout.fillWidth: true
             height:           56
@@ -29,8 +33,8 @@ Rectangle {
 
             Rectangle {
                 anchors.bottom: parent.bottom
-                width:  parent.width; height: 1
-                color:  Theme.separator
+                width: parent.width; height: 1
+                color: Theme.separator
             }
 
             Text {
@@ -43,21 +47,14 @@ Rectangle {
             }
         }
 
-        // ── TabBar ────────────────────────────────────────
+        // ── TabBar (always 3 fixed tabs) ──────────────────
         TabBar {
             id: tabBar
             Layout.fillWidth: true
             background: Rectangle { color: Theme.bgSecondary }
-            currentIndex: hasUserAccess ? 0 : 1
 
             Repeater {
-                model: {
-                    let tabs = []
-                    if (root.hasUserAccess)  tabs.push("User")
-                    if (root.hasAdminAccess) tabs.push("Admin")
-                    tabs.push("+")
-                    return tabs
-                }
+                model: ["Чаты", "Админ", "+"]
 
                 TabButton {
                     required property string modelData
@@ -99,173 +96,194 @@ Rectangle {
             Rectangle {
                 color: Theme.bgPrimary
 
+                // Not logged in message
+                Column {
+                    anchors.centerIn: parent
+                    spacing:          12
+                    visible: !Backend.loggedIn
+
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text:           "Войдите в аккаунт"
+                        color:          Theme.textSecondary
+                        font.pixelSize: Theme.fontMd
+                        font.family:    Theme.fontFamily
+                    }
+                    ParaButton {
+                        text:      "Подключиться"
+                        onClicked: root.addServer()
+                    }
+                }
+
                 ColumnLayout {
                     anchors.fill:    parent
                     anchors.margins: 0
                     spacing:         0
+                    visible: Backend.loggedIn
 
-                    // Дерево серверов
+                    // Server header
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height:           36
+                        color:            Theme.bgSecondary
+
+                        Row {
+                            anchors.fill:       parent
+                            anchors.leftMargin: 16
+                            spacing:            8
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text:  "🖥  " + Backend.server
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSm
+                                font.family:    Theme.fontFamily
+                                font.weight:    Font.Medium
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text:  "(" + Backend.username + ")"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontXs
+                                font.family:    Theme.fontFamily
+                            }
+                        }
+                    }
+
+                    // Dialogs list
                     ListView {
-                        id:               serverListView
+                        id:               dialogsView
                         Layout.fillWidth: true
                         Layout.fillHeight:true
-                        model:            serversModel
+                        model:            Backend.getDialogs()
                         clip:             true
 
-                        delegate: Column {
-                            width: parent.width
-                            spacing: 0
+                        ScrollBar.vertical: ScrollBar {}
 
-                            // ── Заголовок сервера ──────────
-                            Rectangle {
-                                width:  parent.width
-                                height: 48
-                                color:  serverHeaderArea.containsMouse
-                                        ? Theme.bgSecondary : "transparent"
+                        delegate: Rectangle {
+                            width:  ListView.view.width
+                            height: 60
+                            color:  dlgArea.containsMouse ? Theme.bgSecondary : "transparent"
 
-                                Row {
-                                    anchors.fill:        parent
-                                    anchors.leftMargin:  16
-                                    anchors.rightMargin: 16
-                                    spacing:             10
+                            Row {
+                                anchors.fill:        parent
+                                anchors.leftMargin:  16
+                                anchors.rightMargin: 16
+                                spacing:             12
+
+                                Rectangle {
+                                    width:  38; height: 38
+                                    radius: 19
+                                    color:  Theme.bgButton
+                                    anchors.verticalCenter: parent.verticalCenter
 
                                     Text {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text:  expanded ? "▾" : "▸"
-                                        color: Theme.textSecondary
-                                        font.pixelSize: Theme.fontSm
+                                        anchors.centerIn: parent
+                                        text:  modelData.peer.charAt(0).toUpperCase()
+                                        color: "#FFFFFF"
+                                        font.pixelSize: Theme.fontMd
+                                        font.weight:    Font.Bold
                                     }
+                                }
 
+                                Column {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 3
                                     Text {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text:  "🖥  " + serverName
-                                        color: Theme.textPrimary
+                                        text:           modelData.peer
+                                        color:          Theme.textPrimary
                                         font.pixelSize: Theme.fontMd
                                         font.family:    Theme.fontFamily
                                         font.weight:    Font.Medium
                                     }
-
-                                    Item { width: 1; height: 1; Layout.fillWidth: true }
-                                }
-
-                                MouseArea {
-                                    id:           serverHeaderArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    onClicked:    expanded = !expanded
+                                    Text {
+                                        text:           modelData.lastMsg || "Нет сообщений"
+                                        color:          Theme.textSecondary
+                                        font.pixelSize: Theme.fontSm
+                                        font.family:    Theme.fontFamily
+                                        elide:          Text.ElideRight
+                                        width:          dialogsView.width - 80
+                                    }
                                 }
                             }
 
-                            // ── Диалоги сервера ───────────
-                            property bool expanded: true
-                            property var dialogs: ListModel {
-                                ListElement { dialogName: "Alice"; lastMsg: "HI" }
+                            Rectangle {
+                                anchors.bottom: parent.bottom
+                                width: parent.width; height: 1
+                                color: Theme.separator
                             }
+
+                            MouseArea {
+                                id:           dlgArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked:    root.openChat(modelData.peer)
+                            }
+                        }
+
+                        // Empty state
+                        Item {
+                            anchors.fill: parent
+                            visible: dialogsView.count === 0
 
                             Column {
-                                visible: expanded
-                                width:   parent.width
-
-                                Repeater {
-                                    model: parent.parent.dialogs
-
-                                    Rectangle {
-                                        width:  serverListView.width
-                                        height: 56
-                                        color:  dialogArea.containsMouse
-                                                ? Theme.bgSecondary : "transparent"
-
-                                        Row {
-                                            anchors.fill:        parent
-                                            anchors.leftMargin:  42
-                                            anchors.rightMargin: 16
-                                            spacing:             12
-
-                                            // Аватар
-                                            Rectangle {
-                                                width:  36; height: 36
-                                                radius: 18
-                                                color:  Theme.bgButton
-                                                anchors.verticalCenter: parent.verticalCenter
-
-                                                Text {
-                                                    anchors.centerIn: parent
-                                                    text:  dialogName.charAt(0).toUpperCase()
-                                                    color: "#FFFFFF"
-                                                    font.pixelSize: Theme.fontMd
-                                                    font.weight: Font.Bold
-                                                }
-                                            }
-
-                                            Column {
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                spacing: 2
-                                                Text {
-                                                    text:           dialogName
-                                                    color:          Theme.textPrimary
-                                                    font.pixelSize: Theme.fontMd
-                                                    font.family:    Theme.fontFamily
-                                                    font.weight:    Font.Medium
-                                                }
-                                                Text {
-                                                    text:           lastMsg
-                                                    color:          Theme.textSecondary
-                                                    font.pixelSize: Theme.fontSm
-                                                    font.family:    Theme.fontFamily
-                                                }
-                                            }
-                                        }
-
-                                        MouseArea {
-                                            id:           dialogArea
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            onClicked: { /* открыть чат */ }
-                                        }
-                                    }
+                                anchors.centerIn: parent
+                                spacing: 8
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text:           "Нет диалогов"
+                                    color:          Theme.textSecondary
+                                    font.pixelSize: Theme.fontMd
+                                    font.family:    Theme.fontFamily
                                 }
-
-                                // Кнопка «+ Добавить диалог»
-                                Rectangle {
-                                    width:  serverListView.width
-                                    height: 44
-                                    color:  addDialogArea.containsMouse
-                                            ? Theme.bgSecondary : "transparent"
-
-                                    Row {
-                                        anchors.fill:       parent
-                                        anchors.leftMargin: 42
-                                        spacing:            10
-
-                                        Text {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            text:  "+"
-                                            color: Theme.accent
-                                            font.pixelSize: Theme.fontLg
-                                        }
-                                        Text {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            text:  "Добавить диалог"
-                                            color: Theme.accent
-                                            font.pixelSize: Theme.fontSm
-                                            font.family:    Theme.fontFamily
-                                        }
-                                    }
-
-                                    MouseArea {
-                                        id:           addDialogArea
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        onClicked:    addDialogPopup.open()
-                                    }
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text:           "Нажмите + для добавления"
+                                    color:          Theme.textHint
+                                    font.pixelSize: Theme.fontSm
+                                    font.family:    Theme.fontFamily
                                 }
                             }
+                        }
+                    }
 
-                            // Разделитель
-                            Rectangle {
-                                width:  parent.width; height: 1
-                                color:  Theme.separator
+                    // Add dialog button
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 48
+                        color: addArea.containsMouse ? Theme.bgSecondary : "transparent"
+
+                        Rectangle {
+                            anchors.top: parent.top
+                            width: parent.width; height: 1
+                            color: Theme.separator
+                        }
+
+                        Row {
+                            anchors.fill:       parent
+                            anchors.leftMargin: 16
+                            spacing:            10
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text:  "+"
+                                color: Theme.accent
+                                font.pixelSize: Theme.fontLg
                             }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text:  "Добавить диалог"
+                                color: Theme.accent
+                                font.pixelSize: Theme.fontSm
+                                font.family:    Theme.fontFamily
+                            }
+                        }
+
+                        MouseArea {
+                            id:           addArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked:    addDialogPopup.open()
                         }
                     }
                 }
@@ -274,11 +292,30 @@ Rectangle {
             // ── ADMIN tab ─────────────────────────────────
             Rectangle {
                 color: Theme.bgPrimary
-                visible: root.hasAdminAccess
+
+                // No admin access message
+                Column {
+                    anchors.centerIn: parent
+                    spacing: 12
+                    visible: !root.hasAdminAccess
+
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text:           "Нет прав администратора"
+                        color:          Theme.textSecondary
+                        font.pixelSize: Theme.fontMd
+                        font.family:    Theme.fontFamily
+                    }
+                    ParaButton {
+                        text:      "Войти как Админ"
+                        onClicked: root.addServer()
+                    }
+                }
 
                 ListView {
+                    visible: root.hasAdminAccess
                     anchors.fill: parent
-                    model:        serversModel
+                    model:        Backend.getAdminServers()
                     clip:         true
 
                     delegate: Rectangle {
@@ -295,26 +332,30 @@ Rectangle {
                                 Layout.fillWidth: true
                                 spacing:          4
                                 Text {
-                                    text:           serverName
+                                    text:           modelData.domain
                                     color:          Theme.textPrimary
                                     font.pixelSize: Theme.fontMd
                                     font.family:    Theme.fontFamily
                                     font.weight:    Font.Medium
+                                    elide:          Text.ElideRight
+                                    width:          parent.width
                                 }
                                 Text {
-                                    text:           isAdmin ? "Администратор" : "Клиент"
-                                    color:          isAdmin ? Theme.accent : Theme.textSecondary
+                                    text:           "Администратор"
+                                    color:          Theme.accent
                                     font.pixelSize: Theme.fontSm
                                     font.family:    Theme.fontFamily
                                 }
                             }
 
                             ParaButton {
-                                text:            "Регистрация юзера"
-                                implicitWidth:   160
-                                implicitHeight:  36
-                                visible:         isAdmin
-                                onClicked:       registerUserPopup.open()
+                                text:           "Зарегистрировать"
+                                implicitWidth:  140
+                                implicitHeight: 36
+                                onClicked: {
+                                    registerTargetDomain = modelData.domain
+                                    registerUserPopup.open()
+                                }
                             }
                         }
 
@@ -345,17 +386,19 @@ Rectangle {
                         font.weight:      Font.Medium
                     }
 
+                    Item { Layout.preferredHeight: 8 }
+
                     ParaButton {
                         Layout.fillWidth: true
                         text:             "Подключиться к серверу"
-                        onClicked: { /* stackView.push connectChoice */ }
+                        onClicked:        root.addServer()
                     }
 
                     ParaButton {
                         Layout.fillWidth: true
                         text:             "Установить свой сервер"
                         secondary:        true
-                        onClicked: { /* stackView.push installServer */ }
+                        onClicked:        root.installNewServer()
                     }
                 }
             }
@@ -377,6 +420,12 @@ Rectangle {
             border.color: Theme.border
         }
 
+        onOpened: {
+            newPeerInput.text    = ""
+            newSecretInput.text  = ""
+            addDialogError.text  = ""
+        }
+
         contentItem: ColumnLayout {
             spacing: 16
 
@@ -389,29 +438,68 @@ Rectangle {
                 font.weight:        Font.Medium
             }
 
-            ParaButton {
+            ParaInput {
+                id:              newPeerInput
                 Layout.fillWidth: true
-                text:             "Сканировать QR-код собеседника"
-                onClicked: { /* запустить QR-сканер */ }
+                label:           "Имя пользователя собеседника"
+                placeholder:     "username"
             }
 
-            ParaButton {
+            ParaInput {
+                id:              newSecretInput
                 Layout.fillWidth: true
-                text:             "Показать мой QR-код"
-                secondary:        true
-                onClicked: { /* показать свой QR */ }
+                label:           "Общий секрет (оба вводят одинаково)"
+                placeholder:     "секретная фраза…"
+                echoMode:        TextInput.Password
             }
 
-            ParaButton {
+            Text {
+                id: addDialogError
+                Layout.fillWidth:    true
+                color:               Theme.error
+                font.pixelSize:      Theme.fontSm
+                font.family:         Theme.fontFamily
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode:            Text.WordWrap
+                visible:             text.length > 0
+            }
+
+            RowLayout {
                 Layout.fillWidth: true
-                text:             "Отмена"
-                destructive:      true
-                onClicked:        addDialogPopup.close()
+                spacing:          12
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text:             "Добавить"
+                    onClicked: {
+                        let peer   = newPeerInput.text.trim()
+                        let secret = newSecretInput.text
+                        if (peer === "") {
+                            addDialogError.text = "Введите имя пользователя."
+                            return
+                        }
+                        if (secret.length < 4) {
+                            addDialogError.text = "Секрет слишком короткий."
+                            return
+                        }
+                        Backend.addDialog(peer, secret)
+                        addDialogPopup.close()
+                    }
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text:             "Отмена"
+                    secondary:        true
+                    onClicked:        addDialogPopup.close()
+                }
             }
         }
     }
 
     // ── Попап: регистрация пользователя (Admin) ───────────
+    property string registerTargetDomain: ""
+
     Popup {
         id:          registerUserPopup
         anchors.centerIn: Overlay.overlay
@@ -426,6 +514,12 @@ Rectangle {
             border.color: Theme.border
         }
 
+        onOpened: {
+            newUserNameInput.text   = ""
+            newUserPubKeyInput.text = ""
+            regFeedback.text        = ""
+        }
+
         contentItem: ColumnLayout {
             spacing: 16
 
@@ -438,6 +532,15 @@ Rectangle {
                 font.weight:        Font.Medium
             }
 
+            Text {
+                Layout.fillWidth:   true
+                text:               "Сервер: " + root.registerTargetDomain
+                color:              Theme.textSecondary
+                font.pixelSize:     Theme.fontSm
+                font.family:        Theme.fontFamily
+                elide:              Text.ElideRight
+            }
+
             ParaInput {
                 id:              newUserNameInput
                 Layout.fillWidth: true
@@ -448,15 +551,19 @@ Rectangle {
             ParaInput {
                 id:              newUserPubKeyInput
                 Layout.fillWidth: true
-                label:           "Публичный ключ пользователя (USER_PUB)"
-                placeholder:     "Вставьте ключ или отсканируйте QR…"
+                label:           "Публичный ключ пользователя"
+                placeholder:     "Вставьте ключ…"
             }
 
-            ParaButton {
-                Layout.fillWidth: true
-                text:             "Отсканировать QR пользователя"
-                secondary:        true
-                onClicked: { /* запустить QR-сканер → newUserPubKeyInput */ }
+            Text {
+                id: regFeedback
+                Layout.fillWidth:    true
+                color:               text.includes("✓") ? Theme.success : Theme.error
+                font.pixelSize:      Theme.fontSm
+                font.family:         Theme.fontFamily
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode:            Text.WordWrap
+                visible:             text.length > 0
             }
 
             RowLayout {
@@ -467,15 +574,20 @@ Rectangle {
                     Layout.fillWidth: true
                     text:             "Зарегистрировать"
                     onClicked: {
-                        // backend.registerUser(server, newUserNameInput.text,
-                        //                      newUserPubKeyInput.text)
-                        registerUserPopup.close()
+                        let user   = newUserNameInput.text.trim()
+                        let pubkey = newUserPubKeyInput.text.trim()
+                        if (user === "" || pubkey === "") {
+                            regFeedback.text = "Заполните все поля."
+                            return
+                        }
+                        regFeedback.text = ""
+                        Backend.registerUser(root.registerTargetDomain, user, pubkey)
                     }
                 }
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text:             "Отмена"
+                    text:             "Закрыть"
                     secondary:        true
                     onClicked:        registerUserPopup.close()
                 }

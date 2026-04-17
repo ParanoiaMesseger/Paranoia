@@ -4,10 +4,10 @@ project(ParanoiaUiClient VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-find_package(Qt6 REQUIRED COMPONENTS Quick)
+find_package(Qt6 REQUIRED COMPONENTS Quick Concurrent)
 
 set(CMAKE_AUTORCC ON)
-qt_standard_project_setup(REQUIRES 6.8)
+qt_standard_project_setup()
 
 qt_add_executable(appParanoiaUiClient
     resources/install_scripts/script.qrc    
@@ -25,6 +25,7 @@ set_source_files_properties(ui/Theme.qml
 
 qt_add_qml_module(appParanoiaUiClient
     URI ParanoiaUiClient
+    VERSION 1.0
     SOURCES
     src/InstallServerBackend.h
     src/InstallServerBackend.cpp
@@ -32,6 +33,8 @@ qt_add_qml_module(appParanoiaUiClient
     src/ClientSSH.cpp
     src/adminStorage.hpp
     src/adminStorage.cpp
+    src/ClientBackend.h
+    src/ClientBackend.cpp
     QML_FILES
     ui/Main.qml
     ui/Theme.qml
@@ -47,6 +50,7 @@ qt_add_qml_module(appParanoiaUiClient
     ui/Components/Pages/HelloPage.qml
     ui/Components/Pages/InstallServerPage.qml
     ui/Components/Pages/MainPage.qml
+    ui/Components/Pages/ChatPage.qml
 )
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.

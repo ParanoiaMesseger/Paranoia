@@ -11,9 +11,23 @@ Rectangle {
 
     property bool   isLoading:   false
     property string errorMsg:    ""
-    property string autoFillKey: ""   // заполняется после регистрации
+    property string autoFillKey: ""
 
     onAutoFillKeyChanged: if (autoFillKey !== "") privKeyInput.text = autoFillKey
+
+    Connections {
+        target: Backend
+        function onLoginStateChanged() {
+            if (Backend.loggedIn) {
+                root.isLoading = false
+                root.loggedIn()
+            }
+        }
+        function onLoginError(msg) {
+            root.isLoading = false
+            root.errorMsg  = msg
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -29,7 +43,8 @@ Rectangle {
 
         ColumnLayout {
             Layout.alignment:   Qt.AlignHCenter
-            Layout.margins:     24
+            Layout.leftMargin:  24
+            Layout.rightMargin: 24
             width:              320
             spacing:            16
 
@@ -38,6 +53,13 @@ Rectangle {
                 Layout.fillWidth: true
                 label:           "Адрес сервера"
                 placeholder:     "example.com:1455"
+            }
+
+            ParaInput {
+                id:              usernameInput
+                Layout.fillWidth: true
+                label:           "Имя пользователя"
+                placeholder:     "username"
             }
 
             ParaInput {
@@ -76,12 +98,16 @@ Rectangle {
                 text:             root.isLoading ? "Вход…" : "Войти"
                 enabled:          !root.isLoading
                 onClicked: {
+                    let srv  = endpointInput.text.trim()
+                    let user = usernameInput.text.trim()
+                    let key  = privKeyInput.text.trim()
+                    if (srv === "" || user === "" || key === "") {
+                        root.errorMsg = "Заполните все поля."
+                        return
+                    }
                     root.isLoading = true
                     root.errorMsg  = ""
-                    // backend.loginClient(endpointInput.text, privKeyInput.text)
-                    // при ошибке "Bad sig encoding":
-                    // root.errorMsg = "Клиент не зарегистрирован на этом сервере"
-                    // root.isLoading = false
+                    Backend.loginClient(srv, user, key)
                 }
             }
         }

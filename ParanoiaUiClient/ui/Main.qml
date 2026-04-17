@@ -21,12 +21,11 @@ ApplicationWindow {
         }
     }
 
-    // ── Компоненты страниц ────────────────────────────────
     Component {
         id: installServerPage
         InstallServerPage {
             onBack:            stackView.pop()
-            onServerInstalled: stackView.replace(mainPage)
+            onServerInstalled: function(domain) { stackView.replace(mainPage) }
         }
     }
 
@@ -50,9 +49,9 @@ ApplicationWindow {
     Component {
         id: connectClientChoicePage
         ConnectClientChoicePage {
-            onBack:       stackView.pop()
-            onRegister_:  stackView.push(clientRegistrationPage)
-            onLogin:      stackView.push(clientLoginPage)
+            onBack:      stackView.pop()
+            onRegister_: stackView.push(clientRegistrationPage)
+            onLogin:     stackView.push(clientLoginPage)
         }
     }
 
@@ -61,8 +60,7 @@ ApplicationWindow {
         ClientRegistrationPage {
             onBack: stackView.pop()
             onProceedToLogin: function(privKey) {
-                stackView.replace(clientLoginPage,
-                                  { "autoFillKey": privKey })
+                stackView.replace(clientLoginPage, { autoFillKey: privKey })
             }
         }
     }
@@ -78,8 +76,16 @@ ApplicationWindow {
     Component {
         id: mainPage
         MainPage {
-            hasAdminAccess: false   // устанавливается при подключении
-            hasUserAccess:  true
+            onOpenChat:         function(peer) { stackView.push(chatPage, { peer: peer }) }
+            onAddServer:        stackView.push(connectChoicePage)
+            onInstallNewServer: stackView.push(installServerPage)
+        }
+    }
+
+    Component {
+        id: chatPage
+        ChatPage {
+            onBack: stackView.pop()
         }
     }
 }

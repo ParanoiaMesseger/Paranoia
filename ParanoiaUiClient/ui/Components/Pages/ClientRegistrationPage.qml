@@ -1,6 +1,6 @@
-import QtQuick 2.15
-import QtQuick.Layouts 1.15
-import QtQuick.Controls 2.15
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
 import ParanoiaUiClient
 
 Rectangle {
@@ -12,14 +12,20 @@ Rectangle {
 
     property string publicKey:  ""
     property string privateKey: ""
+    property bool   generating: false
 
-    Component.onCompleted: generateKeys()
+    Connections {
+        target: Backend
+        function onKeyPairGenerated(pub, priv) {
+            root.publicKey  = pub
+            root.privateKey = priv
+            root.generating = false
+        }
+    }
 
-    function generateKeys() {
-        // backend.generateKeyPair() → onKeysGenerated(pub, priv)
-        // Заглушка для UI:
-        publicKey  = "DEMO_PUBLIC_KEY_ABCDEF1234567890"
-        privateKey = "DEMO_PRIVATE_KEY_FEDCBA0987654321"
+    Component.onCompleted: {
+        generating = true
+        Backend.generateKeyPair()
     }
 
     ColumnLayout {
@@ -48,9 +54,27 @@ Rectangle {
 
                 Item { Layout.preferredHeight: 8 }
 
+                // Generating indicator
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 44
+                    radius: Theme.radiusMd
+                    color:  Theme.bgSecondary
+                    visible: root.generating
+
+                    Text {
+                        anchors.centerIn: parent
+                        text:  "Генерация ключей…"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSm
+                        font.family:    Theme.fontFamily
+                    }
+                }
+
                 Text {
                     Layout.fillWidth: true
-                    text:   "Ваш публичный ключ сгенерирован. Передайте его администратору сервера, чтобы он вас зарегистрировал."
+                    visible: !root.generating
+                    text:   "Ваш публичный ключ сгенерирован. Передайте его администратору сервера."
                     color:  Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family:    Theme.fontFamily
@@ -65,6 +89,7 @@ Rectangle {
                     radius:     Theme.radiusMd
                     color:      Theme.bgInput
                     border.color: Theme.border
+                    visible: !root.generating
 
                     ScrollView {
                         anchors.fill:    parent
@@ -89,23 +114,33 @@ Rectangle {
                     Layout.fillWidth: true
                     text:             "Скопировать публичный ключ"
                     secondary:        true
+                    visible:          !root.generating
                     onClicked: {
-                        // Clipboard.text = root.publicKey
+                        copyClipboard.text = root.publicKey
+                        copyClipboard.selectAll()
+                        copyClipboard.copy()
+                        text = "Скопировано ✓"
                     }
                 }
 
-                // ── QR-код ────────────────────────────────────
+                // Clipboard helper (invisible)
+                TextEdit {
+                    id:      copyClipboard
+                    visible: false
+                    text:    root.publicKey
+                }
+
+                // ── QR placeholder ────────────────────────────
                 Rectangle {
                     Layout.alignment: Qt.AlignHCenter
-                    width:  200; height: 200
+                    width:  180; height: 180
                     radius: Theme.radiusMd
                     color:  "#FFFFFF"
+                    visible: !root.generating
 
-                    // QR-код генерируется через QML-плагин или C++:
-                    // QrCodeItem { data: root.publicKey; anchors.fill: parent }
                     Column {
                         anchors.centerIn: parent
-                        spacing:          8
+                        spacing: 8
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text:  "[ QR код ]"
@@ -114,7 +149,9 @@ Rectangle {
                         }
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            text:  "Требует плагин"
+                            text:  root.publicKey.length > 0
+                                   ? root.publicKey.substring(0, 12) + "…"
+                                   : ""
                             color: "#888888"
                             font.pixelSize: Theme.fontXs
                         }
@@ -127,6 +164,7 @@ Rectangle {
                     color:              Theme.textSecondary
                     font.pixelSize:     Theme.fontXs
                     font.family:        Theme.fontFamily
+                    visible:            !root.generating
                 }
 
                 Item { Layout.preferredHeight: 8 }
@@ -134,6 +172,7 @@ Rectangle {
                 ParaButton {
                     Layout.fillWidth: true
                     text:             "Я передал ключ → Войти"
+                    enabled:          !root.generating
                     onClicked:        root.proceedToLogin(root.privateKey)
                 }
 
