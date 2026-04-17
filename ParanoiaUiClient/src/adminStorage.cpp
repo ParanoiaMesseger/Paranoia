@@ -15,14 +15,16 @@ QFuture<bool> admin::Admin::regUser(const QString &username, const QString &pubk
 
 void admin::Admin::initAdmins()
 {
-    for (const auto &i : QString::fromUtf8(QFile("admins.crypt").readAll()).split("\n"))
+    QFile file("admins.crypt");
+    if (!file.open(QIODevice::ReadOnly)) return;
+    for (const auto &i : QString::fromUtf8(file.readAll()).split("\n"))
         if (auto tmp = i.split(":"); tmp.size() == 2) admins.push_back({tmp[0], tmp[1]});
 }
 
 void admin::Admin::saveAdmins()
 {
     QFile file("admins.crypt");
-    QDataStream out(&file);
-    for (auto i : admins) out << i.domain.toUtf8() << ":" << i.private_key.toUtf8() << "\n";
-    file.close();
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    for (const auto &a : admins)
+        file.write((a.domain + ":" + a.private_key + "\n").toUtf8());
 }

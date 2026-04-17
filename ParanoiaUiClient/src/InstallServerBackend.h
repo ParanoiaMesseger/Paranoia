@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QString>
 #include <QQmlEngine>
+#include <memory>
 
 class InstallServerBackend : public QObject
 {
@@ -66,7 +67,7 @@ private:
 
     Step currentStep = StepCount;
 
-    ClientSSH ssh;
+    std::unique_ptr<ClientSSH> ssh;
     QString m_domain;
     QString m_ip;
     QString m_username;

@@ -1,4 +1,15 @@
 #pragma once
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+using SshSocket = SOCKET;
+#else
+using SshSocket = int;
+#endif
+
 #include <QObject>
 #include <QString>
 #include <QThread>
@@ -38,9 +49,12 @@ private:
     bool waitSocket();
     void cleanup();
 
-    void *session_  = nullptr; // LIBSSH2_SESSION*
-    int sock_       = -1;
-    bool connected_ = false;
+    void *session_     = nullptr; // LIBSSH2_SESSION*
+    SshSocket sock_    = static_cast<SshSocket>(-1);
+    bool connected_    = false;
+#if defined(_WIN32)
+    bool winsockReady_ = false;
+#endif
     SshConnectionParams params_;
 };
 

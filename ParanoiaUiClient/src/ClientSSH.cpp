@@ -1,14 +1,20 @@
 #include "ClientSSH.hpp"
 
+#include <cerrno>
+#include <cstring>
 #include <iostream>
 #include <libssh2.h>
 #include <qlogging.h>
+#if defined(_WIN32)
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#endif
 
 #include <QFile>
 #include <QFileInfo>
@@ -22,6 +28,42 @@
 #define ERR_CONNECT(err_) BLOCK(emit connectionError(err_); return;)
 
 Q_DECLARE_METATYPE(SshConnectionParams)
+
+namespace {
+#if defined(_WIN32)
+const SshSocket invalidSocket = INVALID_SOCKET;
+
+QString socketErrorString()
+{
+    return QString("WinSock error %1").arg(WSAGetLastError());
+}
+
+void closeSocket(SshSocket socket) { closesocket(socket); }
+
+void setSocketTimeout(SshSocket socket, int timeoutMs)
+{
+    DWORD timeout = static_cast<DWORD>(timeoutMs);
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+}
+#else
+const SshSocket invalidSocket = -1;
+
+QString socketErrorString()
+{
+    return QString::fromLocal8Bit(std::strerror(errno));
+}
+
+void closeSocket(SshSocket socket) { ::close(socket); }
+
+void setSocketTimeout(SshSocket socket, int timeoutMs)
+{
+    timeval tv{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+#endif
+}
 
 ClientSSH::ClientSSH(QObject *parent) : QObject(parent), thread_(new QThread(this)), worker_(new SshWorker)
 {
@@ -97,12 +139,24 @@ void ClientSSH::runScript(const QString &path)
 
 void ClientSSH::disconnectFromHost() { emit _disconnectRequested(); }
 
-SshWorker::SshWorker(QObject *parent) : QObject(parent) { libssh2_init(0); }
+SshWorker::SshWorker(QObject *parent) : QObject(parent)
+{
+#if defined(_WIN32)
+    WSADATA wsaData{};
+    const int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    winsockReady_       = (wsaResult == 0);
+    if (!winsockReady_) qWarning() << "WSAStartup failed:" << wsaResult;
+#endif
+    libssh2_init(0);
+}
 
 SshWorker::~SshWorker()
 {
     cleanup();
     libssh2_exit();
+#if defined(_WIN32)
+    if (winsockReady_) WSACleanup();
+#endif
 }
 
 bool SshWorker::waitSocket()
@@ -117,7 +171,11 @@ bool SshWorker::waitSocket()
     if (dir & LIBSSH2_SESSION_BLOCK_OUTBOUND) FD_SET(sock_, &wfd);
 
     timeval tv{10, 0}; // 10 сек максимум на одно ожидание
+#if defined(_WIN32)
+    return select(0, &rfd, &wfd, nullptr, &tv) > 0;
+#else
     return select(sock_ + 1, &rfd, &wfd, nullptr, &tv) > 0;
+#endif
 }
 
 void SshWorker::connectToHost(const SshConnectionParams &params)
@@ -125,6 +183,10 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
     cleanup();
     qDebug() << "connectToHost : " << params.host;
     params_ = params;
+
+#if defined(_WIN32)
+    if (!winsockReady_) ERR_CONNECT("WinSock не инициализирован");
+#endif
 
     addrinfo hints{}, *res = nullptr;
     hints.ai_family   = AF_UNSPEC;
@@ -134,18 +196,25 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
     if (getaddrinfo(params.host.toUtf8(), portStr.toUtf8(), &hints, &res) != 0)
         ERR_CONNECT(QString("Не удалось разрешить хост: %1").arg(params.host));
     sock_ = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sock_ < 0) {
+    if (sock_ == invalidSocket) {
+        const QString reason = socketErrorString();
         freeaddrinfo(res);
-        ERR_CONNECT("Ошибка создания сокета");
+        ERR_CONNECT(QString("Ошибка создания сокета: %1").arg(reason));
     }
 
-    timeval tv{params.timeoutMs / 1000, (params.timeoutMs % 1000) * 1000};
-    setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setSocketTimeout(sock_, params.timeoutMs);
 
-    if (::connect(sock_, res->ai_addr, res->ai_addrlen) != 0) {
+#if defined(_WIN32)
+    const int connectResult = ::connect(sock_, res->ai_addr, static_cast<int>(res->ai_addrlen));
+#else
+    const int connectResult = ::connect(sock_, res->ai_addr, res->ai_addrlen);
+#endif
+    if (connectResult != 0) {
+        const QString reason = socketErrorString();
         freeaddrinfo(res);
-        ERR_CONNECT(QString("TCP connect failed: %1:%2 — %3").arg(params.host).arg(params.port).arg(strerror(errno)));
+        closeSocket(sock_);
+        sock_ = invalidSocket;
+        ERR_CONNECT(QString("TCP connect failed: %1:%2 - %3").arg(params.host).arg(params.port).arg(reason));
     }
     freeaddrinfo(res);
 
@@ -266,9 +335,9 @@ void SshWorker::cleanup()
         libssh2_session_free(sess);
         session_ = nullptr;
     }
-    if (sock_ >= 0) {
-        ::close(sock_);
-        sock_ = -1;
+    if (sock_ != invalidSocket) {
+        closeSocket(sock_);
+        sock_ = invalidSocket;
     }
     connected_ = false;
 }
