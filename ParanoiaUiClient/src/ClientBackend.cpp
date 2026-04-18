@@ -3,7 +3,8 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QCryptographicHash>
-#include <QtConcurrent>
+#include <QThreadPool>
+#include <QPointer>
 
 ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 {
@@ -42,7 +43,7 @@ QString ClientBackend::activePeer() const { return m_activePeer; }
 
 void ClientBackend::generateKeyPair()
 {
-    QtConcurrent::run([this]() {
+    QThreadPool::globalInstance()->start([this]() {
         char *secret = nullptr;
         char *pubkey = nullptr;
         paranoia_generate_keypair(&secret, &pubkey);
@@ -66,27 +67,32 @@ void ClientBackend::loginClient(const QString &server, const QString &username, 
 
     QString dbPath = QString("paranoia_%1.db").arg(username);
 
-    QtConcurrent::run([this, url, username, privkey, dbPath]() {
+    QPointer<ClientBackend> self(this);
+    QThreadPool::globalInstance()->start([self, url, username, privkey, dbPath]() {
         auto *handle = paranoia_client_new(
             url.toUtf8().constData(),
             username.toUtf8().constData(),
             privkey.toUtf8().constData(),
             dbPath.toUtf8().constData()
         );
-        QMetaObject::invokeMethod(this, [this, handle, url, username]() {
+        QMetaObject::invokeMethod(self, [self, handle, url, username]() {
+            if (!self) {
+                if (handle) paranoia_client_free(handle);
+                return;
+            }
             {
-                QMutexLocker locker(&m_handleMutex);
-                if (m_handle) {
-                    paranoia_client_free(m_handle);
+                QMutexLocker locker(&self->m_handleMutex);
+                if (self->m_handle) {
+                    paranoia_client_free(self->m_handle);
                 }
-                m_handle = handle;
+                self->m_handle = handle;
             }
             if (handle) {
-                m_server   = url;
-                m_username = username;
-                emit loginStateChanged();
+                self->m_server   = url;
+                self->m_username = username;
+                emit self->loginStateChanged();
             } else {
-                emit loginError("Не удалось подключиться. Проверьте адрес сервера и ключ.");
+                emit self->loginError("Не удалось подключиться. Проверьте адрес сервера и ключ.");
             }
         });
     });
@@ -222,19 +228,22 @@ void ClientBackend::sendText(const QString &text)
     QString username = m_username;
     QByteArray key   = dlg->sessionKey;
 
-    QtConcurrent::run([this, peer, username, text, key]() {
-        QMutexLocker locker(&m_handleMutex);
-        if (!m_handle) return;
+    QPointer<ClientBackend> self(this);
+    QThreadPool::globalInstance()->start([self, peer, username, text, key]() {
+        if (!self) return;
+        QMutexLocker locker(&self->m_handleMutex);
+        if (!self->m_handle) return;
         int res = paranoia_send_text(
-            m_handle,
+            self->m_handle,
             username.toUtf8().constData(),
             peer.toUtf8().constData(),
             reinterpret_cast<const uint8_t *>(key.constData()),
             text.toUtf8().constData()
         );
-        QMetaObject::invokeMethod(this, [this, res]() {
-            if (res == 0) fetchMessages();
-            else          emit sendError("Ошибка отправки сообщения.");
+        QMetaObject::invokeMethod(self, [self, res]() {
+            if (!self) return;
+            if (res == 0) self->fetchMessages();
+            else          emit self->sendError("Ошибка отправки сообщения.");
         });
     });
 }
@@ -249,11 +258,13 @@ void ClientBackend::fetchMessages()
     QString username = m_username;
     QByteArray key   = dlg->sessionKey;
 
-    QtConcurrent::run([this, peer, username, key]() {
-        QMutexLocker locker(&m_handleMutex);
-        if (!m_handle) return;
+    QPointer<ClientBackend> self(this);
+    QThreadPool::globalInstance()->start([self, peer, username, key]() {
+        if (!self) return;
+        QMutexLocker locker(&self->m_handleMutex);
+        if (!self->m_handle) return;
         char *json = paranoia_receive(
-            m_handle,
+            self->m_handle,
             username.toUtf8().constData(),
             peer.toUtf8().constData(),
             reinterpret_cast<const uint8_t *>(key.constData())
@@ -262,13 +273,14 @@ void ClientBackend::fetchMessages()
         QString jsonStr = QString::fromUtf8(json);
         paranoia_free_string(json);
 
-        QMetaObject::invokeMethod(this, [this, jsonStr, peer]() {
-            auto newMsgs = parseMessages(jsonStr);
+        QMetaObject::invokeMethod(self, [self, jsonStr, peer]() {
+            if (!self) return;
+            auto newMsgs = self->parseMessages(jsonStr);
             if (newMsgs.isEmpty()) return;
 
-            auto &cache = m_messageCache[peer];
-            auto &seen  = m_seenIds[peer];
-            for (const auto &msg : newMsgs) {
+            auto &cache = self->m_messageCache[peer];
+            auto &seen  = self->m_seenIds[peer];
+            for (const auto &msg : std::as_const(newMsgs)) {
                 QString id = msg.toMap()["id"].toString();
                 if (!seen.contains(id)) {
                     seen.insert(id);
@@ -276,16 +288,15 @@ void ClientBackend::fetchMessages()
                 }
             }
 
-            // Update last message preview
-            for (auto &d : m_dialogs) {
+            for (auto &d : self->m_dialogs) {
                 if (d.peer == peer) {
                     d.lastMsg = cache.last().toMap()["text"].toString();
                     break;
                 }
             }
 
-            emit messagesReceived(cache);
-            emit dialogsChanged();
+            emit self->messagesReceived(cache);
+            emit self->dialogsChanged();
         });
     });
 }

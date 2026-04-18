@@ -19,6 +19,6 @@ int main(int argc, char *argv[])
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
         []() { QCoreApplication::exit(-1); }, Qt::QueuedConnection);
 
-    engine.load(QUrl(QStringLiteral("qrc:/qt/qml/ParanoiaUiClient/Main.qml")));
+    engine.loadFromModule("ParanoiaUiClient", "Main");
     return app.exec();
 }
