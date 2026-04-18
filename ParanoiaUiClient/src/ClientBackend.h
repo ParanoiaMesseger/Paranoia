@@ -72,12 +72,18 @@ private:
     ParanoiaHandle *m_handle = nullptr;
     QString m_server;
     QString m_username;
+    QString m_privkey;
     QString m_activePeer;
 
     QList<Dialog> m_dialogs;
     QMap<QString, QVariantList> m_messageCache;
     QMap<QString, QSet<QString>> m_seenIds;
     QTimer *m_pollTimer;
+
+    void saveClientConfig() const;
+    void loadClientConfig();
+    void saveDialogs() const;
+    void loadDialogs();
 
     QByteArray deriveKey(const QString &sharedSecret) const;
     QVariantList parseMessages(const QString &json) const;

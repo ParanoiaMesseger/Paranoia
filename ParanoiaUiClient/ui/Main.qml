@@ -11,6 +11,21 @@ ApplicationWindow {
     title:   "Paranoia"
     color:   Theme.bgPrimary
 
+    // Авто-навигация при восстановлении сессии из сохранённых данных
+    Connections {
+        target: Backend
+        function onLoginStateChanged() {
+            if (Backend.loggedIn && stackView.depth === 1)
+                stackView.replace(mainPage)
+        }
+    }
+
+    Component.onCompleted: {
+        // Если есть только админ-доступ (без клиентского логина) — сразу на главную
+        if (Backend.hasAdminAccess && !Backend.loggedIn)
+            stackView.replace(mainPage)
+    }
+
     StackView {
         id:           stackView
         anchors.fill: parent

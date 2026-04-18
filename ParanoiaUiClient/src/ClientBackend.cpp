@@ -6,12 +6,15 @@
 #include <QThreadPool>
 #include <QPointer>
 #include <QDebug>
+#include <QFile>
 
 ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 {
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(2500);
     connect(m_pollTimer, &QTimer::timeout, this, &ClientBackend::onPollTimer);
+    loadDialogs();
+    loadClientConfig();
 }
 
 ClientBackend::~ClientBackend()
@@ -76,7 +79,7 @@ void ClientBackend::loginClient(const QString &server, const QString &username, 
             privkey.toUtf8().constData(),
             dbPath.toUtf8().constData()
         );
-        QMetaObject::invokeMethod(self, [self, handle, url, username]() {
+        QMetaObject::invokeMethod(self, [self, handle, url, username, privkey]() {
             if (!self) {
                 if (handle) paranoia_client_free(handle);
                 return;
@@ -91,7 +94,9 @@ void ClientBackend::loginClient(const QString &server, const QString &username, 
             if (handle) {
                 self->m_server   = url;
                 self->m_username = username;
+                self->m_privkey  = privkey;
                 emit self->loginStateChanged();
+                self->saveClientConfig();
             } else {
                 emit self->loginError("Не удалось подключиться. Проверьте адрес сервера и ключ.");
             }
@@ -158,11 +163,13 @@ void ClientBackend::addDialog(const QString &peer, const QString &sharedSecret)
         if (d.peer == peer) {
             d.sessionKey = deriveKey(sharedSecret);
             emit dialogsChanged();
+            saveDialogs();
             return;
         }
     }
     m_dialogs.append({peer, deriveKey(sharedSecret), QString()});
     emit dialogsChanged();
+    saveDialogs();
 }
 
 void ClientBackend::removeDialog(const QString &peer)
@@ -171,6 +178,7 @@ void ClientBackend::removeDialog(const QString &peer)
     m_messageCache.remove(peer);
     m_seenIds.remove(peer);
     emit dialogsChanged();
+    saveDialogs();
 }
 
 QVariantList ClientBackend::getDialogs() const
@@ -357,6 +365,63 @@ QString ClientBackend::extractText(const QString &raw) const
     if (raw.startsWith("ReadReceipt(") || raw.startsWith("Delete("))
         return QString();
     return raw;
+}
+
+// ── Persistence ───────────────────────────────────────────────────────────────
+
+void ClientBackend::saveClientConfig() const
+{
+    QFile f("client.json");
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    QJsonObject obj;
+    obj["server"]   = m_server;
+    obj["username"] = m_username;
+    obj["privkey"]  = m_privkey;
+    f.write(QJsonDocument(obj).toJson());
+}
+
+void ClientBackend::loadClientConfig()
+{
+    QFile f("client.json");
+    if (!f.open(QIODevice::ReadOnly)) return;
+    auto doc = QJsonDocument::fromJson(f.readAll());
+    if (!doc.isObject()) return;
+    auto obj = doc.object();
+    QString server   = obj["server"].toString();
+    QString username = obj["username"].toString();
+    QString privkey  = obj["privkey"].toString();
+    if (server.isEmpty() || username.isEmpty() || privkey.isEmpty()) return;
+    loginClient(server, username, privkey);
+}
+
+void ClientBackend::saveDialogs() const
+{
+    QJsonArray arr;
+    for (const auto &d : m_dialogs) {
+        QJsonObject o;
+        o["peer"] = d.peer;
+        o["key"]  = QString::fromLatin1(d.sessionKey.toBase64());
+        arr.append(QJsonValue(o));
+    }
+    QFile f("dialogs.json");
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    f.write(QJsonDocument(arr).toJson());
+}
+
+void ClientBackend::loadDialogs()
+{
+    QFile f("dialogs.json");
+    if (!f.open(QIODevice::ReadOnly)) return;
+    auto doc = QJsonDocument::fromJson(f.readAll());
+    if (!doc.isArray()) return;
+    const QJsonArray jsonArr = doc.array();
+    for (const auto &val : jsonArr) {
+        auto obj = val.toObject();
+        QString peer   = obj["peer"].toString();
+        QByteArray key = QByteArray::fromBase64(obj["key"].toString().toLatin1());
+        if (!peer.isEmpty() && key.size() == 32)
+            m_dialogs.append({peer, key, QString()});
+    }
 }
 
 ClientBackend::Dialog *ClientBackend::findDialog(const QString &peer)
