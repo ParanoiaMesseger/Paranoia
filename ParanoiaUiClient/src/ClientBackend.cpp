@@ -5,6 +5,7 @@
 #include <QCryptographicHash>
 #include <QThreadPool>
 #include <QPointer>
+#include <QDebug>
 
 ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 {
@@ -240,6 +241,7 @@ void ClientBackend::sendText(const QString &text)
             reinterpret_cast<const uint8_t *>(key.constData()),
             text.toUtf8().constData()
         );
+        qDebug() << "[sendText] peer=" << peer << "result=" << res;
         QMetaObject::invokeMethod(self, [self, res]() {
             if (!self) return;
             if (res == 0) self->fetchMessages();
@@ -269,9 +271,13 @@ void ClientBackend::fetchMessages()
             peer.toUtf8().constData(),
             reinterpret_cast<const uint8_t *>(key.constData())
         );
-        if (!json) return;
+        if (!json) {
+            qDebug() << "[fetchMessages] paranoia_receive returned null for peer=" << peer;
+            return;
+        }
         QString jsonStr = QString::fromUtf8(json);
         paranoia_free_string(json);
+        qDebug() << "[fetchMessages] JSON from server:" << jsonStr;
 
         QMetaObject::invokeMethod(self, [self, jsonStr, peer]() {
             if (!self) return;
