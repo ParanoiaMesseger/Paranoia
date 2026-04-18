@@ -86,6 +86,7 @@ void InstallServerBackend::on_scriptOutput(const QString &text) {}
 
 void InstallServerBackend::on_scriptFinished(int exitCode)
 {
+    if (exitCode != 0) return;
     setStep(currentStep, Done);
     currentStep = static_cast<Step>(static_cast<int>(currentStep) + 1);
     setStep(currentStep, Running);
@@ -110,14 +111,19 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
         } break;
         case StepStartServer: ssh.runScript(":/StartServer.sh"); break;
         case StepVerifyServer: {
-            admin::Admin{m_domain, private_admin_key}.regUser("admin", public_admin_key).then([this](bool res) {
-                if (res) {
-                    on_scriptFinished(0);
-                    admin::Admin::admins.push_back(admin::Admin{m_domain, private_admin_key});
-                    admin::Admin::saveAdmins();
-                } else
-                    installError(currentStep, "Error on check server.");
-            });
+            QString url = m_domain;
+            if (!url.startsWith("http://") && !url.startsWith("https://"))
+                url = "https://" + url;
+            admin::Admin{url, private_admin_key}.regUser("admin", public_admin_key)
+                .then(this, [this, url](bool res) {
+                    if (res) {
+                        admin::Admin::admins.push_back({url, private_admin_key});
+                        admin::Admin::saveAdmins();
+                        on_scriptFinished(0);
+                    } else {
+                        installError(currentStep, "Error on check server.");
+                    }
+                });
         } break;
         case StepRegisterServer: emit installFinished(m_domain); break;
         case StepCreateConfig:
