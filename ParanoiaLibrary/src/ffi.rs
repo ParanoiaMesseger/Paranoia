@@ -1,4 +1,5 @@
 // src/ffi.rs
+use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Arc;
@@ -10,7 +11,30 @@ use crate::{
     types::{DialogueKey, DialogueConfig, Message, MessageContent},
 };
 
-// Непрозрачный хэндл для C++
+// ── Thread-local хранилище последней ошибки ──────────────────────────────────
+
+thread_local! {
+    static LAST_ERROR: RefCell<CString> = RefCell::new(CString::new("").unwrap());
+}
+
+fn set_last_error(msg: &str) {
+    LAST_ERROR.with(|e| {
+        *e.borrow_mut() = CString::new(msg)
+            .unwrap_or_else(|_| CString::new("unknown error").unwrap());
+    });
+}
+
+/// Получить строку последней ошибки FFI для текущего потока.
+/// Указатель действителен до следующего вызова любой FFI-функции в этом потоке.
+/// Не нужно освобождать через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_last_error() -> *const c_char {
+    LAST_ERROR.with(|e| e.borrow().as_ptr())
+}
+
+// ── Хэндл клиента ────────────────────────────────────────────────────────────
+
+/// Непрозрачный хэндл для C++
 pub struct ParanoiaHandle {
     client: ParanoiaClient,
     rt: Runtime,
@@ -33,7 +57,10 @@ pub extern "C" fn paranoia_client_new(
 
     let sk_bytes = match base64::engine::general_purpose::STANDARD.decode(sk_b64) {
         Ok(b) if b.len() == 32 => b,
-        _ => return std::ptr::null_mut(),
+        _ => {
+            set_last_error("invalid_signing_key: expected 32 bytes base64");
+            return std::ptr::null_mut();
+        }
     };
     let sk_arr: [u8; 32] = sk_bytes.try_into().unwrap();
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_arr);
@@ -43,7 +70,10 @@ pub extern "C" fn paranoia_client_new(
 
     match ParanoiaClient::new(cfg) {
         Ok(client) => Box::into_raw(Box::new(ParanoiaHandle { client, rt })),
-        Err(_)     => std::ptr::null_mut(),
+        Err(e) => {
+            set_last_error(&format!("client_init_error: {e}"));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -56,7 +86,7 @@ pub extern "C" fn paranoia_client_free(handle: *mut ParanoiaHandle) {
 }
 
 /// Отправить текстовое сообщение.
-/// Возвращает 0 при успехе, -1 при ошибке.
+/// Возвращает 0 при успехе, -1 при ошибке. Ошибку см. paranoia_last_error().
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_send_text(
     handle: *mut ParanoiaHandle,
@@ -77,12 +107,16 @@ pub extern "C" fn paranoia_send_text(
 
     match h.rt.block_on(dialogue.send_text(text)) {
         Ok(_)  => 0,
-        Err(_) => -1,
+        Err(e) => {
+            set_last_error(&classify_send_error(&e.to_string()));
+            -1
+        }
     }
 }
 
 /// Отправить текстовое сообщение и вернуть сохранённое локальное представление.
-/// NULL означает ошибку отправки/сохранения. Освободить через paranoia_free_string.
+/// NULL означает ошибку отправки/сохранения. Ошибку см. paranoia_last_error().
+/// Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_send_text_json(
     handle: *mut ParanoiaHandle,
@@ -103,7 +137,10 @@ pub extern "C" fn paranoia_send_text_json(
 
     match h.rt.block_on(dialogue.send_text(text)) {
         Ok(msg) => message_to_c_string(&msg),
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            set_last_error(&classify_send_error(&e.to_string()));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -124,7 +161,7 @@ pub extern "C" fn paranoia_generate_keypair(
 }
 
 /// Зарегистрировать пользователя на сервере.
-/// Возвращает 0 при успехе, -1 при ошибке.
+/// Возвращает 0 при успехе, -1 при ошибке. Ошибку см. paranoia_last_error().
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_register_user(
     server_url: *const c_char,
@@ -138,23 +175,34 @@ pub extern "C" fn paranoia_register_user(
     let pubkey      = unsafe { CStr::from_ptr(user_pubkey_b64) }.to_str().unwrap_or("");
     let sig = match AdminKeyPair::from_secret_b64(sk) {
         Ok(kp) => kp.sign_user_registration(username, pubkey),
-        Err(_) => return -1,
+        Err(e) => {
+            set_last_error(&format!("invalid_admin_key: {e}"));
+            return -1;
+        }
     };
     let rt = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
-        Err(_) => return -1,
+        Err(e) => {
+            set_last_error(&format!("runtime_error: {e}"));
+            return -1;
+        }
     };
     let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
     let transport = crate::transport::Transport::new(server_url, cover);
     match rt.block_on(transport.reg(username, pubkey, sig.as_str())) {
         Ok(_)  => 0,
-        Err(_) => -1,
+        Err(e) => {
+            set_last_error(&format!("register_error: {e}"));
+            -1
+        }
     }
 }
 
 /// Получить новые сообщения из диалога.
-/// Возвращает JSON-строку вида [{"id":"...","sender":"...","text":"...","ts":...}, ...]
-/// или NULL при ошибке. Освободить через paranoia_free_string.
+/// Возвращает JSON-строку вида [{"id":"...","sender":"...","content":"...","ts":...,"seq":...}, ...]
+/// Пустой массив [] означает нет новых сообщений.
+/// NULL означает ошибку (сервер недоступен). Ошибку см. paranoia_last_error().
+/// Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_receive(
     handle: *mut ParanoiaHandle,
@@ -172,13 +220,27 @@ pub extern "C" fn paranoia_receive(
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.receive()) {
-        Ok(msgs) => messages_to_c_string(&msgs),
-        Err(_) => std::ptr::null_mut(),
+        Ok((msgs, decrypt_errors)) => {
+            if decrypt_errors > 0 {
+                set_last_error(&format!("decryption_failed:{decrypt_errors}"));
+            }
+            messages_to_c_string(&msgs)
+        }
+        Err(e) => {
+            let err = e.to_string();
+            if err.contains("connection") || err.contains("connect") || err.contains("timeout") {
+                set_last_error("server_unavailable");
+            } else {
+                set_last_error(&format!("receive_error:{err}"));
+            }
+            std::ptr::null_mut()
+        }
     }
 }
 
 /// Получить локальную историю диалога из SQLite.
 /// Возвращает JSON-массив в том же формате, что paranoia_receive.
+/// NULL при ошибке. Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_history(
     handle: *mut ParanoiaHandle,
@@ -198,7 +260,60 @@ pub extern "C" fn paranoia_history(
 
     match h.rt.block_on(dialogue.history(limit, None)) {
         Ok(msgs) => messages_to_c_string(&msgs),
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            set_last_error(&format!("history_error: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Удалить серверную историю диалога до cut_seq включительно.
+/// Возвращает 0 при успехе, -1 при ошибке. Ошибку см. paranoia_last_error().
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_determinate(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    session_key: *const u8,
+    cut_seq: u64,
+) -> i32 {
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
+        .try_into().unwrap();
+
+    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let dialogue = h.client.open_dialogue(cfg);
+
+    match h.rt.block_on(dialogue.clear_server_history(cut_seq)) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(&format!("determinate_error: {e}"));
+            -1
+        }
+    }
+}
+
+/// Удалить локальные данные диалога из SQLite (сообщения, состояние seq).
+/// Возвращает 0 при успехе, -1 при ошибке. Ошибку см. paranoia_last_error().
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_delete_local_dialogue(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+) -> i32 {
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let key = DialogueKey::new(&a, &b);
+
+    match h.client.delete_local_dialogue(&key) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(&format!("delete_local_error: {e}"));
+            -1
+        }
     }
 }
 
@@ -209,6 +324,8 @@ pub extern "C" fn paranoia_free_string(s: *mut c_char) {
         unsafe { drop(CString::from_raw(s)); }
     }
 }
+
+// ── Внутренние вспомогательные функции ───────────────────────────────────────
 
 fn messages_to_c_string(msgs: &[Message]) -> *mut c_char {
     let json = serde_json::json!(msgs.iter().map(message_to_json).collect::<Vec<_>>());
@@ -239,5 +356,16 @@ fn message_content_for_ui(content: &MessageContent) -> String {
         MessageContent::FileChunk { .. } => "FileChunk(...)".to_string(),
         MessageContent::ReadReceipt { .. } => "ReadReceipt(...)".to_string(),
         MessageContent::Delete { .. } => "Delete(...)".to_string(),
+    }
+}
+
+/// Классифицировать ошибку отправки в строку для paranoia_last_error().
+fn classify_send_error(err: &str) -> String {
+    if err.contains("Duplicate seq") || err.contains("duplicate_seq") {
+        "duplicate_seq".to_string()
+    } else if err.contains("connection") || err.contains("connect") || err.contains("timeout") {
+        "server_unavailable".to_string()
+    } else {
+        format!("send_error:{err}")
     }
 }

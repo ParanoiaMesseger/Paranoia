@@ -81,8 +81,9 @@ impl Dialogue {
     }
 
     /// Получить новые сообщения с сервера.
-    /// Возвращает только полностью собранные сообщения.
-    pub async fn receive(&self) -> Result<Vec<Message>> {
+    /// Возвращает (сообщения, кол-во ошибок расшифровки).
+    /// Ошибки расшифровки означают несовпадение ключа диалога.
+    pub async fn receive(&self) -> Result<(Vec<Message>, usize)> {
         let username = &self.client_cfg.username;
         let partner = self.partner();
         let after_seq = self.store.get_last_pulled_seq(&self.key)?;
@@ -100,11 +101,12 @@ impl Dialogue {
         let raw_packets: Vec<RawPacket> = self.transport.pull(&core_pull).await?;
 
         if raw_packets.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], 0));
         }
 
         let mut messages = Vec::new();
         let mut max_seq = after_seq;
+        let mut decrypt_errors: usize = 0;
 
         for pkt in raw_packets {
             max_seq = max_seq.max(pkt.seq);
@@ -113,6 +115,7 @@ impl Dialogue {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("Cannot decrypt seq={}: {e}", pkt.seq);
+                    decrypt_errors += 1;
                     continue;
                 }
             };
@@ -133,7 +136,7 @@ impl Dialogue {
         }
 
         self.store.set_last_pulled_seq(&self.key, max_seq)?;
-        Ok(messages)
+        Ok((messages, decrypt_errors))
     }
 
     pub async fn history(

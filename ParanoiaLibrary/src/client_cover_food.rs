@@ -133,7 +133,8 @@ impl ClientCover for FoodDeliveryClientCover {
 
     fn unwrap_push_response(&self, body: &Value) -> Result<()> {
         if !body["ok"].as_bool().unwrap_or(false) {
-            return Err(anyhow!("Push failed: {}", body));
+            let msg = body["message"].as_str().unwrap_or("unknown error");
+            return Err(anyhow!("Push failed: {msg}"));
         }
         Ok(())
     }

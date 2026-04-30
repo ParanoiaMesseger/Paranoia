@@ -265,6 +265,30 @@ impl LocalStore {
         Ok(messages)
     }
 
+    // ── dialogue deletion ─────────────────────────────────────────────────
+
+    /// Удалить все локальные данные диалога из SQLite.
+    pub fn delete_dialogue(&self, dialogue: &DialogueKey) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM messages WHERE dialogue_a = ?1 AND dialogue_b = ?2",
+            params![dialogue.a, dialogue.b],
+        )?;
+        conn.execute(
+            "DELETE FROM seq_map WHERE dialogue_a = ?1 AND dialogue_b = ?2",
+            params![dialogue.a, dialogue.b],
+        )?;
+        conn.execute(
+            "DELETE FROM dialogue_state WHERE dialogue_a = ?1 AND dialogue_b = ?2",
+            params![dialogue.a, dialogue.b],
+        )?;
+        conn.execute(
+            "DELETE FROM incoming_chunks WHERE dialogue_a = ?1 AND dialogue_b = ?2",
+            params![dialogue.a, dialogue.b],
+        )?;
+        Ok(())
+    }
+
     // ── chunks ────────────────────────────────────────────────────────────
 
     pub fn save_chunk(

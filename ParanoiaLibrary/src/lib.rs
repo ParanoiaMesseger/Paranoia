@@ -53,4 +53,8 @@ impl ParanoiaClient {
     pub fn transport(&self) -> Arc<Transport> {
         Arc::clone(&self.transport)
     }
+
+    pub fn delete_local_dialogue(&self, key: &DialogueKey) -> anyhow::Result<()> {
+        self.store.delete_dialogue(key)
+    }
 }

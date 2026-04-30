@@ -181,7 +181,10 @@ async fn cmd_send(
 async fn cmd_receive(server_url: &str, username: &str, db_path: &str, peer: &str) -> Result<()> {
     let client = build_client(server_url, username, db_path)?;
     let dialogue = build_dialogue(&client, username, peer)?;
-    let msgs = dialogue.receive().await?;
+    let (msgs, decrypt_errors) = dialogue.receive().await?;
+    if decrypt_errors > 0 {
+        eprintln!("Warning: {decrypt_errors} message(s) could not be decrypted (wrong session key?)");
+    }
     for m in msgs {
         match &m.content {
             MessageContent::Text(t) => {
