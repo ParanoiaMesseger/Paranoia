@@ -84,6 +84,8 @@ private:
     void loadClientConfig();
     void saveDialogs() const;
     void loadDialogs();
+    void loadHistory(const QString &peer);
+    void appendMessages(const QString &peer, const QVariantList &messages);
 
     QByteArray deriveKey(const QString &sharedSecret) const;
     QVariantList parseMessages(const QString &json) const;

@@ -7,6 +7,7 @@
 #include <QPointer>
 #include <QDebug>
 #include <QFile>
+#include <algorithm>
 
 ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 {
@@ -210,8 +211,9 @@ void ClientBackend::openChat(const QString &peer)
 {
     m_activePeer = peer;
     if (isLoggedIn() && findDialog(peer)) {
-        fetchMessages();
+        loadHistory(peer);
         m_pollTimer->start();
+        fetchMessages();
     }
 }
 
@@ -242,18 +244,25 @@ void ClientBackend::sendText(const QString &text)
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        int res = paranoia_send_text(
+        char *json = paranoia_send_text_json(
             self->m_handle,
             username.toUtf8().constData(),
             peer.toUtf8().constData(),
             reinterpret_cast<const uint8_t *>(key.constData()),
             text.toUtf8().constData()
         );
-        qDebug() << "[sendText] peer=" << peer << "result=" << res;
-        QMetaObject::invokeMethod(self, [self, res]() {
+        if (!json) {
+            QMetaObject::invokeMethod(self, [self]() {
+                if (self) emit self->sendError("Ошибка отправки сообщения.");
+            });
+            return;
+        }
+        QString jsonStr = QString::fromUtf8(json);
+        paranoia_free_string(json);
+        QMetaObject::invokeMethod(self, [self, peer, jsonStr]() {
             if (!self) return;
-            if (res == 0) self->fetchMessages();
-            else          emit self->sendError("Ошибка отправки сообщения.");
+            self->appendMessages(peer, self->parseMessages(jsonStr));
+            self->fetchMessages();
         });
     });
 }
@@ -289,28 +298,7 @@ void ClientBackend::fetchMessages()
 
         QMetaObject::invokeMethod(self, [self, jsonStr, peer]() {
             if (!self) return;
-            auto newMsgs = self->parseMessages(jsonStr);
-            if (newMsgs.isEmpty()) return;
-
-            auto &cache = self->m_messageCache[peer];
-            auto &seen  = self->m_seenIds[peer];
-            for (const auto &msg : std::as_const(newMsgs)) {
-                QString id = msg.toMap()["id"].toString();
-                if (!seen.contains(id)) {
-                    seen.insert(id);
-                    cache.append(msg);
-                }
-            }
-
-            for (auto &d : self->m_dialogs) {
-                if (d.peer == peer) {
-                    d.lastMsg = cache.last().toMap()["text"].toString();
-                    break;
-                }
-            }
-
-            emit self->messagesReceived(cache);
-            emit self->dialogsChanged();
+            self->appendMessages(peer, self->parseMessages(jsonStr));
         });
     });
 }
@@ -318,6 +306,69 @@ void ClientBackend::fetchMessages()
 QVariantList ClientBackend::getCachedMessages(const QString &peer) const
 {
     return m_messageCache.value(peer);
+}
+
+void ClientBackend::loadHistory(const QString &peer)
+{
+    auto *dlg = findDialog(peer);
+    if (!dlg) return;
+
+    QString username = m_username;
+    QByteArray key = dlg->sessionKey;
+    QPointer<ClientBackend> self(this);
+    QThreadPool::globalInstance()->start([self, peer, username, key]() {
+        if (!self) return;
+        QMutexLocker locker(&self->m_handleMutex);
+        if (!self->m_handle) return;
+        char *json = paranoia_history(
+            self->m_handle,
+            username.toUtf8().constData(),
+            peer.toUtf8().constData(),
+            reinterpret_cast<const uint8_t *>(key.constData()),
+            500
+        );
+        if (!json) return;
+        QString jsonStr = QString::fromUtf8(json);
+        paranoia_free_string(json);
+        QMetaObject::invokeMethod(self, [self, peer, jsonStr]() {
+            if (!self) return;
+            self->m_messageCache[peer].clear();
+            self->m_seenIds[peer].clear();
+            self->appendMessages(peer, self->parseMessages(jsonStr));
+        });
+    });
+}
+
+void ClientBackend::appendMessages(const QString &peer, const QVariantList &messages)
+{
+    if (messages.isEmpty()) return;
+
+    auto &cache = m_messageCache[peer];
+    auto &seen = m_seenIds[peer];
+    for (const auto &msg : messages) {
+        QString id = msg.toMap()["id"].toString();
+        if (!id.isEmpty() && !seen.contains(id)) {
+            seen.insert(id);
+            cache.append(msg);
+        }
+    }
+
+    std::sort(cache.begin(), cache.end(), [](const QVariant &lhs, const QVariant &rhs) {
+        return lhs.toMap()["ts"].toLongLong() < rhs.toMap()["ts"].toLongLong();
+    });
+
+    if (!cache.isEmpty()) {
+        for (auto &d : m_dialogs) {
+            if (d.peer == peer) {
+                d.lastMsg = cache.last().toMap()["text"].toString();
+                break;
+            }
+        }
+    }
+
+    saveDialogs();
+    emit messagesReceived(cache);
+    emit dialogsChanged();
 }
 
 void ClientBackend::onPollTimer()
@@ -401,6 +452,7 @@ void ClientBackend::saveDialogs() const
         QJsonObject o;
         o["peer"] = d.peer;
         o["key"]  = QString::fromLatin1(d.sessionKey.toBase64());
+        o["lastMsg"] = d.lastMsg;
         arr.append(QJsonValue(o));
     }
     QFile f("dialogs.json");
@@ -419,8 +471,9 @@ void ClientBackend::loadDialogs()
         auto obj = val.toObject();
         QString peer   = obj["peer"].toString();
         QByteArray key = QByteArray::fromBase64(obj["key"].toString().toLatin1());
+        QString lastMsg = obj["lastMsg"].toString();
         if (!peer.isEmpty() && key.size() == 32)
-            m_dialogs.append({peer, key, QString()});
+            m_dialogs.append({peer, key, lastMsg});
     }
 }
 

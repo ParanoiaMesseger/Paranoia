@@ -24,7 +24,13 @@ int paranoia_register_user(const char *server_url, const char *username, const c
 int paranoia_send_text(ParanoiaHandle *handle, const char *user_a, const char *user_b, const uint8_t *session_key,
                        const char *text);
 
+char *paranoia_send_text_json(ParanoiaHandle *handle, const char *user_a, const char *user_b,
+                              const uint8_t *session_key, const char *text);
+
 char *paranoia_receive(ParanoiaHandle *handle, const char *user_a, const char *user_b, const uint8_t *session_key);
+
+char *paranoia_history(ParanoiaHandle *handle, const char *user_a, const char *user_b, const uint8_t *session_key,
+                       uintptr_t limit);
 
 // --- Память ---
 void paranoia_free_string(char *s);

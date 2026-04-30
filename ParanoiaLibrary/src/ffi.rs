@@ -7,7 +7,7 @@ use tokio::runtime::Runtime;
 
 use crate::{
     ParanoiaClient, ClientConfig,
-    types::{DialogueKey, DialogueConfig},
+    types::{DialogueKey, DialogueConfig, Message, MessageContent},
 };
 
 // Непрозрачный хэндл для C++
@@ -81,6 +81,32 @@ pub extern "C" fn paranoia_send_text(
     }
 }
 
+/// Отправить текстовое сообщение и вернуть сохранённое локальное представление.
+/// NULL означает ошибку отправки/сохранения. Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_text_json(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    session_key: *const u8,
+    text: *const c_char,
+) -> *mut c_char {
+    let h = unsafe { &*handle };
+    let a    = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
+    let b    = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let text = unsafe { CStr::from_ptr(text)   }.to_str().unwrap_or("").to_string();
+    let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
+        .try_into().unwrap();
+
+    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let dialogue = h.client.open_dialogue(cfg);
+
+    match h.rt.block_on(dialogue.send_text(text)) {
+        Ok(msg) => message_to_c_string(&msg),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 use crate::AdminKeyPair;
 
 /// Генерировать новую пару ключей администратора.
@@ -146,16 +172,32 @@ pub extern "C" fn paranoia_receive(
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.receive()) {
-        Ok(msgs) => {
-            let json = serde_json::json!(msgs.iter().map(|m| serde_json::json!({
-                "id":     m.id,
-                "sender": m.sender,
-                "content": format!("{:?}", m.content),
-                "ts":     m.timestamp.timestamp_millis(),
-                "seq":    m.server_seq,
-            })).collect::<Vec<_>>());
-            CString::new(json.to_string()).unwrap().into_raw()
-        }
+        Ok(msgs) => messages_to_c_string(&msgs),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Получить локальную историю диалога из SQLite.
+/// Возвращает JSON-массив в том же формате, что paranoia_receive.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_history(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    session_key: *const u8,
+    limit: usize,
+) -> *mut c_char {
+    let h   = unsafe { &*handle };
+    let a   = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
+    let b   = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
+        .try_into().unwrap();
+
+    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let dialogue = h.client.open_dialogue(cfg);
+
+    match h.rt.block_on(dialogue.history(limit, None)) {
+        Ok(msgs) => messages_to_c_string(&msgs),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -165,5 +207,37 @@ pub extern "C" fn paranoia_receive(
 pub extern "C" fn paranoia_free_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe { drop(CString::from_raw(s)); }
+    }
+}
+
+fn messages_to_c_string(msgs: &[Message]) -> *mut c_char {
+    let json = serde_json::json!(msgs.iter().map(message_to_json).collect::<Vec<_>>());
+    CString::new(json.to_string()).unwrap().into_raw()
+}
+
+fn message_to_c_string(msg: &Message) -> *mut c_char {
+    let json = serde_json::json!([message_to_json(msg)]);
+    CString::new(json.to_string()).unwrap().into_raw()
+}
+
+fn message_to_json(m: &Message) -> serde_json::Value {
+    serde_json::json!({
+        "id":     m.id,
+        "sender": m.sender,
+        "content": message_content_for_ui(&m.content),
+        "ts":     m.timestamp.timestamp_millis(),
+        "seq":    m.server_seq,
+    })
+}
+
+fn message_content_for_ui(content: &MessageContent) -> String {
+    match content {
+        MessageContent::Text(text) => format!("Text({text:?})"),
+        MessageContent::File(_) => "File(...)".to_string(),
+        MessageContent::Image(_) => "Image(...)".to_string(),
+        MessageContent::Voice(_) => "Voice(...)".to_string(),
+        MessageContent::FileChunk { .. } => "FileChunk(...)".to_string(),
+        MessageContent::ReadReceipt { .. } => "ReadReceipt(...)".to_string(),
+        MessageContent::Delete { .. } => "Delete(...)".to_string(),
     }
 }
