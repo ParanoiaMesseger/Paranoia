@@ -12,7 +12,7 @@ codegen-units = 1
 [lib]
 name = "paranoia_lib"
 path = "src/lib.rs"
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -34,3 +34,6 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 mime = "0.3"
 tokio-util = "0.7"
+
+[dev-dependencies]
+tempfile = "3"

@@ -30,8 +30,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config_path = "./configs/Paranoia.json";
-    let config = Config::load(config_path)?;
+    let config_path = std::env::var("PARANOIA_CONFIG")
+        .unwrap_or_else(|_| "./configs/Paranoia.json".to_string());
+    let config = Config::load(&config_path)?;
     let store_path = config.store_path.clone();
     let port = config.port;
 
