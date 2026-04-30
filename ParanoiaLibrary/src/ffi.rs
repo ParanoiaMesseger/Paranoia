@@ -440,7 +440,8 @@ fn message_content_for_ui(content: &MessageContent) -> String {
 }
 
 /// Классифицировать ошибку отправки в строку для paranoia_last_error().
-fn classify_send_error(err: &str) -> String {
+/// pub(crate) для unit-тестов.
+pub(crate) fn classify_send_error(err: &str) -> String {
     if err.contains("Duplicate seq") || err.contains("duplicate_seq") {
         "duplicate_seq".to_string()
     } else {
@@ -448,11 +449,114 @@ fn classify_send_error(err: &str) -> String {
     }
 }
 
-fn classify_network_error(err: &str, fallback: &str) -> String {
+pub(crate) fn classify_network_error(err: &str, fallback: &str) -> String {
     let lower = err.to_ascii_lowercase();
-    if lower.contains("connection") || lower.contains("connect") || lower.contains("timeout") {
+    // reqwest ошибки недоступности сервера содержат одно из этих ключевых слов.
+    // "error sending request" — стандартный префикс reqwest при сбое транспорта.
+    if lower.contains("connection")
+        || lower.contains("connect")
+        || lower.contains("timeout")
+        || lower.contains("error sending request")
+        || lower.contains("refused")
+    {
         "server_unavailable".to_string()
     } else {
         fallback.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── classify_send_error ──────────────────────────────────────────────────
+
+    #[test]
+    fn duplicate_seq_is_classified() {
+        assert_eq!(classify_send_error("Duplicate seq 42"), "duplicate_seq");
+        assert_eq!(classify_send_error("Push failed: Duplicate seq 1"), "duplicate_seq");
+        assert_eq!(classify_send_error("error: duplicate_seq"), "duplicate_seq");
+    }
+
+    #[test]
+    fn duplicate_seq_does_not_leak_server_data() {
+        // seq number и dialogue ID не должны появляться в результате
+        let raw = "Push failed: Duplicate seq 99 for dialogue:deadbeefcafe0000";
+        let classified = classify_send_error(raw);
+        assert_eq!(classified, "duplicate_seq");
+        assert!(!classified.contains("99"));
+        assert!(!classified.contains("deadbeef"));
+        assert!(!classified.contains("dialogue"));
+    }
+
+    #[test]
+    fn network_error_classified_as_server_unavailable() {
+        assert_eq!(
+            classify_network_error("connection refused", "fallback"),
+            "server_unavailable"
+        );
+        assert_eq!(
+            classify_network_error("connect error: refused", "fallback"),
+            "server_unavailable"
+        );
+        assert_eq!(
+            classify_network_error("request timeout after 30s", "fallback"),
+            "server_unavailable"
+        );
+    }
+
+    #[test]
+    fn network_error_strips_server_url() {
+        // URL сервера не должен попасть в результат
+        let raw = "connection refused to http://secret.internal.server.example.com:8443/push";
+        let classified = classify_network_error(raw, "send_error");
+        assert_eq!(classified, "server_unavailable");
+        assert!(!classified.contains("secret.internal"));
+        assert!(!classified.contains("example.com"));
+        assert!(!classified.contains("http://"));
+        assert!(!classified.contains("8443"));
+    }
+
+    #[test]
+    fn send_error_strips_raw_server_response() {
+        // Сырой ответ сервера (payload, приватные данные) не должен попасть в результат
+        let raw = "Push failed: internal state dump: private_key=abc123 payload_b64=XXXYYY==";
+        let classified = classify_send_error(raw);
+        assert_eq!(classified, "send_error");
+        assert!(!classified.contains("private_key"));
+        assert!(!classified.contains("abc123"));
+        assert!(!classified.contains("payload_b64"));
+        assert!(!classified.contains("XXXYYY"));
+    }
+
+    #[test]
+    fn receive_error_strips_raw_server_response() {
+        let raw = "Pull failed: {\"ok\":false,\"error\":\"internal: db_path=/var/data/users/bob.db\"}";
+        let classified = classify_network_error(raw, "receive_error");
+        assert_eq!(classified, "receive_error");
+        assert!(!classified.contains("db_path"));
+        assert!(!classified.contains("/var/data"));
+        assert!(!classified.contains("bob.db"));
+    }
+
+    #[test]
+    fn unknown_error_uses_fallback_without_raw_message() {
+        let raw = "some unknown internal error with sensitive_token=s3cr3t";
+        let classified = classify_send_error(raw);
+        assert_eq!(classified, "send_error");
+        assert!(!classified.contains("sensitive_token"));
+        assert!(!classified.contains("s3cr3t"));
+    }
+
+    #[test]
+    fn reqwest_error_sending_request_is_server_unavailable() {
+        // reqwest 0.13 возвращает "error sending request for url (...)" при сбое транспорта
+        let raw = "error sending request for url (http://secret.internal.server:9000/push)";
+        let classified = classify_network_error(raw, "send_error");
+        assert_eq!(classified, "server_unavailable");
+        // URL не должен утечь
+        assert!(!classified.contains("secret.internal"));
+        assert!(!classified.contains("9000"));
+        assert!(!classified.contains("http://"));
     }
 }
