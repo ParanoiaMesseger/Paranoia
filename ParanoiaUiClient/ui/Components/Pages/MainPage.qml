@@ -19,6 +19,9 @@ Rectangle {
         function onDialogsChanged()       { dialogsView.model = Backend.getDialogs() }
         function onUserRegistered()       { regFeedback.text = "Пользователь зарегистрирован ✓"; registerUserPopup.close() }
         function onRegisterUserError(msg) { regFeedback.text = msg }
+        function onDialogDeleted(peer)    { dialogsView.model = Backend.getDialogs() }
+        function onServerHistoryCleared(peer) { serverHistoryFeedback.text = "История на сервере удалена ✓" }
+        function onServerHistoryError(msg)    { serverHistoryFeedback.text = msg }
     }
 
     ColumnLayout {
@@ -161,6 +164,7 @@ Rectangle {
                         ScrollBar.vertical: ScrollBar {}
 
                         delegate: Rectangle {
+                            id: dlgItem
                             width:  ListView.view.width
                             height: 60
                             color:  dlgArea.containsMouse ? Theme.bgSecondary : "transparent"
@@ -168,21 +172,42 @@ Rectangle {
                             Row {
                                 anchors.fill:        parent
                                 anchors.leftMargin:  16
-                                anchors.rightMargin: 16
+                                anchors.rightMargin: 48
                                 spacing:             12
 
-                                Rectangle {
-                                    width:  38; height: 38
-                                    radius: 19
-                                    color:  Theme.bgButton
+                                // Аватар + индикатор ключа
+                                Item {
+                                    width: 38; height: 38
                                     anchors.verticalCenter: parent.verticalCenter
 
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text:  modelData.peer.charAt(0).toUpperCase()
-                                        color: "#FFFFFF"
-                                        font.pixelSize: Theme.fontMd
-                                        font.weight:    Font.Bold
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: 19
+                                        color:  Theme.bgButton
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text:  modelData.peer.charAt(0).toUpperCase()
+                                            color: "#FFFFFF"
+                                            font.pixelSize: Theme.fontMd
+                                            font.weight:    Font.Bold
+                                        }
+                                    }
+
+                                    // Иконка замка — ключ установлен
+                                    Rectangle {
+                                        anchors.right:  parent.right
+                                        anchors.bottom: parent.bottom
+                                        width: 14; height: 14
+                                        radius: 7
+                                        color:  modelData.hasKey ? Theme.success : Theme.error
+                                        visible: true
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text:  modelData.hasKey ? "🔒" : "⚠"
+                                            font.pixelSize: 8
+                                        }
                                     }
                                 }
 
@@ -197,12 +222,43 @@ Rectangle {
                                         font.weight:    Font.Medium
                                     }
                                     Text {
-                                        text:           modelData.lastMsg || "Нет сообщений"
-                                        color:          Theme.textSecondary
+                                        text: {
+                                            if (!modelData.hasKey) return "⚠ Ключ не установлен"
+                                            return modelData.lastMsg || "Нет сообщений"
+                                        }
+                                        color: !modelData.hasKey ? Theme.error : Theme.textSecondary
                                         font.pixelSize: Theme.fontSm
                                         font.family:    Theme.fontFamily
                                         elide:          Text.ElideRight
-                                        width:          dialogsView.width - 80
+                                        width:          dialogsView.width - 110
+                                    }
+                                }
+                            }
+
+                            // Кнопка меню диалога
+                            Rectangle {
+                                anchors.right:         parent.right
+                                anchors.rightMargin:   8
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 32; height: 32
+                                radius: 16
+                                color: menuBtnArea.containsMouse ? Theme.bgSecondary : "transparent"
+                                visible: dlgArea.containsMouse || menuBtnArea.containsMouse
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text:  "⋮"
+                                    color: Theme.textSecondary
+                                    font.pixelSize: 18
+                                }
+
+                                MouseArea {
+                                    id: menuBtnArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: {
+                                        dlgContextMenu.selectedPeer = modelData.peer
+                                        dlgContextMenu.popup()
                                     }
                                 }
                             }
@@ -217,7 +273,12 @@ Rectangle {
                                 id:           dlgArea
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                onClicked:    root.openChat(modelData.peer)
+                                onClicked: {
+                                    if (modelData.hasKey)
+                                        root.openChat(modelData.peer)
+                                    else
+                                        noKeyWarning.open()
+                                }
                             }
                         }
 
@@ -400,6 +461,445 @@ Rectangle {
                         secondary:        true
                         onClicked:        root.installNewServer()
                     }
+                }
+            }
+        }
+    }
+
+    // ── Контекстное меню диалога ──────────────────────────
+    Menu {
+        id: dlgContextMenu
+        property string selectedPeer: ""
+
+        background: Rectangle {
+            radius: Theme.radiusSm
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        MenuItem {
+            text: "Обновить ключ диалога"
+            contentItem: Text {
+                text:           parent.text
+                color:          Theme.textPrimary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                leftPadding:    8
+            }
+            background: Rectangle {
+                color: parent.highlighted ? Theme.bgButton : "transparent"
+            }
+            onTriggered: {
+                updateKeyTarget.text = dlgContextMenu.selectedPeer
+                updateKeyPopup.open()
+            }
+        }
+
+        MenuItem {
+            text: "Очистить историю на сервере"
+            contentItem: Text {
+                text:           parent.text
+                color:          Theme.textPrimary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                leftPadding:    8
+            }
+            background: Rectangle {
+                color: parent.highlighted ? Theme.bgButton : "transparent"
+            }
+            onTriggered: {
+                serverHistoryFeedback.text = ""
+                clearHistoryTarget.text = dlgContextMenu.selectedPeer
+                clearHistoryPopup.open()
+            }
+        }
+
+        MenuSeparator {
+            contentItem: Rectangle { height: 1; color: Theme.separator }
+        }
+
+        MenuItem {
+            text: "Удалить локальную историю"
+            contentItem: Text {
+                text:           parent.text
+                color:          Theme.textPrimary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                leftPadding:    8
+            }
+            background: Rectangle {
+                color: parent.highlighted ? Theme.bgButton : "transparent"
+            }
+            onTriggered: {
+                deleteLocalTarget.text = dlgContextMenu.selectedPeer
+                deleteLocalPopup.open()
+            }
+        }
+
+        MenuItem {
+            text: "Удалить диалог"
+            contentItem: Text {
+                text:           parent.text
+                color:          Theme.error
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                leftPadding:    8
+            }
+            background: Rectangle {
+                color: parent.highlighted ? "#2A1A1C" : "transparent"
+            }
+            onTriggered: {
+                deleteDialogTarget.text = dlgContextMenu.selectedPeer
+                deleteDialogPopup.open()
+            }
+        }
+    }
+
+    // ── Попап: нет ключа диалога ──────────────────────────
+    Popup {
+        id: noKeyWarning
+        anchors.centerIn: Overlay.overlay
+        width: 300; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  "⚠ Ключ диалога не установлен"
+                color: Theme.error
+                font.pixelSize: Theme.fontMd
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "Для начала переписки оба участника должны ввести одинаковый общий секрет. Обновите ключ через меню диалога (⋮)."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+            ParaButton {
+                Layout.alignment: Qt.AlignHCenter
+                text: "Понятно"
+                onClicked: noKeyWarning.close()
+            }
+        }
+    }
+
+    // ── Попап: обновить ключ диалога ──────────────────────
+    Popup {
+        id: updateKeyPopup
+        anchors.centerIn: Overlay.overlay
+        width: 320; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        onOpened: { newKeyInput.text = ""; updateKeyError.text = "" }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  "Обновить ключ диалога"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+
+            Text {
+                id: updateKeyTarget
+                Layout.fillWidth: true
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Введите новый общий секрет. Обе стороны должны ввести одинаковое значение."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            ParaInput {
+                id: newKeyInput
+                Layout.fillWidth: true
+                label:       "Новый общий секрет"
+                placeholder: "секретная фраза…"
+                echoMode:    TextInput.Password
+            }
+
+            Text {
+                id: updateKeyError
+                Layout.fillWidth: true
+                color: Theme.error
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Обновить"
+                    onClicked: {
+                        let secret = newKeyInput.text
+                        if (secret.length < 4) {
+                            updateKeyError.text = "Секрет слишком короткий (минимум 4 символа)."
+                            return
+                        }
+                        Backend.updateDialogKey(updateKeyTarget.text, secret)
+                        updateKeyPopup.close()
+                    }
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Отмена"
+                    secondary: true
+                    onClicked: updateKeyPopup.close()
+                }
+            }
+        }
+    }
+
+    // ── Попап: очистить историю на сервере ────────────────
+    Popup {
+        id: clearHistoryPopup
+        anchors.centerIn: Overlay.overlay
+        width: 340; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        onOpened: { cutSeqInput.text = ""; serverHistoryFeedback.text = "" }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  "Удалить серверную историю"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+
+            Text {
+                id: clearHistoryTarget
+                Layout.fillWidth: true
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Удалить с сервера все сообщения до указанного номера (seq) включительно. Введите 0 для удаления всей истории диалога."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            ParaInput {
+                id: cutSeqInput
+                Layout.fillWidth: true
+                label:       "Номер сообщения (seq)"
+                placeholder: "0 = вся история"
+            }
+
+            Text {
+                id: serverHistoryFeedback
+                Layout.fillWidth: true
+                color: text.includes("✓") ? Theme.success : Theme.error
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Удалить"
+                    onClicked: {
+                        let seq = parseInt(cutSeqInput.text) || 0
+                        Backend.clearServerHistory(clearHistoryTarget.text, seq)
+                    }
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Закрыть"
+                    secondary: true
+                    onClicked: clearHistoryPopup.close()
+                }
+            }
+        }
+    }
+
+    // ── Попап: удалить локальную историю ─────────────────
+    Popup {
+        id: deleteLocalPopup
+        anchors.centerIn: Overlay.overlay
+        width: 320; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  "Удалить локальную историю"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+
+            Text {
+                id: deleteLocalTarget
+                Layout.fillWidth: true
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Локальная история диалога будет удалена из SQLite на этом устройстве. На сервере сообщения останутся зашифрованными."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Удалить"
+                    onClicked: {
+                        Backend.deleteDialogLocal(deleteLocalTarget.text)
+                        deleteLocalPopup.close()
+                    }
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Отмена"
+                    secondary: true
+                    onClicked: deleteLocalPopup.close()
+                }
+            }
+        }
+    }
+
+    // ── Попап: удалить диалог полностью ──────────────────
+    Popup {
+        id: deleteDialogPopup
+        anchors.centerIn: Overlay.overlay
+        width: 320; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  "Удалить диалог"
+                color: Theme.error
+                font.pixelSize: Theme.fontLg
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+
+            Text {
+                id: deleteDialogTarget
+                Layout.fillWidth: true
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Удалить диалог, локальную историю и ключ с этого устройства. На сервере зашифрованные данные останутся."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Удалить"
+                    onClicked: {
+                        let peer = deleteDialogTarget.text
+                        Backend.deleteDialogLocal(peer)
+                        Backend.removeDialog(peer)
+                        deleteDialogPopup.close()
+                    }
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Отмена"
+                    secondary: true
+                    onClicked: deleteDialogPopup.close()
                 }
             }
         }

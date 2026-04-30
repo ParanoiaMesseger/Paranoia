@@ -33,6 +33,11 @@ Rectangle {
             errorBar.visible = true
             errorTimer.restart()
         }
+        function onReceiveError(msg) {
+            errorText.text = msg
+            errorBar.visible = true
+            errorTimer.restart()
+        }
     }
 
     Component.onCompleted: Backend.openChat(root.peer)

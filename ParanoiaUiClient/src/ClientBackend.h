@@ -34,9 +34,11 @@ public:
     Q_INVOKABLE void registerUser(const QString &domain, const QString &username, const QString &pubkey);
 
     Q_INVOKABLE void addDialog(const QString &peer, const QString &sharedSecret);
+    Q_INVOKABLE void updateDialogKey(const QString &peer, const QString &newSharedSecret);
     Q_INVOKABLE void removeDialog(const QString &peer);
     Q_INVOKABLE QVariantList getDialogs() const;
     Q_INVOKABLE QVariantList getAdminServers() const;
+    Q_INVOKABLE bool hasDialogKey(const QString &peer) const;
 
     Q_INVOKABLE void openChat(const QString &peer);
     Q_INVOKABLE void stopChat();
@@ -44,6 +46,10 @@ public:
     Q_INVOKABLE void fetchMessages();
     Q_INVOKABLE QVariantList getCachedMessages(const QString &peer) const;
     Q_INVOKABLE QString activePeer() const;
+
+    // Управление историей (план п.5)
+    Q_INVOKABLE void deleteDialogLocal(const QString &peer);
+    Q_INVOKABLE void clearServerHistory(const QString &peer, quint64 cutSeq);
 
 signals:
     void keyPairGenerated(const QString &pubkey, const QString &privkey);
@@ -57,6 +63,10 @@ signals:
     void dialogsChanged();
     void messagesReceived(const QVariantList &messages);
     void sendError(const QString &msg);
+    void receiveError(const QString &msg);
+    void dialogDeleted(const QString &peer);
+    void serverHistoryCleared(const QString &peer);
+    void serverHistoryError(const QString &msg);
 
 private slots:
     void onPollTimer();
@@ -91,4 +101,5 @@ private:
     QVariantList parseMessages(const QString &json) const;
     QString extractText(const QString &debugContent) const;
     Dialog *findDialog(const QString &peer);
+    const Dialog *findDialog(const QString &peer) const;
 };

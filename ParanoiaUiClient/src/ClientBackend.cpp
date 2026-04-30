@@ -173,6 +173,21 @@ void ClientBackend::addDialog(const QString &peer, const QString &sharedSecret)
     saveDialogs();
 }
 
+void ClientBackend::updateDialogKey(const QString &peer, const QString &newSharedSecret)
+{
+    for (auto &d : m_dialogs) {
+        if (d.peer == peer) {
+            d.sessionKey = deriveKey(newSharedSecret);
+            // Сбрасываем кэш — при новом ключе старые сообщения нечитаемы
+            m_messageCache.remove(peer);
+            m_seenIds.remove(peer);
+            emit dialogsChanged();
+            saveDialogs();
+            return;
+        }
+    }
+}
+
 void ClientBackend::removeDialog(const QString &peer)
 {
     m_dialogs.removeIf([&peer](const Dialog &d) { return d.peer == peer; });
@@ -182,6 +197,12 @@ void ClientBackend::removeDialog(const QString &peer)
     saveDialogs();
 }
 
+bool ClientBackend::hasDialogKey(const QString &peer) const
+{
+    const Dialog *dlg = findDialog(peer);
+    return dlg != nullptr && dlg->sessionKey.size() == 32;
+}
+
 QVariantList ClientBackend::getDialogs() const
 {
     QVariantList result;
@@ -189,6 +210,7 @@ QVariantList ClientBackend::getDialogs() const
         QVariantMap m;
         m["peer"]    = d.peer;
         m["lastMsg"] = d.lastMsg;
+        m["hasKey"]  = (d.sessionKey.size() == 32);
         result.append(m);
     }
     return result;
@@ -203,6 +225,81 @@ QVariantList ClientBackend::getAdminServers() const
         result.append(m);
     }
     return result;
+}
+
+// ── History Management ────────────────────────────────────────────────────────
+
+void ClientBackend::deleteDialogLocal(const QString &peer)
+{
+    auto *dlg = findDialog(peer);
+    if (!dlg) return;
+
+    QString peerCopy = peer;
+    QString username = m_username;
+    QByteArray key   = dlg->sessionKey;
+
+    QPointer<ClientBackend> self(this);
+    QThreadPool::globalInstance()->start([self, peerCopy, username]() {
+        if (!self) return;
+        QMutexLocker locker(&self->m_handleMutex);
+        if (!self->m_handle) return;
+        int rc = paranoia_delete_local_dialogue(
+            self->m_handle,
+            username.toUtf8().constData(),
+            peerCopy.toUtf8().constData()
+        );
+        QMetaObject::invokeMethod(self, [self, peerCopy, rc]() {
+            if (!self) return;
+            if (rc == 0) {
+                self->m_messageCache.remove(peerCopy);
+                self->m_seenIds.remove(peerCopy);
+                emit self->dialogDeleted(peerCopy);
+                emit self->messagesReceived({});
+            } else {
+                QString err = QString::fromUtf8(paranoia_last_error());
+                emit self->serverHistoryError("Ошибка удаления локальной истории: " + err);
+            }
+        });
+    });
+}
+
+void ClientBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
+{
+    auto *dlg = findDialog(peer);
+    if (!dlg) {
+        emit serverHistoryError("Диалог не найден.");
+        return;
+    }
+
+    QString peerCopy = peer;
+    QString username = m_username;
+    QByteArray key   = dlg->sessionKey;
+
+    QPointer<ClientBackend> self(this);
+    QThreadPool::globalInstance()->start([self, peerCopy, username, key, cutSeq]() {
+        if (!self) return;
+        QMutexLocker locker(&self->m_handleMutex);
+        if (!self->m_handle) return;
+        int rc = paranoia_determinate(
+            self->m_handle,
+            username.toUtf8().constData(),
+            peerCopy.toUtf8().constData(),
+            reinterpret_cast<const uint8_t *>(key.constData()),
+            cutSeq
+        );
+        QMetaObject::invokeMethod(self, [self, peerCopy, rc]() {
+            if (!self) return;
+            if (rc == 0) {
+                emit self->serverHistoryCleared(peerCopy);
+            } else {
+                QString err = QString::fromUtf8(paranoia_last_error());
+                if (err == "server_unavailable")
+                    emit self->serverHistoryError("Сервер недоступен.");
+                else
+                    emit self->serverHistoryError("Ошибка удаления серверной истории: " + err);
+            }
+        });
+    });
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
@@ -252,8 +349,15 @@ void ClientBackend::sendText(const QString &text)
             text.toUtf8().constData()
         );
         if (!json) {
-            QMetaObject::invokeMethod(self, [self]() {
-                if (self) emit self->sendError("Ошибка отправки сообщения.");
+            QString err = QString::fromUtf8(paranoia_last_error());
+            QMetaObject::invokeMethod(self, [self, err]() {
+                if (!self) return;
+                if (err == "duplicate_seq")
+                    emit self->sendError("Ошибка синхронизации: дублирующийся номер пакета. Перезайдите.");
+                else if (err == "server_unavailable")
+                    emit self->sendError("Сервер недоступен. Проверьте соединение.");
+                else
+                    emit self->sendError("Ошибка отправки сообщения.");
             });
             return;
         }
@@ -288,16 +392,29 @@ void ClientBackend::fetchMessages()
             peer.toUtf8().constData(),
             reinterpret_cast<const uint8_t *>(key.constData())
         );
+
+        // Проверяем на ошибки расшифровки даже при успешном получении
+        QString lastErr = QString::fromUtf8(paranoia_last_error());
+
         if (!json) {
-            qDebug() << "[fetchMessages] paranoia_receive returned null for peer=" << peer;
+            QMetaObject::invokeMethod(self, [self, lastErr]() {
+                if (!self) return;
+                if (lastErr == "server_unavailable")
+                    emit self->receiveError("Сервер недоступен.");
+                else if (!lastErr.isEmpty())
+                    emit self->receiveError("Ошибка получения: " + lastErr);
+            });
             return;
         }
+
         QString jsonStr = QString::fromUtf8(json);
         paranoia_free_string(json);
-        qDebug() << "[fetchMessages] JSON from server:" << jsonStr;
 
-        QMetaObject::invokeMethod(self, [self, jsonStr, peer]() {
+        QMetaObject::invokeMethod(self, [self, jsonStr, peer, lastErr]() {
             if (!self) return;
+            if (lastErr.startsWith("decryption_failed:")) {
+                emit self->receiveError("Ошибка расшифровки: неверный ключ диалога или повреждённые данные.");
+            }
             self->appendMessages(peer, self->parseMessages(jsonStr));
         });
     });
@@ -398,7 +515,7 @@ QVariantList ClientBackend::parseMessages(const QString &json) const
         msg["ts"]     = obj["ts"].toVariant();
         msg["seq"]    = obj["seq"].toVariant();
         msg["isMe"]   = (obj["sender"].toString() == m_username);
-        // Skip service messages (read receipts, deletes)
+        // Пропускаем служебные сообщения (подтверждения прочтения, удаления)
         if (!msg["text"].toString().isEmpty())
             result.append(msg);
     }
@@ -480,6 +597,13 @@ void ClientBackend::loadDialogs()
 ClientBackend::Dialog *ClientBackend::findDialog(const QString &peer)
 {
     for (auto &d : m_dialogs)
+        if (d.peer == peer) return &d;
+    return nullptr;
+}
+
+const ClientBackend::Dialog *ClientBackend::findDialog(const QString &peer) const
+{
+    for (const auto &d : m_dialogs)
         if (d.peer == peer) return &d;
     return nullptr;
 }
