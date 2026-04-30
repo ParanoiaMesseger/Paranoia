@@ -1,14 +1,14 @@
 // src/ffi.rs
+use base64::Engine;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Arc;
-use base64::Engine;
 use tokio::runtime::Runtime;
 
 use crate::{
-    ParanoiaClient, ClientConfig,
-    types::{DialogueKey, DialogueConfig, Message, MessageContent},
+    ClientConfig, ParanoiaClient,
+    types::{DialogueConfig, DialogueKey, Message, MessageContent},
 };
 
 // ── Thread-local хранилище последней ошибки ──────────────────────────────────
@@ -19,8 +19,8 @@ thread_local! {
 
 fn set_last_error(msg: &str) {
     LAST_ERROR.with(|e| {
-        *e.borrow_mut() = CString::new(msg)
-            .unwrap_or_else(|_| CString::new("unknown error").unwrap());
+        *e.borrow_mut() =
+            CString::new(msg).unwrap_or_else(|_| CString::new("unknown error").unwrap());
     });
 }
 
@@ -50,10 +50,21 @@ pub extern "C" fn paranoia_client_new(
     signing_key_b64: *const c_char,
     db_path: *const c_char,
 ) -> *mut ParanoiaHandle {
-    let server_url = unsafe { CStr::from_ptr(server_url) }.to_str().unwrap_or("").to_string();
-    let username   = unsafe { CStr::from_ptr(username)   }.to_str().unwrap_or("").to_string();
-    let sk_b64     = unsafe { CStr::from_ptr(signing_key_b64) }.to_str().unwrap_or("");
-    let db_path    = unsafe { CStr::from_ptr(db_path)    }.to_str().unwrap_or("").to_string();
+    let server_url = unsafe { CStr::from_ptr(server_url) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let username = unsafe { CStr::from_ptr(username) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let sk_b64 = unsafe { CStr::from_ptr(signing_key_b64) }
+        .to_str()
+        .unwrap_or("");
+    let db_path = unsafe { CStr::from_ptr(db_path) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
 
     let sk_bytes = match base64::engine::general_purpose::STANDARD.decode(sk_b64) {
         Ok(b) if b.len() == 32 => b,
@@ -65,13 +76,18 @@ pub extern "C" fn paranoia_client_new(
     let sk_arr: [u8; 32] = sk_bytes.try_into().unwrap();
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_arr);
 
-    let cfg = ClientConfig { server_url, username, signing_key, db_path };
+    let cfg = ClientConfig {
+        server_url,
+        username,
+        signing_key,
+        db_path,
+    };
     let rt = Runtime::new().unwrap();
 
     match ParanoiaClient::new(cfg) {
         Ok(client) => Box::into_raw(Box::new(ParanoiaHandle { client, rt })),
-        Err(e) => {
-            set_last_error(&format!("client_init_error: {e}"));
+        Err(_) => {
+            set_last_error("client_init_error");
             std::ptr::null_mut()
         }
     }
@@ -81,7 +97,9 @@ pub extern "C" fn paranoia_client_new(
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_client_free(handle: *mut ParanoiaHandle) {
     if !handle.is_null() {
-        unsafe { drop(Box::from_raw(handle)); }
+        unsafe {
+            drop(Box::from_raw(handle));
+        }
     }
 }
 
@@ -92,21 +110,34 @@ pub extern "C" fn paranoia_send_text(
     handle: *mut ParanoiaHandle,
     user_a: *const c_char,
     user_b: *const c_char,
-    session_key: *const u8,   // 32 байта
+    session_key: *const u8, // 32 байта
     text: *const c_char,
 ) -> i32 {
     let h = unsafe { &*handle };
-    let a    = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
-    let b    = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
-    let text = unsafe { CStr::from_ptr(text)   }.to_str().unwrap_or("").to_string();
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let text = unsafe { CStr::from_ptr(text) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
     let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
-        .try_into().unwrap();
+        .try_into()
+        .unwrap();
 
-    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let cfg = DialogueConfig {
+        key: DialogueKey::new(&a, &b),
+        session_key: key,
+    };
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.send_text(text)) {
-        Ok(_)  => 0,
+        Ok(_) => 0,
         Err(e) => {
             set_last_error(&classify_send_error(&e.to_string()));
             -1
@@ -126,13 +157,26 @@ pub extern "C" fn paranoia_send_text_json(
     text: *const c_char,
 ) -> *mut c_char {
     let h = unsafe { &*handle };
-    let a    = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
-    let b    = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
-    let text = unsafe { CStr::from_ptr(text)   }.to_str().unwrap_or("").to_string();
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let text = unsafe { CStr::from_ptr(text) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
     let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
-        .try_into().unwrap();
+        .try_into()
+        .unwrap();
 
-    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let cfg = DialogueConfig {
+        key: DialogueKey::new(&a, &b),
+        session_key: key,
+    };
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.send_text(text)) {
@@ -170,29 +214,31 @@ pub extern "C" fn paranoia_register_user(
     secret_b64: *const c_char,
 ) -> i32 {
     let sk = unsafe { CStr::from_ptr(secret_b64) }.to_str().unwrap_or("");
-    let server_url  = unsafe { CStr::from_ptr(server_url) }.to_str().unwrap_or("");
-    let username    = unsafe { CStr::from_ptr(username) }.to_str().unwrap_or("");
-    let pubkey      = unsafe { CStr::from_ptr(user_pubkey_b64) }.to_str().unwrap_or("");
+    let server_url = unsafe { CStr::from_ptr(server_url) }.to_str().unwrap_or("");
+    let username = unsafe { CStr::from_ptr(username) }.to_str().unwrap_or("");
+    let pubkey = unsafe { CStr::from_ptr(user_pubkey_b64) }
+        .to_str()
+        .unwrap_or("");
     let sig = match AdminKeyPair::from_secret_b64(sk) {
         Ok(kp) => kp.sign_user_registration(username, pubkey),
-        Err(e) => {
-            set_last_error(&format!("invalid_admin_key: {e}"));
+        Err(_) => {
+            set_last_error("invalid_admin_key");
             return -1;
         }
     };
     let rt = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
-        Err(e) => {
-            set_last_error(&format!("runtime_error: {e}"));
+        Err(_) => {
+            set_last_error("runtime_error");
             return -1;
         }
     };
     let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
     let transport = crate::transport::Transport::new(server_url, cover);
     match rt.block_on(transport.reg(username, pubkey, sig.as_str())) {
-        Ok(_)  => 0,
+        Ok(_) => 0,
         Err(e) => {
-            set_last_error(&format!("register_error: {e}"));
+            set_last_error(&classify_network_error(&e.to_string(), "register_error"));
             -1
         }
     }
@@ -210,13 +256,23 @@ pub extern "C" fn paranoia_receive(
     user_b: *const c_char,
     session_key: *const u8,
 ) -> *mut c_char {
-    let h   = unsafe { &*handle };
-    let a   = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
-    let b   = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
     let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
-        .try_into().unwrap();
+        .try_into()
+        .unwrap();
 
-    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let cfg = DialogueConfig {
+        key: DialogueKey::new(&a, &b),
+        session_key: key,
+    };
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.receive()) {
@@ -228,11 +284,7 @@ pub extern "C" fn paranoia_receive(
         }
         Err(e) => {
             let err = e.to_string();
-            if err.contains("connection") || err.contains("connect") || err.contains("timeout") {
-                set_last_error("server_unavailable");
-            } else {
-                set_last_error(&format!("receive_error:{err}"));
-            }
+            set_last_error(&classify_network_error(&err, "receive_error"));
             std::ptr::null_mut()
         }
     }
@@ -249,19 +301,29 @@ pub extern "C" fn paranoia_history(
     session_key: *const u8,
     limit: usize,
 ) -> *mut c_char {
-    let h   = unsafe { &*handle };
-    let a   = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
-    let b   = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
     let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
-        .try_into().unwrap();
+        .try_into()
+        .unwrap();
 
-    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let cfg = DialogueConfig {
+        key: DialogueKey::new(&a, &b),
+        session_key: key,
+    };
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.history(limit, None)) {
         Ok(msgs) => messages_to_c_string(&msgs),
-        Err(e) => {
-            set_last_error(&format!("history_error: {e}"));
+        Err(_) => {
+            set_last_error("history_error");
             std::ptr::null_mut()
         }
     }
@@ -278,18 +340,28 @@ pub extern "C" fn paranoia_determinate(
     cut_seq: u64,
 ) -> i32 {
     let h = unsafe { &*handle };
-    let a = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
-    let b = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
     let key: [u8; 32] = unsafe { std::slice::from_raw_parts(session_key, 32) }
-        .try_into().unwrap();
+        .try_into()
+        .unwrap();
 
-    let cfg = DialogueConfig { key: DialogueKey::new(&a, &b), session_key: key };
+    let cfg = DialogueConfig {
+        key: DialogueKey::new(&a, &b),
+        session_key: key,
+    };
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.clear_server_history(cut_seq)) {
         Ok(_) => 0,
         Err(e) => {
-            set_last_error(&format!("determinate_error: {e}"));
+            set_last_error(&classify_network_error(&e.to_string(), "determinate_error"));
             -1
         }
     }
@@ -304,14 +376,20 @@ pub extern "C" fn paranoia_delete_local_dialogue(
     user_b: *const c_char,
 ) -> i32 {
     let h = unsafe { &*handle };
-    let a = unsafe { CStr::from_ptr(user_a) }.to_str().unwrap_or("").to_string();
-    let b = unsafe { CStr::from_ptr(user_b) }.to_str().unwrap_or("").to_string();
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
     let key = DialogueKey::new(&a, &b);
 
     match h.client.delete_local_dialogue(&key) {
         Ok(_) => 0,
-        Err(e) => {
-            set_last_error(&format!("delete_local_error: {e}"));
+        Err(_) => {
+            set_last_error("delete_local_error");
             -1
         }
     }
@@ -321,7 +399,9 @@ pub extern "C" fn paranoia_delete_local_dialogue(
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_free_string(s: *mut c_char) {
     if !s.is_null() {
-        unsafe { drop(CString::from_raw(s)); }
+        unsafe {
+            drop(CString::from_raw(s));
+        }
     }
 }
 
@@ -363,9 +443,16 @@ fn message_content_for_ui(content: &MessageContent) -> String {
 fn classify_send_error(err: &str) -> String {
     if err.contains("Duplicate seq") || err.contains("duplicate_seq") {
         "duplicate_seq".to_string()
-    } else if err.contains("connection") || err.contains("connect") || err.contains("timeout") {
+    } else {
+        classify_network_error(err, "send_error")
+    }
+}
+
+fn classify_network_error(err: &str, fallback: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("connection") || lower.contains("connect") || lower.contains("timeout") {
         "server_unavailable".to_string()
     } else {
-        format!("send_error:{err}")
+        fallback.to_string()
     }
 }
