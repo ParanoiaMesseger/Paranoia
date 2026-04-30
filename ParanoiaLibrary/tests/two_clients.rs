@@ -8,9 +8,16 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 use tempfile::TempDir;
+
+const TEST_PORT_START: usize = 41000;
+const TEST_PORT_END: usize = 65000;
+
+static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(TEST_PORT_START);
+static SERVER_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ── helper: клиент с явным путём к БД ────────────────────────────────────────
 fn build_client_db(
@@ -35,14 +42,10 @@ async fn two_clients_exchange_and_restore_history_from_sqlite() {
         Err(_) => return,
     };
 
-    let temp = TempDir::new().expect("create temp dir");
-    let port = free_port();
-    let server_url = format!("http://127.0.0.1:{port}");
     let admin = AdminKeyPair::generate();
-    let config_path = write_server_config(temp.path(), port, &admin.pubkey_b64());
-    let mut server = spawn_server(&server_bin, &config_path);
-
-    wait_for_server(&server_url).await;
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
 
     let alice_key = signing_key();
     let bob_key = signing_key();
@@ -144,6 +147,37 @@ fn write_server_config(root: &Path, port: u16, admin_key: &str) -> PathBuf {
     config_path
 }
 
+async fn start_server(server_bin: &str, root: &Path, admin_key: &str) -> (String, Child) {
+    let _start_guard = SERVER_START_LOCK.lock().await;
+    let (port, reservation) = reserve_test_port();
+    let server_url = format!("http://127.0.0.1:{port}");
+    let config_path = write_server_config(root, port, admin_key);
+
+    drop(reservation);
+    let server = spawn_server(server_bin, &config_path);
+    wait_for_server(&server_url).await;
+
+    (server_url, server)
+}
+
+fn reserve_test_port() -> (u16, TcpListener) {
+    for _ in TEST_PORT_START..TEST_PORT_END {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        if port > TEST_PORT_END {
+            NEXT_TEST_PORT.store(TEST_PORT_START, Ordering::Relaxed);
+            continue;
+        }
+
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port as u16)) {
+            return (port as u16, listener);
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+    let port = listener.local_addr().expect("read local addr").port();
+    (port, listener)
+}
+
 fn spawn_server(server_bin: &str, config_path: &Path) -> Child {
     Command::new(server_bin)
         .env("PARANOIA_CONFIG", config_path)
@@ -169,14 +203,6 @@ async fn wait_for_server(server_url: &str) {
     panic!("server did not start in time");
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind free port")
-        .local_addr()
-        .expect("read local addr")
-        .port()
-}
-
 // ── Task 6: determinate ───────────────────────────────────────────────────────
 
 /// После determinate(cut_seq) сервер больше не отдаёт удалённые сообщения.
@@ -188,13 +214,10 @@ async fn determinate_clears_server_history() {
         Err(_) => return,
     };
 
-    let temp = TempDir::new().expect("create temp dir");
-    let port = free_port();
-    let server_url = format!("http://127.0.0.1:{port}");
     let admin = AdminKeyPair::generate();
-    let config_path = write_server_config(temp.path(), port, &admin.pubkey_b64());
-    let mut server = spawn_server(&server_bin, &config_path);
-    wait_for_server(&server_url).await;
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
 
     let alice_key = signing_key();
     let bob_key = signing_key();
@@ -205,11 +228,19 @@ async fn determinate_clears_server_history() {
     let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
     alice
         .transport()
-        .reg("alice", &alice_pub, &admin.sign_user_registration("alice", &alice_pub))
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
         .await
         .expect("register alice");
     bob.transport()
-        .reg("bob", &bob_pub, &admin.sign_user_registration("bob", &bob_pub))
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
         .await
         .expect("register bob");
 
@@ -222,20 +253,22 @@ async fn determinate_clears_server_history() {
     alice_dialogue.send_text("msg3").await.expect("send 3");
 
     // Alice стирает историю на сервере до seq=3 включительно
-    alice_dialogue.clear_server_history(3).await.expect("determinate");
+    alice_dialogue
+        .clear_server_history(3)
+        .await
+        .expect("determinate");
 
     // Bob с чистой БД (last_pulled_seq=0) не должен получить ни одного сообщения
     let fresh_bob_db = temp.path().join("bob_fresh.sqlite");
-    let fresh_bob = build_client_db(
-        &fresh_bob_db.to_string_lossy(),
-        &server_url,
-        "bob",
-        bob_key,
-    );
+    let fresh_bob = build_client_db(&fresh_bob_db.to_string_lossy(), &server_url, "bob", bob_key);
     let fresh_dialogue = fresh_bob.open_dialogue(dialogue_config("bob", "alice", session_key));
     let (msgs, errs) = fresh_dialogue.receive().await.expect("fresh bob receive");
     assert_eq!(errs, 0, "decrypt errors unexpected");
-    assert_eq!(msgs.len(), 0, "server history should be empty after determinate");
+    assert_eq!(
+        msgs.len(),
+        0,
+        "server history should be empty after determinate"
+    );
 
     server.kill().ok();
     server.wait().ok();
@@ -252,13 +285,10 @@ async fn wrong_dialogue_key_causes_decrypt_error() {
         Err(_) => return,
     };
 
-    let temp = TempDir::new().expect("create temp dir");
-    let port = free_port();
-    let server_url = format!("http://127.0.0.1:{port}");
     let admin = AdminKeyPair::generate();
-    let config_path = write_server_config(temp.path(), port, &admin.pubkey_b64());
-    let mut server = spawn_server(&server_bin, &config_path);
-    wait_for_server(&server_url).await;
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
 
     let alice_key = signing_key();
     let bob_key = signing_key();
@@ -269,11 +299,19 @@ async fn wrong_dialogue_key_causes_decrypt_error() {
     let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
     alice
         .transport()
-        .reg("alice", &alice_pub, &admin.sign_user_registration("alice", &alice_pub))
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
         .await
         .expect("register alice");
     bob.transport()
-        .reg("bob", &bob_pub, &admin.sign_user_registration("bob", &bob_pub))
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
         .await
         .expect("register bob");
 
@@ -283,11 +321,18 @@ async fn wrong_dialogue_key_causes_decrypt_error() {
     let alice_dialogue = alice.open_dialogue(dialogue_config("alice", "bob", correct_key));
     let bob_dialogue = bob.open_dialogue(dialogue_config("bob", "alice", wrong_key));
 
-    alice_dialogue.send_text("secret text").await.expect("alice sends");
+    alice_dialogue
+        .send_text("secret text")
+        .await
+        .expect("alice sends");
 
     let (msgs, decrypt_errors) = bob_dialogue.receive().await.expect("bob receives");
     assert_eq!(decrypt_errors, 1, "expected exactly one decrypt error");
-    assert_eq!(msgs.len(), 0, "no messages should be delivered with wrong key");
+    assert_eq!(
+        msgs.len(),
+        0,
+        "no messages should be delivered with wrong key"
+    );
 
     server.kill().ok();
     server.wait().ok();
@@ -305,13 +350,10 @@ async fn duplicate_seq_after_db_reset_is_rejected_by_server() {
         Err(_) => return,
     };
 
-    let temp = TempDir::new().expect("create temp dir");
-    let port = free_port();
-    let server_url = format!("http://127.0.0.1:{port}");
     let admin = AdminKeyPair::generate();
-    let config_path = write_server_config(temp.path(), port, &admin.pubkey_b64());
-    let mut server = spawn_server(&server_bin, &config_path);
-    wait_for_server(&server_url).await;
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
 
     let alice_key = signing_key();
     let bob_key = signing_key();
@@ -322,11 +364,19 @@ async fn duplicate_seq_after_db_reset_is_rejected_by_server() {
     let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
     alice
         .transport()
-        .reg("alice", &alice_pub, &admin.sign_user_registration("alice", &alice_pub))
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
         .await
         .expect("register alice");
     bob.transport()
-        .reg("bob", &bob_pub, &admin.sign_user_registration("bob", &bob_pub))
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
         .await
         .expect("register bob");
 
@@ -334,7 +384,10 @@ async fn duplicate_seq_after_db_reset_is_rejected_by_server() {
     let alice_dialogue = alice.open_dialogue(dialogue_config("alice", "bob", session_key));
 
     // Alice отправляет первое сообщение (seq=1 сохраняется на сервере)
-    alice_dialogue.send_text("first message").await.expect("alice sends first");
+    alice_dialogue
+        .send_text("first message")
+        .await
+        .expect("alice sends first");
 
     // Удаляем клиент и БД Alice — счётчик seq сбросится в 1
     drop(alice_dialogue);
@@ -347,8 +400,13 @@ async fn duplicate_seq_after_db_reset_is_rejected_by_server() {
     let fresh_dialogue = fresh_alice.open_dialogue(dialogue_config("alice", "bob", session_key));
 
     // Сервер должен отклонить seq=1, т.к. он уже существует
-    let result = fresh_dialogue.send_text("second message with dup seq").await;
-    assert!(result.is_err(), "send must fail: seq=1 is already on the server");
+    let result = fresh_dialogue
+        .send_text("second message with dup seq")
+        .await;
+    assert!(
+        result.is_err(),
+        "send must fail: seq=1 is already on the server"
+    );
 
     let err_msg = result.unwrap_err().to_string();
     assert!(
