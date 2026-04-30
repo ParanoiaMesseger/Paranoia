@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Qt 6.10.1 Debug",
+      "description": "Qt6 из ~/Qt/6.10.1/gcc_64, сборка в Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "/home/smirnov-yv/Qt/6.10.1/gcc_64"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Qt 6.10.1 Release",
+      "description": "Qt6 из ~/Qt/6.10.1/gcc_64, сборка в Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "/home/smirnov-yv/Qt/6.10.1/gcc_64"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug"
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release"
+    }
+  ]
+}
