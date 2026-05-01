@@ -3,3 +3,5 @@ Cargo.lock
 configs
 store
 .idea
+Plan.md
+ExportKeyring.md
