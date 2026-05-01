@@ -8,15 +8,10 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 use tempfile::TempDir;
 
-const TEST_PORT_START: usize = 41000;
-const TEST_PORT_END: usize = 65000;
-
-static NEXT_TEST_PORT: AtomicUsize = AtomicUsize::new(TEST_PORT_START);
 static SERVER_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ── helper: клиент с явным путём к БД ────────────────────────────────────────
@@ -161,18 +156,6 @@ async fn start_server(server_bin: &str, root: &Path, admin_key: &str) -> (String
 }
 
 fn reserve_test_port() -> (u16, TcpListener) {
-    for _ in TEST_PORT_START..TEST_PORT_END {
-        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
-        if port > TEST_PORT_END {
-            NEXT_TEST_PORT.store(TEST_PORT_START, Ordering::Relaxed);
-            continue;
-        }
-
-        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port as u16)) {
-            return (port as u16, listener);
-        }
-    }
-
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
     let port = listener.local_addr().expect("read local addr").port();
     (port, listener)
