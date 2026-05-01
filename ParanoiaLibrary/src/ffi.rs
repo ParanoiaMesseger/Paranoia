@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 use crate::{
+    qr_exchange,
     ClientConfig, ParanoiaClient,
     types::{DialogueConfig, DialogueKey, Message, MessageContent},
 };
@@ -395,6 +396,139 @@ pub extern "C" fn paranoia_delete_local_dialogue(
     }
 }
 
+/// Создать QR/JSON invitation для out-of-band обмена ключом.
+/// Возвращает JSON-объект ExchangeBundle: {"state": {...}, "payload": {...}}.
+/// payload можно передавать собеседнику, state должен оставаться локальным.
+/// NULL означает ошибку. Ошибку см. paranoia_last_error().
+/// Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_qr_create_invitation(
+    initiator_id: *const c_char,
+    responder_id: *const c_char,
+) -> *mut c_char {
+    let initiator_id = match cstr_arg(initiator_id) {
+        Ok(v) => v,
+        Err(_) => {
+            set_last_error("invalid_qr_argument");
+            return std::ptr::null_mut();
+        }
+    };
+    let responder_id = match cstr_arg(responder_id) {
+        Ok(v) => v,
+        Err(_) => {
+            set_last_error("invalid_qr_argument");
+            return std::ptr::null_mut();
+        }
+    };
+
+    match qr_exchange::create_invitation(&initiator_id, &responder_id, now_unix())
+        .and_then(|bundle| qr_exchange::to_json(&bundle))
+    {
+        Ok(json) => string_to_c(json),
+        Err(e) => {
+            set_last_error(&classify_exchange_error(&e.to_string()));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Создать QR/JSON response на invitation payload.
+/// Возвращает JSON-объект ExchangeBundle: {"state": {...}, "payload": {...}}.
+/// payload можно передавать собеседнику, state должен оставаться локальным.
+/// NULL означает ошибку. Ошибку см. paranoia_last_error().
+/// Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_qr_create_response(
+    invitation_payload_json: *const c_char,
+    responder_id: *const c_char,
+) -> *mut c_char {
+    let invitation_payload_json = match cstr_arg(invitation_payload_json) {
+        Ok(v) => v,
+        Err(_) => {
+            set_last_error("invalid_qr_argument");
+            return std::ptr::null_mut();
+        }
+    };
+    let responder_id = match cstr_arg(responder_id) {
+        Ok(v) => v,
+        Err(_) => {
+            set_last_error("invalid_qr_argument");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let result = qr_exchange::payload_from_json(&invitation_payload_json)
+        .and_then(|payload| qr_exchange::create_response(&payload, &responder_id, now_unix()))
+        .and_then(|bundle| qr_exchange::to_json(&bundle));
+
+    match result {
+        Ok(json) => string_to_c(json),
+        Err(e) => {
+            set_last_error(&classify_exchange_error(&e.to_string()));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Посчитать 6-значный SAS/fingerprint для показа пользователю.
+/// Ключ диалога эта функция не возвращает.
+/// NULL означает ошибку. Ошибку см. paranoia_last_error().
+/// Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_qr_fingerprint(
+    local_state_json: *const c_char,
+    peer_payload_json: *const c_char,
+) -> *mut c_char {
+    let completed = match complete_qr_exchange_from_json(local_state_json, peer_payload_json) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(&classify_exchange_error(&e.to_string()));
+            return std::ptr::null_mut();
+        }
+    };
+
+    string_to_c(completed.fingerprint)
+}
+
+/// Подтвердить SAS/fingerprint и вернуть completed exchange JSON.
+/// Возвращаемый JSON содержит session_key_b64; вызывать только после сравнения
+/// SAS пользователем по независимому каналу.
+/// NULL означает ошибку. Ошибку см. paranoia_last_error().
+/// Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_qr_confirm_exchange(
+    local_state_json: *const c_char,
+    peer_payload_json: *const c_char,
+    confirmed_fingerprint: *const c_char,
+) -> *mut c_char {
+    let confirmed_fingerprint = match cstr_arg(confirmed_fingerprint) {
+        Ok(v) => v,
+        Err(_) => {
+            set_last_error("invalid_qr_argument");
+            return std::ptr::null_mut();
+        }
+    };
+    let completed = match complete_qr_exchange_from_json(local_state_json, peer_payload_json) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(&classify_exchange_error(&e.to_string()));
+            return std::ptr::null_mut();
+        }
+    };
+    if completed.fingerprint != confirmed_fingerprint {
+        set_last_error("fingerprint_mismatch");
+        return std::ptr::null_mut();
+    }
+
+    match qr_exchange::to_json(&completed) {
+        Ok(json) => string_to_c(json),
+        Err(e) => {
+            set_last_error(&classify_exchange_error(&e.to_string()));
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Освободить строку, возвращённую библиотекой.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_free_string(s: *mut c_char) {
@@ -406,6 +540,32 @@ pub extern "C" fn paranoia_free_string(s: *mut c_char) {
 }
 
 // ── Внутренние вспомогательные функции ───────────────────────────────────────
+
+fn cstr_arg(ptr: *const c_char) -> anyhow::Result<String> {
+    if ptr.is_null() {
+        anyhow::bail!("null argument");
+    }
+    Ok(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or("").to_string())
+}
+
+fn string_to_c(value: String) -> *mut c_char {
+    CString::new(value).unwrap().into_raw()
+}
+
+fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn complete_qr_exchange_from_json(
+    local_state_json: *const c_char,
+    peer_payload_json: *const c_char,
+) -> anyhow::Result<qr_exchange::CompletedExchange> {
+    let local_state_json = cstr_arg(local_state_json)?;
+    let peer_payload_json = cstr_arg(peer_payload_json)?;
+    let state = qr_exchange::state_from_json(&local_state_json)?;
+    let payload = qr_exchange::payload_from_json(&peer_payload_json)?;
+    qr_exchange::complete_exchange(&state, &payload, now_unix())
+}
 
 fn messages_to_c_string(msgs: &[Message]) -> *mut c_char {
     let json = serde_json::json!(msgs.iter().map(message_to_json).collect::<Vec<_>>());
@@ -467,6 +627,25 @@ pub(crate) fn classify_network_error(err: &str, fallback: &str) -> String {
         "server_unavailable".to_string()
     } else {
         fallback.to_string()
+    }
+}
+
+pub(crate) fn classify_exchange_error(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("expired") {
+        "exchange_expired".to_string()
+    } else if lower.contains("fingerprint_mismatch") || lower.contains("fingerprint mismatch") {
+        "fingerprint_mismatch".to_string()
+    } else if lower.contains("already used") {
+        "exchange_id_reused".to_string()
+    } else if lower.contains("mismatch") {
+        "participant_mismatch".to_string()
+    } else if lower.contains("payload json") || lower.contains("payload") {
+        "invalid_exchange_payload".to_string()
+    } else if lower.contains("state json") || lower.contains("state") {
+        "invalid_exchange_state".to_string()
+    } else {
+        "qr_exchange_error".to_string()
     }
 }
 
@@ -577,5 +756,17 @@ mod tests {
         assert!(!classified.contains("secret.internal"));
         assert!(!classified.contains("9000"));
         assert!(!classified.contains("http://"));
+    }
+
+    #[test]
+    fn exchange_errors_are_classified_without_raw_payload() {
+        assert_eq!(classify_exchange_error("exchange payload expired"), "exchange_expired");
+        assert_eq!(classify_exchange_error("responder_id mismatch: bob vs mallory"), "participant_mismatch");
+        assert_eq!(classify_exchange_error("invalid exchange payload json: {private_key=abc}"), "invalid_exchange_payload");
+
+        let classified = classify_exchange_error("invalid exchange payload json: private_key=abc123");
+        assert_eq!(classified, "invalid_exchange_payload");
+        assert!(!classified.contains("private_key"));
+        assert!(!classified.contains("abc123"));
     }
 }

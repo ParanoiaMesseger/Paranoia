@@ -52,6 +52,27 @@ int paranoia_determinate(ParanoiaHandle *handle, const char *user_a, const char 
 int paranoia_delete_local_dialogue(ParanoiaHandle *handle, const char *user_a,
                                    const char *user_b);
 
+// ── QR/JSON out-of-band обмен ключом ─────────────────────────────────────────
+// Все функции возвращают NULL при ошибке (см. paranoia_last_error).
+// Возвращённые строки освобождать через paranoia_free_string.
+
+// Создать invitation. Возвращает ExchangeBundle JSON со state и payload.
+// payload можно передавать собеседнику, state должен оставаться локальным.
+char *paranoia_qr_create_invitation(const char *initiator_id, const char *responder_id);
+
+// Создать response на invitation payload JSON. Возвращает ExchangeBundle JSON.
+char *paranoia_qr_create_response(const char *invitation_payload_json,
+                                  const char *responder_id);
+
+// Получить 6-значный SAS/fingerprint для показа пользователю без выдачи ключа.
+char *paranoia_qr_fingerprint(const char *local_state_json, const char *peer_payload_json);
+
+// Подтвердить SAS/fingerprint и вернуть CompletedExchange JSON с session_key_b64.
+// Вызывать только после сравнения SAS пользователем по независимому каналу.
+char *paranoia_qr_confirm_exchange(const char *local_state_json,
+                                   const char *peer_payload_json,
+                                   const char *confirmed_fingerprint);
+
 // ── Ошибки ────────────────────────────────────────────────────────────────────
 // Последняя ошибка текущего потока. Указатель действителен до следующего
 // FFI-вызова в этом потоке. НЕ освобождать через paranoia_free_string.
@@ -60,6 +81,11 @@ int paranoia_delete_local_dialogue(ParanoiaHandle *handle, const char *user_a,
 //   "invalid_seq"            — сервер отклонил пакет из-за устаревшего/неверного seq
 //   "server_unavailable"     — сетевая ошибка
 //   "decryption_failed:<N>"  — N сообщений не удалось расшифровать (неверный ключ)
+//   "exchange_expired"       — QR/JSON payload истёк
+//   "fingerprint_mismatch"   — подтверждённый SAS не совпал с рассчитанным
+//   "participant_mismatch"   — участники QR/JSON обмена не совпадают
+//   "invalid_exchange_payload" — некорректный QR/JSON payload
+//   "invalid_exchange_state" — некорректное локальное состояние QR/JSON обмена
 //   "send_error:<detail>"    — иная ошибка отправки
 //   "receive_error:<detail>" — иная ошибка получения
 const char *paranoia_last_error();
