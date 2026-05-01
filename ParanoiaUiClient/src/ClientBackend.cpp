@@ -46,6 +46,7 @@ ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(2500);
     connect(m_pollTimer, &QTimer::timeout, this, &ClientBackend::onPollTimer);
+    loadDeviceKey();
     loadDialogs();
     loadClientConfig();
 }
@@ -75,6 +76,16 @@ bool ClientBackend::hasAdminAccess() const
 }
 
 QString ClientBackend::activePeer() const { return m_activePeer; }
+
+QString ClientBackend::devicePubkey() const
+{
+    if (m_devicePrivkey.isEmpty()) return QString();
+    char *pub = paranoia_ecies_pubkey(m_devicePrivkey.toUtf8().constData());
+    if (!pub) return QString();
+    QString result = QString::fromUtf8(pub);
+    paranoia_free_string(pub);
+    return result;
+}
 
 // ── Key Generation ────────────────────────────────────────────────────────────
 
@@ -760,6 +771,215 @@ QString ClientBackend::extractText(const QString &raw) const
     return raw;
 }
 
+// ── Export / Import ───────────────────────────────────────────────────────────
+
+QVariantMap ClientBackend::exportProfile(const QString &profileType,
+                                         const QStringList &peers,
+                                         const QString &receiverPubkeyB64,
+                                         const QString &filePath)
+{
+    if (receiverPubkeyB64.trimmed().isEmpty())
+        return errorResult("Не указан публичный ключ принимающего устройства.");
+    if (filePath.trimmed().isEmpty())
+        return errorResult("Не указан путь к файлу.");
+
+    // Собрать payload
+    QJsonObject payload;
+    payload["format_version"] = 1;
+    payload["profile_type"] = profileType;
+
+    const bool includeClient = (profileType == "client" || profileType == "full");
+    const bool includeAdmin  = (profileType == "admin"  || profileType == "full");
+
+    if (includeClient) {
+        if (m_server.isEmpty() || m_username.isEmpty() || m_privkey.isEmpty())
+            return errorResult("Нет активной клиентской сессии для экспорта.");
+
+        QJsonArray dialoguesArr;
+        for (const auto &dlg : m_dialogs) {
+            if (!peers.isEmpty() && !peers.contains(dlg.peer)) continue;
+            if (dlg.keyring.isEmpty()) continue;
+            QJsonObject dlgObj;
+            dlgObj["peer"] = dlg.peer;
+            QJsonArray keyringArr;
+            for (const auto &entry : dlg.keyring) {
+                if (entry.key.size() != 32 || entry.startSeq == 0) continue;
+                QJsonObject keyObj;
+                keyObj["start_seq"] = static_cast<double>(entry.startSeq);
+                keyObj["key"] = QString::fromLatin1(entry.key.toBase64());
+                keyringArr.append(keyObj);
+            }
+            if (keyringArr.isEmpty()) continue;
+            dlgObj["keyring"] = keyringArr;
+            dialoguesArr.append(dlgObj);
+        }
+
+        QJsonObject serverObj;
+        serverObj["url"] = m_server;
+        serverObj["username"] = m_username;
+        serverObj["signing_key_b64"] = m_privkey;
+        serverObj["dialogues"] = dialoguesArr;
+
+        payload["servers"] = QJsonArray{serverObj};
+    }
+
+    if (includeAdmin) {
+        QJsonArray adminArr;
+        for (const auto &a : admin::Admin::admins) {
+            QJsonObject adminObj;
+            adminObj["url"] = a.domain;
+            adminObj["admin_privkey_b64"] = a.private_key;
+            adminArr.append(adminObj);
+        }
+        payload["admin_servers"] = adminArr;
+    }
+
+    if (!includeClient) payload["servers"] = QJsonArray{};
+    if (!includeAdmin)  payload["admin_servers"] = QJsonArray{};
+
+    const QString payloadJson = QString::fromUtf8(
+        QJsonDocument(payload).toJson(QJsonDocument::Compact));
+
+    // Зашифровать
+    char *envelopePtr = paranoia_ecies_encrypt(
+        receiverPubkeyB64.trimmed().toUtf8().constData(),
+        payloadJson.toUtf8().constData()
+    );
+    if (!envelopePtr) {
+        const QString err = lastRustError();
+        if (err == "invalid_device_key")
+            return errorResult("Некорректный публичный ключ принимающего устройства.");
+        return errorResult("Ошибка шифрования экспорта.");
+    }
+    const QString envelopeJson = takeRustString(envelopePtr);
+
+    // Сохранить в файл
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return errorResult("Не удалось открыть файл для записи: " + filePath);
+    file.write(envelopeJson.toUtf8());
+    file.close();
+
+    return QVariantMap{{"ok", true}, {"path", filePath}};
+}
+
+QVariantMap ClientBackend::importProfile(const QString &filePath)
+{
+    if (m_devicePrivkey.isEmpty())
+        return errorResult("Device keypair не инициализирован.");
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+        return errorResult("Не удалось открыть файл: " + filePath);
+    const QString envelopeJson = QString::fromUtf8(file.readAll());
+    file.close();
+
+    if (envelopeJson.trimmed().isEmpty())
+        return errorResult("Файл пуст.");
+
+    // Расшифровать
+    char *plaintextPtr = paranoia_ecies_decrypt(
+        m_devicePrivkey.toUtf8().constData(),
+        envelopeJson.toUtf8().constData()
+    );
+    if (!plaintextPtr) {
+        const QString err = lastRustError();
+        if (err == "ecies_decrypt_error")
+            return errorResult("Не удалось расшифровать файл. Файл зашифрован на другой ключ или повреждён.");
+        if (err == "ecies_unsupported_version")
+            return errorResult("Неподдерживаемая версия формата экспорта.");
+        return errorResult("Ошибка расшифровки.");
+    }
+    const QString payloadJson = takeRustString(plaintextPtr);
+
+    const auto doc = QJsonDocument::fromJson(payloadJson.toUtf8());
+    if (!doc.isObject())
+        return errorResult("Некорректный формат payload после расшифровки.");
+
+    const auto payload = doc.object();
+    if (payload["format_version"].toInt() != 1)
+        return errorResult("Неподдерживаемая версия формата payload.");
+
+    int importedDialogues = 0;
+    int importedAdminServers = 0;
+
+    // Импорт client-данных: merge по server+username+peer+start_seq (Z2a)
+    const QJsonArray servers = payload["servers"].toArray();
+    for (const auto &serverVal : servers) {
+        const auto serverObj = serverVal.toObject();
+        const QString url      = serverObj["url"].toString();
+        const QString username = serverObj["username"].toString();
+        if (url.isEmpty() || username.isEmpty()) continue;
+
+        // Импортируем подпись только для текущего пользователя данного сервера
+        const bool isCurrentClient = (url == m_server && username == m_username);
+
+        const QJsonArray dialogues = serverObj["dialogues"].toArray();
+        for (const auto &dlgVal : dialogues) {
+            const auto dlgObj = dlgVal.toObject();
+            const QString peer = dlgObj["peer"].toString();
+            if (peer.isEmpty()) continue;
+
+            const QJsonArray keyringArr = dlgObj["keyring"].toArray();
+            for (const auto &keyVal : keyringArr) {
+                const auto keyObj = keyVal.toObject();
+                const quint64 startSeq = static_cast<quint64>(keyObj["start_seq"].toDouble());
+                const QByteArray key = QByteArray::fromBase64(keyObj["key"].toString().toLatin1());
+                if (startSeq == 0 || key.size() != 32) continue;
+
+                // Проверяем, есть ли уже такая запись
+                bool exists = false;
+                if (isCurrentClient) {
+                    for (auto &dlg : m_dialogs) {
+                        if (dlg.peer != peer) continue;
+                        for (auto &entry : dlg.keyring) {
+                            if (entry.startSeq == startSeq) {
+                                // Перезаписываем только при совпадении ключа (Z2a)
+                                exists = true;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    if (!exists) {
+                        upsertDialogKeyringEntry(peer, key, startSeq, false, false);
+                        ++importedDialogues;
+                    }
+                }
+            }
+        }
+    }
+
+    // Импорт admin-данных
+    const QJsonArray adminServers = payload["admin_servers"].toArray();
+    for (const auto &adminVal : adminServers) {
+        const auto adminObj = adminVal.toObject();
+        const QString url     = adminObj["url"].toString();
+        const QString privkey = adminObj["admin_privkey_b64"].toString();
+        if (url.isEmpty() || privkey.isEmpty()) continue;
+
+        bool found = false;
+        for (auto &a : admin::Admin::admins) {
+            if (a.domain == url) { found = true; break; }
+        }
+        if (!found) {
+            admin::Admin::admins.push_back({url, privkey});
+            ++importedAdminServers;
+        }
+    }
+
+    if (importedAdminServers > 0) {
+        admin::Admin::saveAdmins();
+        emit adminStateChanged();
+    }
+
+    return QVariantMap{
+        {"ok", true},
+        {"importedDialogues", importedDialogues},
+        {"importedAdminServers", importedAdminServers},
+    };
+}
+
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 void ClientBackend::saveClientConfig() const
@@ -860,4 +1080,40 @@ const ClientBackend::Dialog *ClientBackend::findDialog(const QString &peer) cons
     for (const auto &d : m_dialogs)
         if (d.peer == peer) return &d;
     return nullptr;
+}
+
+void ClientBackend::saveDeviceKey() const
+{
+    QFile f("device_key.json");
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+    QJsonObject obj;
+    obj["privkey_b64"] = m_devicePrivkey;
+    f.write(QJsonDocument(obj).toJson());
+}
+
+void ClientBackend::loadDeviceKey()
+{
+    QFile f("device_key.json");
+    if (f.open(QIODevice::ReadOnly)) {
+        auto doc = QJsonDocument::fromJson(f.readAll());
+        if (doc.isObject()) {
+            const QString priv = doc.object()["privkey_b64"].toString();
+            if (!priv.isEmpty() && QByteArray::fromBase64(priv.toLatin1()).size() == 32) {
+                m_devicePrivkey = priv;
+                return;
+            }
+        }
+    }
+
+    // Генерируем новый keypair при первом запуске
+    char *privPtr = nullptr;
+    char *pubPtr  = nullptr;
+    paranoia_ecies_generate_keypair(&privPtr, &pubPtr);
+    if (privPtr) {
+        m_devicePrivkey = QString::fromUtf8(privPtr);
+        paranoia_free_string(privPtr);
+    }
+    if (pubPtr) paranoia_free_string(pubPtr);
+    saveDeviceKey();
+    emit deviceKeyChanged();
 }

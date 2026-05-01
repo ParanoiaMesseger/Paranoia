@@ -51,6 +51,7 @@ qt_add_qml_module(appParanoiaUiClient
     ui/Components/Pages/InstallServerPage.qml
     ui/Components/Pages/MainPage.qml
     ui/Components/Pages/ChatPage.qml
+    ui/Components/Pages/ExportImportPage.qml
 )
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.

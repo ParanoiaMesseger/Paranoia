@@ -18,6 +18,7 @@ class ClientBackend : public QObject {
     Q_PROPERTY(QString username READ username NOTIFY loginStateChanged)
     Q_PROPERTY(QString server READ server NOTIFY loginStateChanged)
     Q_PROPERTY(bool hasAdminAccess READ hasAdminAccess NOTIFY adminStateChanged)
+    Q_PROPERTY(QString devicePubkey READ devicePubkey NOTIFY deviceKeyChanged)
 
 public:
     explicit ClientBackend(QObject *parent = nullptr);
@@ -27,6 +28,7 @@ public:
     QString username() const;
     QString server() const;
     bool hasAdminAccess() const;
+    QString devicePubkey() const;
 
     Q_INVOKABLE void generateKeyPair();
     Q_INVOKABLE void loginClient(const QString &server, const QString &username, const QString &privkey);
@@ -59,9 +61,24 @@ public:
     Q_INVOKABLE void deleteDialogLocal(const QString &peer);
     Q_INVOKABLE void clearServerHistory(const QString &peer, quint64 cutSeq);
 
+    // Экспорт / импорт keyring (F2b / Y1c / Z)
+    // profileType: "client", "admin", "full"
+    // peers: список peer-имён для экспорта; пустой список = все диалоги
+    // receiverPubkeyB64: X25519 публичный ключ принимающего устройства (base64)
+    // filePath: путь к файлу для сохранения
+    Q_INVOKABLE QVariantMap exportProfile(const QString &profileType,
+                                         const QStringList &peers,
+                                         const QString &receiverPubkeyB64,
+                                         const QString &filePath);
+
+    // filePath: путь к файлу экспорта; расшифровывается device privkey
+    // suggestDeleteFile: true если после успеха предложить удалить файл (Z3b)
+    Q_INVOKABLE QVariantMap importProfile(const QString &filePath);
+
 signals:
     void keyPairGenerated(const QString &pubkey, const QString &privkey);
     void loginStateChanged();
+    void deviceKeyChanged();
     void adminStateChanged();
     void loginError(const QString &msg);
     void adminConnected();
@@ -97,6 +114,7 @@ private:
     QString m_username;
     QString m_privkey;
     QString m_activePeer;
+    QString m_devicePrivkey;
 
     QList<Dialog> m_dialogs;
     QMap<QString, QVariantList> m_messageCache;
@@ -107,6 +125,8 @@ private:
     void loadClientConfig();
     void saveDialogs() const;
     void loadDialogs();
+    void saveDeviceKey() const;
+    void loadDeviceKey();
     void loadHistory(const QString &peer);
     void appendMessages(const QString &peer, const QVariantList &messages);
     void upsertDialogKeyringEntry(const QString &peer,

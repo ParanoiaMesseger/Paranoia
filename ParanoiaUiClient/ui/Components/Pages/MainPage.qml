@@ -26,6 +26,8 @@ Rectangle {
         function onServerHistoryError(msg)    { serverHistoryFeedback.text = msg }
     }
 
+    ExportImportPage { id: exportImportPopup }
+
     function openQrExchange(peer, updateExisting) {
         qrExchangePeer = peer
         qrExchangeUpdateExisting = updateExisting
@@ -60,6 +62,28 @@ Rectangle {
                 font.pixelSize:   Theme.fontLg
                 font.family:      Theme.fontFamily
                 font.weight:      Font.Medium
+            }
+
+            Rectangle {
+                anchors.right:         parent.right
+                anchors.rightMargin:   12
+                anchors.verticalCenter: parent.verticalCenter
+                width: 32; height: 32
+                radius: 16
+                color: exportArea.containsMouse ? Theme.bgButton : "transparent"
+
+                Text {
+                    anchors.centerIn: parent
+                    text:  "⬆⬇"
+                    color: Theme.textSecondary
+                    font.pixelSize: 14
+                }
+                MouseArea {
+                    id: exportArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: exportImportPopup.open()
+                }
             }
         }
 
