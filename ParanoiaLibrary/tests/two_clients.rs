@@ -1,7 +1,8 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::SigningKey;
 use paranoia_lib::{
-    AdminKeyPair, ClientConfig, DialogueConfig, DialogueKey, MessageContent, ParanoiaClient,
+    AdminKeyPair, ClientConfig, DialogueConfig, DialogueKey, DialogueKeyEntry, MessageContent,
+    ParanoiaClient,
 };
 use std::{
     fs,
@@ -123,10 +124,22 @@ fn build_client(
 }
 
 fn dialogue_config(username: &str, peer: &str, session_key: [u8; 32]) -> DialogueConfig {
-    DialogueConfig {
-        key: DialogueKey::new(username, peer),
-        session_key,
-    }
+    DialogueConfig::single_key(DialogueKey::new(username, peer), session_key)
+}
+
+fn dialogue_keyring_config(
+    username: &str,
+    peer: &str,
+    entries: Vec<(u64, [u8; 32])>,
+) -> DialogueConfig {
+    DialogueConfig::with_keyring(
+        DialogueKey::new(username, peer),
+        entries
+            .into_iter()
+            .map(|(start_seq, key)| DialogueKeyEntry { start_seq, key })
+            .collect(),
+    )
+    .expect("valid keyring")
 }
 
 fn write_server_config(root: &Path, port: u16, admin_key: &str) -> PathBuf {
@@ -411,6 +424,152 @@ async fn fresh_device_syncs_seq_after_db_reset() {
     assert!(
         matches!(&bob_msgs[1].content, MessageContent::Text(text) if text == "second message after sync")
     );
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
+// ── B6c: keyring по start_seq без изменения wire-format ─────────────────────
+
+#[tokio::test]
+async fn rotated_keyring_reads_old_and_new_messages() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    let alice_key = signing_key();
+    let bob_key = signing_key();
+    let alice_pub = B64.encode(alice_key.verifying_key().to_bytes());
+    let bob_pub = B64.encode(bob_key.verifying_key().to_bytes());
+
+    let alice = build_client(temp.path(), &server_url, "alice", alice_key.clone());
+    let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
+    alice
+        .transport()
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
+        .await
+        .expect("register alice");
+    bob.transport()
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
+        .await
+        .expect("register bob");
+
+    let key1 = [7u8; 32];
+    let key2 = [9u8; 32];
+    let alice_v1 = alice.open_dialogue(dialogue_config("alice", "bob", key1));
+    alice_v1
+        .send_text("before rotation")
+        .await
+        .expect("send v1");
+
+    let alice_keyring = alice.open_dialogue(dialogue_keyring_config(
+        "alice",
+        "bob",
+        vec![(1, key1), (2, key2)],
+    ));
+    let sent = alice_keyring
+        .send_text("after rotation")
+        .await
+        .expect("send v2");
+    assert_eq!(sent.server_seq, Some(2));
+
+    let bob_keyring = bob.open_dialogue(dialogue_keyring_config(
+        "bob",
+        "alice",
+        vec![(1, key1), (2, key2)],
+    ));
+    let (msgs, decrypt_errors) = bob_keyring.receive().await.expect("bob receives");
+
+    assert_eq!(decrypt_errors, 0);
+    assert_eq!(msgs.len(), 2);
+    assert!(matches!(&msgs[0].content, MessageContent::Text(text) if text == "before rotation"));
+    assert!(matches!(&msgs[1].content, MessageContent::Text(text) if text == "after rotation"));
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
+#[tokio::test]
+async fn wrong_keyring_start_seq_causes_decrypt_error() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    let alice_key = signing_key();
+    let bob_key = signing_key();
+    let alice_pub = B64.encode(alice_key.verifying_key().to_bytes());
+    let bob_pub = B64.encode(bob_key.verifying_key().to_bytes());
+
+    let alice = build_client(temp.path(), &server_url, "alice", alice_key.clone());
+    let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
+    alice
+        .transport()
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
+        .await
+        .expect("register alice");
+    bob.transport()
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
+        .await
+        .expect("register bob");
+
+    let key1 = [7u8; 32];
+    let key2 = [9u8; 32];
+    alice
+        .open_dialogue(dialogue_config("alice", "bob", key1))
+        .send_text("before rotation")
+        .await
+        .expect("send v1");
+    alice
+        .open_dialogue(dialogue_keyring_config(
+            "alice",
+            "bob",
+            vec![(1, key1), (2, key2)],
+        ))
+        .send_text("after rotation")
+        .await
+        .expect("send v2");
+
+    let wrong_bob_keyring = bob.open_dialogue(dialogue_keyring_config(
+        "bob",
+        "alice",
+        vec![(1, key1), (3, key2)],
+    ));
+    let (msgs, decrypt_errors) = wrong_bob_keyring
+        .receive()
+        .await
+        .expect("bob receives with wrong keyring");
+
+    assert_eq!(decrypt_errors, 1);
+    assert_eq!(msgs.len(), 1);
+    assert!(matches!(&msgs[0].content, MessageContent::Text(text) if text == "before rotation"));
 
     server.kill().ok();
     server.wait().ok();

@@ -31,6 +31,10 @@ impl Dialogue {
         store: Arc<LocalStore>,
     ) -> Self {
         let key = config.key.clone();
+        let mut config = config;
+        if let Err(e) = config.normalize() {
+            warn!("Invalid dialogue keyring: {e}");
+        }
         Self {
             key,
             config,
@@ -115,7 +119,7 @@ impl Dialogue {
         for pkt in raw_packets {
             max_seq = max_seq.max(pkt.seq);
 
-            let inner = match self.decrypt_packet(&pkt.payload) {
+            let inner = match self.decrypt_packet(pkt.seq, &pkt.payload) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("Cannot decrypt seq={}: {e}", pkt.seq);
@@ -186,10 +190,10 @@ impl Dialogue {
             content: content.clone(),
         };
 
-        let ciphertext = crypto::encrypt(&self.config.session_key, &inner.serialize()?)?;
-
         // Атомарный seq из локального счётчика
         let seq = self.store.next_send_seq(&self.key)?;
+        let session_key = self.config.key_for_seq(seq)?;
+        let ciphertext = crypto::encrypt(session_key, &inner.serialize()?)?;
 
         // Подпись: sender + recver + seq + payload(base64)
         let payload_b64 = crypto::encode_b64(&ciphertext);
@@ -256,8 +260,9 @@ impl Dialogue {
         Ok(sent)
     }
 
-    fn decrypt_packet(&self, data: &[u8]) -> Result<PacketInner> {
-        let plaintext = crypto::decrypt(&self.config.session_key, data)?;
+    fn decrypt_packet(&self, seq: u64, data: &[u8]) -> Result<PacketInner> {
+        let session_key = self.config.key_for_seq(seq)?;
+        let plaintext = crypto::decrypt(session_key, data)?;
         PacketInner::deserialize(&plaintext)
     }
 

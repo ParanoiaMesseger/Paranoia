@@ -1,5 +1,6 @@
 // src/ffi.rs
 use base64::Engine;
+use serde::Deserialize;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -7,8 +8,8 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 use crate::{
-    qr_exchange,
-    ClientConfig, ParanoiaClient,
+    ClientConfig, ParanoiaClient, qr_exchange,
+    types::DialogueKeyEntry,
     types::{DialogueConfig, DialogueKey, Message, MessageContent},
 };
 
@@ -131,10 +132,7 @@ pub extern "C" fn paranoia_send_text(
         .try_into()
         .unwrap();
 
-    let cfg = DialogueConfig {
-        key: DialogueKey::new(&a, &b),
-        session_key: key,
-    };
+    let cfg = DialogueConfig::single_key(DialogueKey::new(&a, &b), key);
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.send_text(text)) {
@@ -174,10 +172,7 @@ pub extern "C" fn paranoia_send_text_json(
         .try_into()
         .unwrap();
 
-    let cfg = DialogueConfig {
-        key: DialogueKey::new(&a, &b),
-        session_key: key,
-    };
+    let cfg = DialogueConfig::single_key(DialogueKey::new(&a, &b), key);
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.send_text(text)) {
@@ -270,10 +265,7 @@ pub extern "C" fn paranoia_receive(
         .try_into()
         .unwrap();
 
-    let cfg = DialogueConfig {
-        key: DialogueKey::new(&a, &b),
-        session_key: key,
-    };
+    let cfg = DialogueConfig::single_key(DialogueKey::new(&a, &b), key);
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.receive()) {
@@ -315,9 +307,129 @@ pub extern "C" fn paranoia_history(
         .try_into()
         .unwrap();
 
-    let cfg = DialogueConfig {
-        key: DialogueKey::new(&a, &b),
-        session_key: key,
+    let cfg = DialogueConfig::single_key(DialogueKey::new(&a, &b), key);
+    let dialogue = h.client.open_dialogue(cfg);
+
+    match h.rt.block_on(dialogue.history(limit, None)) {
+        Ok(msgs) => messages_to_c_string(&msgs),
+        Err(_) => {
+            set_last_error("history_error");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Отправить текстовое сообщение с локальным keyring JSON.
+/// keyring_json: [{"start_seq":1,"key":"base64-32-bytes"}, ...]
+/// NULL означает ошибку отправки/сохранения. Ошибку см. paranoia_last_error().
+/// Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_text_json_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    text: *const c_char,
+) -> *mut c_char {
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let text = unsafe { CStr::from_ptr(text) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    let cfg = match dialogue_config_from_keyring_json(&a, &b, keyring_json) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            set_last_error(&classify_keyring_error(&e.to_string()));
+            return std::ptr::null_mut();
+        }
+    };
+    let dialogue = h.client.open_dialogue(cfg);
+
+    match h.rt.block_on(dialogue.send_text(text)) {
+        Ok(msg) => message_to_c_string(&msg),
+        Err(e) => {
+            set_last_error(&classify_send_error(&e.to_string()));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Получить новые сообщения с сервера, выбирая ключ по start_seq из keyring JSON.
+/// Возвращает JSON-массив или NULL при ошибке. Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_receive_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+) -> *mut c_char {
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    let cfg = match dialogue_config_from_keyring_json(&a, &b, keyring_json) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            set_last_error(&classify_keyring_error(&e.to_string()));
+            return std::ptr::null_mut();
+        }
+    };
+    let dialogue = h.client.open_dialogue(cfg);
+
+    match h.rt.block_on(dialogue.receive()) {
+        Ok((msgs, decrypt_errors)) => {
+            if decrypt_errors > 0 {
+                set_last_error(&format!("decryption_failed:{decrypt_errors}"));
+            }
+            messages_to_c_string(&msgs)
+        }
+        Err(e) => {
+            set_last_error(&classify_network_error(&e.to_string(), "receive_error"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Получить локальную историю диалога из SQLite при keyring-конфигурации.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_history_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    limit: usize,
+) -> *mut c_char {
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    let cfg = match dialogue_config_from_keyring_json(&a, &b, keyring_json) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            set_last_error(&classify_keyring_error(&e.to_string()));
+            return std::ptr::null_mut();
+        }
     };
     let dialogue = h.client.open_dialogue(cfg);
 
@@ -326,6 +438,79 @@ pub extern "C" fn paranoia_history(
         Err(_) => {
             set_last_error("history_error");
             std::ptr::null_mut()
+        }
+    }
+}
+
+/// Удалить серверную историю диалога до cut_seq включительно при keyring-конфигурации.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_determinate_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    cut_seq: u64,
+) -> i32 {
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    let cfg = match dialogue_config_from_keyring_json(&a, &b, keyring_json) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            set_last_error(&classify_keyring_error(&e.to_string()));
+            return -1;
+        }
+    };
+    let dialogue = h.client.open_dialogue(cfg);
+
+    match h.rt.block_on(dialogue.clear_server_history(cut_seq)) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(&classify_network_error(&e.to_string(), "determinate_error"));
+            -1
+        }
+    }
+}
+
+/// Вернуть последний локально синхронизированный server seq для диалога.
+/// Возвращает 0 при успехе и пишет результат в out_seq.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_last_pulled_seq(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    out_seq: *mut u64,
+) -> i32 {
+    if out_seq.is_null() {
+        set_last_error("invalid_argument");
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    let a = unsafe { CStr::from_ptr(user_a) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let b = unsafe { CStr::from_ptr(user_b) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let key = DialogueKey::new(&a, &b);
+
+    match h.client.last_pulled_seq(&key) {
+        Ok(seq) => {
+            unsafe { *out_seq = seq };
+            0
+        }
+        Err(_) => {
+            set_last_error("last_seq_error");
+            -1
         }
     }
 }
@@ -353,10 +538,7 @@ pub extern "C" fn paranoia_determinate(
         .try_into()
         .unwrap();
 
-    let cfg = DialogueConfig {
-        key: DialogueKey::new(&a, &b),
-        session_key: key,
-    };
+    let cfg = DialogueConfig::single_key(DialogueKey::new(&a, &b), key);
     let dialogue = h.client.open_dialogue(cfg);
 
     match h.rt.block_on(dialogue.clear_server_history(cut_seq)) {
@@ -545,7 +727,10 @@ fn cstr_arg(ptr: *const c_char) -> anyhow::Result<String> {
     if ptr.is_null() {
         anyhow::bail!("null argument");
     }
-    Ok(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or("").to_string())
+    Ok(unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .unwrap_or("")
+        .to_string())
 }
 
 fn string_to_c(value: String) -> *mut c_char {
@@ -565,6 +750,36 @@ fn complete_qr_exchange_from_json(
     let state = qr_exchange::state_from_json(&local_state_json)?;
     let payload = qr_exchange::payload_from_json(&peer_payload_json)?;
     qr_exchange::complete_exchange(&state, &payload, now_unix())
+}
+
+#[derive(Deserialize)]
+struct FfiKeyringEntry {
+    start_seq: u64,
+    key: String,
+}
+
+fn dialogue_config_from_keyring_json(
+    user_a: &str,
+    user_b: &str,
+    keyring_json: *const c_char,
+) -> anyhow::Result<DialogueConfig> {
+    let keyring_json = cstr_arg(keyring_json)?;
+    let raw_entries: Vec<FfiKeyringEntry> = serde_json::from_str(&keyring_json)?;
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for entry in raw_entries {
+        if entry.start_seq == 0 {
+            anyhow::bail!("invalid keyring start_seq");
+        }
+        let key_bytes = base64::engine::general_purpose::STANDARD.decode(entry.key)?;
+        let key: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid keyring key length"))?;
+        entries.push(DialogueKeyEntry {
+            start_seq: entry.start_seq,
+            key,
+        });
+    }
+    DialogueConfig::with_keyring(DialogueKey::new(user_a, user_b), entries)
 }
 
 fn messages_to_c_string(msgs: &[Message]) -> *mut c_char {
@@ -646,6 +861,19 @@ pub(crate) fn classify_exchange_error(err: &str) -> String {
         "invalid_exchange_state".to_string()
     } else {
         "qr_exchange_error".to_string()
+    }
+}
+
+pub(crate) fn classify_keyring_error(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("duplicate") {
+        "invalid_keyring_duplicate_start_seq".to_string()
+    } else if lower.contains("start_seq") {
+        "invalid_keyring_start_seq".to_string()
+    } else if lower.contains("length") {
+        "invalid_keyring_key_length".to_string()
+    } else {
+        "invalid_keyring".to_string()
     }
 }
 
@@ -760,13 +988,44 @@ mod tests {
 
     #[test]
     fn exchange_errors_are_classified_without_raw_payload() {
-        assert_eq!(classify_exchange_error("exchange payload expired"), "exchange_expired");
-        assert_eq!(classify_exchange_error("responder_id mismatch: bob vs mallory"), "participant_mismatch");
-        assert_eq!(classify_exchange_error("invalid exchange payload json: {private_key=abc}"), "invalid_exchange_payload");
+        assert_eq!(
+            classify_exchange_error("exchange payload expired"),
+            "exchange_expired"
+        );
+        assert_eq!(
+            classify_exchange_error("responder_id mismatch: bob vs mallory"),
+            "participant_mismatch"
+        );
+        assert_eq!(
+            classify_exchange_error("invalid exchange payload json: {private_key=abc}"),
+            "invalid_exchange_payload"
+        );
 
-        let classified = classify_exchange_error("invalid exchange payload json: private_key=abc123");
+        let classified =
+            classify_exchange_error("invalid exchange payload json: private_key=abc123");
         assert_eq!(classified, "invalid_exchange_payload");
         assert!(!classified.contains("private_key"));
         assert!(!classified.contains("abc123"));
+    }
+
+    #[test]
+    fn keyring_errors_are_classified_without_raw_key_material() {
+        assert_eq!(
+            classify_keyring_error("invalid keyring start_seq 0"),
+            "invalid_keyring_start_seq"
+        );
+        assert_eq!(
+            classify_keyring_error("invalid keyring key length: secret_b64=abc"),
+            "invalid_keyring_key_length"
+        );
+        assert_eq!(
+            classify_keyring_error("duplicate keyring start_seq"),
+            "invalid_keyring_duplicate_start_seq"
+        );
+
+        let classified = classify_keyring_error("raw keyring [{\"key\":\"SECRET\"}]");
+        assert_eq!(classified, "invalid_keyring");
+        assert!(!classified.contains("SECRET"));
+        assert!(!classified.contains("keyring ["));
     }
 }

@@ -29,6 +29,13 @@ int paranoia_send_text(ParanoiaHandle *handle, const char *user_a, const char *u
 char *paranoia_send_text_json(ParanoiaHandle *handle, const char *user_a, const char *user_b,
                               const uint8_t *session_key, const char *text);
 
+// Keyring variants используют JSON:
+//   [{"start_seq":1,"key":"base64-32-bytes"}, ...]
+// Ключ выбирается локально по максимальному start_seq <= server_seq.
+char *paranoia_send_text_json_keyring(ParanoiaHandle *handle, const char *user_a,
+                                      const char *user_b, const char *keyring_json,
+                                      const char *text);
+
 // Получить новые сообщения с сервера.
 // Возвращает JSON-массив или NULL при сетевой ошибке.
 // Пустой массив [] — нет новых сообщений.
@@ -37,15 +44,30 @@ char *paranoia_send_text_json(ParanoiaHandle *handle, const char *user_a, const 
 char *paranoia_receive(ParanoiaHandle *handle, const char *user_a, const char *user_b,
                        const uint8_t *session_key);
 
+char *paranoia_receive_keyring(ParanoiaHandle *handle, const char *user_a,
+                               const char *user_b, const char *keyring_json);
+
 // Локальная история из SQLite.
 char *paranoia_history(ParanoiaHandle *handle, const char *user_a, const char *user_b,
                        const uint8_t *session_key, uintptr_t limit);
+
+char *paranoia_history_keyring(ParanoiaHandle *handle, const char *user_a,
+                               const char *user_b, const char *keyring_json,
+                               uintptr_t limit);
 
 // ── Управление историей ───────────────────────────────────────────────────────
 // Удалить серверную историю диалога до cut_seq включительно (determinate).
 // Возвращает 0 при успехе, -1 при ошибке.
 int paranoia_determinate(ParanoiaHandle *handle, const char *user_a, const char *user_b,
                          const uint8_t *session_key, uint64_t cut_seq);
+
+int paranoia_determinate_keyring(ParanoiaHandle *handle, const char *user_a,
+                                 const char *user_b, const char *keyring_json,
+                                 uint64_t cut_seq);
+
+// Последний локально синхронизированный server seq для выбора start_seq нового ключа.
+int paranoia_last_pulled_seq(ParanoiaHandle *handle, const char *user_a,
+                             const char *user_b, uint64_t *out_seq);
 
 // Удалить локальные данные диалога из SQLite (сообщения, состояние seq).
 // Возвращает 0 при успехе, -1 при ошибке.
@@ -86,6 +108,9 @@ char *paranoia_qr_confirm_exchange(const char *local_state_json,
 //   "participant_mismatch"   — участники QR/JSON обмена не совпадают
 //   "invalid_exchange_payload" — некорректный QR/JSON payload
 //   "invalid_exchange_state" — некорректное локальное состояние QR/JSON обмена
+//   "invalid_keyring"        — некорректный keyring JSON
+//   "invalid_keyring_key_length" — ключ keyring не 32 байта
+//   "invalid_keyring_start_seq" — некорректный start_seq keyring
 //   "send_error:<detail>"    — иная ошибка отправки
 //   "receive_error:<detail>" — иная ошибка получения
 const char *paranoia_last_error();

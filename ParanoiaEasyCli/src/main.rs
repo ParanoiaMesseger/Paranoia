@@ -155,10 +155,7 @@ fn build_dialogue(client: &ParanoiaClient, username: &str, peer: &str) -> Result
     session_key.copy_from_slice(&key_bytes[..32]);
 
     let dkey = DialogueKey::new(username, peer);
-    let dcfg = DialogueConfig {
-        key: dkey,
-        session_key,
-    };
+    let dcfg = DialogueConfig::single_key(dkey, session_key);
     Ok(client.open_dialogue(dcfg))
 }
 
