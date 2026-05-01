@@ -9,6 +9,8 @@ Rectangle {
 
     property bool hasAdminAccess: Backend.hasAdminAccess
     property bool hasUserAccess:  Backend.loggedIn
+    property string qrExchangePeer: ""
+    property bool qrExchangeUpdateExisting: false
 
     signal openChat(string peer)
     signal addServer()
@@ -22,6 +24,17 @@ Rectangle {
         function onDialogDeleted(peer)    { dialogsView.model = Backend.getDialogs() }
         function onServerHistoryCleared(peer) { serverHistoryFeedback.text = "История на сервере удалена ✓" }
         function onServerHistoryError(msg)    { serverHistoryFeedback.text = msg }
+    }
+
+    function openQrExchange(peer, updateExisting) {
+        qrExchangePeer = peer
+        qrExchangeUpdateExisting = updateExisting
+        qrLocalStateJson.text = ""
+        qrLocalPayloadJson.text = ""
+        qrPeerPayloadJson.text = ""
+        qrFingerprintText.text = ""
+        qrExchangeFeedback.text = ""
+        qrExchangePopup.open()
     }
 
     ColumnLayout {
@@ -648,6 +661,13 @@ Rectangle {
                 echoMode:    TextInput.Password
             }
 
+            ParaButton {
+                Layout.fillWidth: true
+                text: "Обменяться ключом через QR/JSON"
+                secondary: true
+                onClicked: root.openQrExchange(updateKeyTarget.text, true)
+            }
+
             Text {
                 id: updateKeyError
                 Layout.fillWidth: true
@@ -953,6 +973,20 @@ Rectangle {
                 echoMode:        TextInput.Password
             }
 
+            ParaButton {
+                Layout.fillWidth: true
+                text: "Обменяться ключом через QR/JSON"
+                secondary: true
+                onClicked: {
+                    let peer = newPeerInput.text.trim()
+                    if (peer === "") {
+                        addDialogError.text = "Введите имя пользователя."
+                        return
+                    }
+                    root.openQrExchange(peer, false)
+                }
+            }
+
             Text {
                 id: addDialogError
                 Layout.fillWidth:    true
@@ -993,6 +1027,217 @@ Rectangle {
                     secondary:        true
                     onClicked:        addDialogPopup.close()
                 }
+            }
+        }
+    }
+
+    // ── Попап: QR/JSON out-of-band обмен ключом ───────────
+    Popup {
+        id: qrExchangePopup
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(380, Overlay.overlay.width - 24)
+        height: Math.min(720, Overlay.overlay.height - 40)
+        padding: 20
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ScrollView {
+            clip: true
+            contentWidth: availableWidth
+
+            ColumnLayout {
+                width: qrExchangePopup.availableWidth
+                spacing: 12
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: "QR/JSON обмен ключом"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family: Theme.fontFamily
+                font.weight: Font.Medium
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Собеседник: " + root.qrExchangePeer
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                elide: Text.ElideRight
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Создать invitation"
+                    onClicked: {
+                        let res = Backend.createDialogKeyInvitation(root.qrExchangePeer)
+                        if (!res.ok) {
+                            qrExchangeFeedback.text = res.error || "Ошибка invitation."
+                            return
+                        }
+                        qrLocalStateJson.text = res.stateJson
+                        qrLocalPayloadJson.text = res.payloadJson
+                        qrFingerprintText.text = ""
+                        qrExchangeFeedback.text = "Передайте payload собеседнику. State не отправляйте."
+                    }
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Создать response"
+                    secondary: true
+                    onClicked: {
+                        let res = Backend.createDialogKeyResponse(qrPeerPayloadJson.text.trim())
+                        if (!res.ok) {
+                            qrExchangeFeedback.text = res.error || "Ошибка response."
+                            return
+                        }
+                        qrLocalStateJson.text = res.stateJson
+                        qrLocalPayloadJson.text = res.payloadJson
+                        qrFingerprintText.text = res.fingerprint
+                        qrExchangeFeedback.text = "Передайте response payload инициатору и сравните SAS."
+                    }
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Ваш payload для передачи"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+            }
+
+            TextArea {
+                id: qrLocalPayloadJson
+                Layout.fillWidth: true
+                implicitHeight: 86
+                readOnly: true
+                wrapMode: TextEdit.Wrap
+                color: Theme.textPrimary
+                selectedTextColor: Theme.textPrimary
+                selectionColor: Theme.accent
+                background: Rectangle { color: Theme.bgInput; border.color: Theme.border; radius: Theme.radiusSm }
+            }
+
+            ParaButton {
+                Layout.fillWidth: true
+                text: "Копировать payload"
+                secondary: true
+                onClicked: {
+                    qrLocalPayloadJson.selectAll()
+                    qrLocalPayloadJson.copy()
+                    qrExchangeFeedback.text = "Payload скопирован."
+                }
+            }
+
+            TextArea {
+                id: qrLocalStateJson
+                visible: false
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Payload собеседника"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+            }
+
+            TextArea {
+                id: qrPeerPayloadJson
+                Layout.fillWidth: true
+                implicitHeight: 86
+                wrapMode: TextEdit.Wrap
+                color: Theme.textPrimary
+                selectedTextColor: Theme.textPrimary
+                selectionColor: Theme.accent
+                placeholderText: "Вставьте invitation или response payload JSON…"
+                placeholderTextColor: Theme.textHint
+                background: Rectangle { color: Theme.bgInput; border.color: Theme.border; radius: Theme.radiusSm }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Рассчитать SAS"
+                    onClicked: {
+                        let res = Backend.dialogKeyFingerprint(qrLocalStateJson.text, qrPeerPayloadJson.text.trim())
+                        if (!res.ok) {
+                            qrExchangeFeedback.text = res.error || "Ошибка SAS."
+                            return
+                        }
+                        qrFingerprintText.text = res.fingerprint
+                        qrExchangeFeedback.text = "Сравните SAS по независимому каналу."
+                    }
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Подтвердить"
+                    secondary: true
+                    onClicked: {
+                        let res = Backend.confirmDialogKeyExchange(
+                            root.qrExchangePeer,
+                            qrLocalStateJson.text,
+                            qrPeerPayloadJson.text.trim(),
+                            qrFingerprintText.text,
+                            root.qrExchangeUpdateExisting
+                        )
+                        if (!res.ok) {
+                            qrExchangeFeedback.text = res.error || "Ошибка подтверждения."
+                            return
+                        }
+                        qrExchangeFeedback.text = "Ключ сохранён."
+                        qrExchangePopup.close()
+                        addDialogPopup.close()
+                        updateKeyPopup.close()
+                    }
+                }
+            }
+
+            Text {
+                id: qrFingerprintText
+                Layout.fillWidth: true
+                text: ""
+                color: Theme.success
+                font.pixelSize: 28
+                font.family: Theme.fontFamily
+                font.weight: Font.Bold
+                horizontalAlignment: Text.AlignHCenter
+                visible: text.length > 0
+            }
+
+            Text {
+                id: qrExchangeFeedback
+                Layout.fillWidth: true
+                color: text.includes("ошиб") || text.includes("Ошибка") ? Theme.error : Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
+            }
+
+            ParaButton {
+                Layout.fillWidth: true
+                text: "Закрыть"
+                secondary: true
+                onClicked: qrExchangePopup.close()
+            }
             }
         }
     }

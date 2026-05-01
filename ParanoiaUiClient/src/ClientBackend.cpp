@@ -9,6 +9,38 @@
 #include <QFile>
 #include <algorithm>
 
+namespace {
+QString takeRustString(char *ptr)
+{
+    if (!ptr) return QString();
+    QString value = QString::fromUtf8(ptr);
+    paranoia_free_string(ptr);
+    return value;
+}
+
+QString lastRustError()
+{
+    const char *err = paranoia_last_error();
+    return err ? QString::fromUtf8(err) : QString();
+}
+
+QVariantMap errorResult(const QString &message)
+{
+    return QVariantMap{{"ok", false}, {"error", message}};
+}
+
+QString compactJson(const QJsonValue &value)
+{
+    if (value.isObject()) {
+        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    }
+    if (value.isArray()) {
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+    }
+    return QString();
+}
+}
+
 ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 {
     m_pollTimer = new QTimer(this);
@@ -188,6 +220,134 @@ void ClientBackend::updateDialogKey(const QString &peer, const QString &newShare
     }
 }
 
+QVariantMap ClientBackend::createDialogKeyInvitation(const QString &peer)
+{
+    const QString trimmedPeer = peer.trimmed();
+    if (m_username.isEmpty() || trimmedPeer.isEmpty()) {
+        return errorResult("Не указан пользователь или собеседник.");
+    }
+
+    const QString bundleJson = takeRustString(paranoia_qr_create_invitation(
+        m_username.toUtf8().constData(),
+        trimmedPeer.toUtf8().constData()
+    ));
+    if (bundleJson.isEmpty()) {
+        return errorResult(lastRustError());
+    }
+
+    const auto doc = QJsonDocument::fromJson(bundleJson.toUtf8());
+    if (!doc.isObject()) {
+        return errorResult("Некорректный JSON invitation.");
+    }
+    const auto obj = doc.object();
+    const QString stateJson = compactJson(obj.value("state"));
+    const QString payloadJson = compactJson(obj.value("payload"));
+    if (stateJson.isEmpty() || payloadJson.isEmpty()) {
+        return errorResult("Некорректный JSON invitation.");
+    }
+
+    return QVariantMap{
+        {"ok", true},
+        {"peer", trimmedPeer},
+        {"stateJson", stateJson},
+        {"payloadJson", payloadJson},
+    };
+}
+
+QVariantMap ClientBackend::createDialogKeyResponse(const QString &invitationPayloadJson)
+{
+    if (m_username.isEmpty() || invitationPayloadJson.trimmed().isEmpty()) {
+        return errorResult("Нет invitation payload или имени пользователя.");
+    }
+
+    const QString bundleJson = takeRustString(paranoia_qr_create_response(
+        invitationPayloadJson.toUtf8().constData(),
+        m_username.toUtf8().constData()
+    ));
+    if (bundleJson.isEmpty()) {
+        return errorResult(lastRustError());
+    }
+
+    const auto doc = QJsonDocument::fromJson(bundleJson.toUtf8());
+    if (!doc.isObject()) {
+        return errorResult("Некорректный JSON response.");
+    }
+    const auto obj = doc.object();
+    const QString stateJson = compactJson(obj.value("state"));
+    const QString payloadJson = compactJson(obj.value("payload"));
+    if (stateJson.isEmpty() || payloadJson.isEmpty()) {
+        return errorResult("Некорректный JSON response.");
+    }
+
+    QVariantMap fingerprint = dialogKeyFingerprint(stateJson, invitationPayloadJson);
+    if (!fingerprint.value("ok").toBool()) {
+        return fingerprint;
+    }
+
+    return QVariantMap{
+        {"ok", true},
+        {"stateJson", stateJson},
+        {"payloadJson", payloadJson},
+        {"fingerprint", fingerprint.value("fingerprint").toString()},
+    };
+}
+
+QVariantMap ClientBackend::dialogKeyFingerprint(const QString &localStateJson, const QString &peerPayloadJson)
+{
+    if (localStateJson.trimmed().isEmpty() || peerPayloadJson.trimmed().isEmpty()) {
+        return errorResult("Нет state или payload для расчёта SAS.");
+    }
+
+    const QString fingerprint = takeRustString(paranoia_qr_fingerprint(
+        localStateJson.toUtf8().constData(),
+        peerPayloadJson.toUtf8().constData()
+    ));
+    if (fingerprint.isEmpty()) {
+        return errorResult(lastRustError());
+    }
+
+    return QVariantMap{{"ok", true}, {"fingerprint", fingerprint}};
+}
+
+QVariantMap ClientBackend::confirmDialogKeyExchange(const QString &peer,
+                                                    const QString &localStateJson,
+                                                    const QString &peerPayloadJson,
+                                                    const QString &fingerprint,
+                                                    bool updateExisting)
+{
+    const QString trimmedPeer = peer.trimmed();
+    if (trimmedPeer.isEmpty()) {
+        return errorResult("Не указан собеседник.");
+    }
+
+    const QString completedJson = takeRustString(paranoia_qr_confirm_exchange(
+        localStateJson.toUtf8().constData(),
+        peerPayloadJson.toUtf8().constData(),
+        fingerprint.toUtf8().constData()
+    ));
+    if (completedJson.isEmpty()) {
+        return errorResult(lastRustError());
+    }
+
+    const auto doc = QJsonDocument::fromJson(completedJson.toUtf8());
+    if (!doc.isObject()) {
+        return errorResult("Некорректный JSON завершения обмена.");
+    }
+    const QByteArray sessionKey = QByteArray::fromBase64(
+        doc.object().value("session_key_b64").toString().toLatin1()
+    );
+    if (sessionKey.size() != 32) {
+        return errorResult("Некорректный ключ диалога.");
+    }
+
+    upsertDialogSessionKey(trimmedPeer, sessionKey, updateExisting);
+    return QVariantMap{
+        {"ok", true},
+        {"peer", trimmedPeer},
+        {"fingerprint", doc.object().value("fingerprint").toString()},
+    };
+}
+
 void ClientBackend::removeDialog(const QString &peer)
 {
     m_dialogs.removeIf([&peer](const Dialog &d) { return d.peer == peer; });
@@ -352,8 +512,8 @@ void ClientBackend::sendText(const QString &text)
             QString err = QString::fromUtf8(paranoia_last_error());
             QMetaObject::invokeMethod(self, [self, err]() {
                 if (!self) return;
-                if (err == "duplicate_seq")
-                    emit self->sendError("Ошибка синхронизации: дублирующийся номер пакета. Перезайдите.");
+                if (err == "duplicate_seq" || err == "invalid_seq")
+                    emit self->sendError("Ошибка синхронизации seq. Повторите отправку после обновления диалога.");
                 else if (err == "server_unavailable")
                     emit self->sendError("Сервер недоступен. Проверьте соединение.");
                 else
@@ -486,6 +646,28 @@ void ClientBackend::appendMessages(const QString &peer, const QVariantList &mess
     saveDialogs();
     emit messagesReceived(cache);
     emit dialogsChanged();
+}
+
+void ClientBackend::upsertDialogSessionKey(const QString &peer, const QByteArray &sessionKey, bool clearCache)
+{
+    if (sessionKey.size() != 32) return;
+
+    for (auto &d : m_dialogs) {
+        if (d.peer == peer) {
+            d.sessionKey = sessionKey;
+            if (clearCache) {
+                m_messageCache.remove(peer);
+                m_seenIds.remove(peer);
+            }
+            emit dialogsChanged();
+            saveDialogs();
+            return;
+        }
+    }
+
+    m_dialogs.append({peer, sessionKey, QString()});
+    emit dialogsChanged();
+    saveDialogs();
 }
 
 void ClientBackend::onPollTimer()

@@ -35,6 +35,14 @@ public:
 
     Q_INVOKABLE void addDialog(const QString &peer, const QString &sharedSecret);
     Q_INVOKABLE void updateDialogKey(const QString &peer, const QString &newSharedSecret);
+    Q_INVOKABLE QVariantMap createDialogKeyInvitation(const QString &peer);
+    Q_INVOKABLE QVariantMap createDialogKeyResponse(const QString &invitationPayloadJson);
+    Q_INVOKABLE QVariantMap dialogKeyFingerprint(const QString &localStateJson, const QString &peerPayloadJson);
+    Q_INVOKABLE QVariantMap confirmDialogKeyExchange(const QString &peer,
+                                                     const QString &localStateJson,
+                                                     const QString &peerPayloadJson,
+                                                     const QString &fingerprint,
+                                                     bool updateExisting);
     Q_INVOKABLE void removeDialog(const QString &peer);
     Q_INVOKABLE QVariantList getDialogs() const;
     Q_INVOKABLE QVariantList getAdminServers() const;
@@ -96,6 +104,7 @@ private:
     void loadDialogs();
     void loadHistory(const QString &peer);
     void appendMessages(const QString &peer, const QVariantList &messages);
+    void upsertDialogSessionKey(const QString &peer, const QByteArray &sessionKey, bool clearCache);
 
     QByteArray deriveKey(const QString &sharedSecret) const;
     QVariantList parseMessages(const QString &json) const;
