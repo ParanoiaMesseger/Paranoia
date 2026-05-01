@@ -1,0 +1,52 @@
+@startuml
+title Message Protocols
+autonumber
+
+actor Alice
+participant "Alice client core" as Client
+participant "Client cover layer" as Cover
+participant "Paranoia server" as Server
+database "Dialogue storage" as Store
+actor Bob
+
+group Push
+    Alice -> Client: Send text to Bob
+    Client -> Server: Pull dialogue before push
+    Server --> Client: Messages after last_pulled_seq
+    Client -> Client: next_send_seq = max(local, last_pulled_seq + 1)
+    Client -> Client: Encrypt PacketInner with local dialogue keyring
+    Client -> Client: Sign sender || recver || seq || payload_b64
+    Client -> Cover: CorePush {sender, recver, seq, payload, sig}
+    Cover -> Server: POST /push masked as cover JSON
+    Server -> Server: Unwrap cover and verify sender signature
+    Server -> Store: Put dialogue_id:seq -> encrypted payload if absent
+    Store --> Server: OK or duplicate_seq/invalid_seq
+    Server --> Cover: Masked push response
+    Cover --> Client: Core push result
+end
+
+group Pull
+    Bob -> Client: Receive dialogue
+    Client -> Client: Sign sender || recver || after_seq
+    Client -> Cover: CorePull {sender, recver, after_seq, sig}
+    Cover -> Server: POST /pull masked as cover JSON
+    Server -> Server: Verify signature by either dialogue participant
+    Server -> Store: Read dialogue_id records with seq > after_seq
+    Store --> Server: Encrypted packets
+    Server --> Cover: Masked pull response
+    Cover --> Client: Core packets
+    Client -> Client: Decrypt each packet by max keyring start_seq <= seq
+    Client -> Client: Persist readable messages and last_pulled_seq
+end
+
+group Determinate
+    Alice -> Client: Clear server history to cut_seq
+    Client -> Client: Sign sender || recver || cut_seq
+    Client -> Cover: CoreDeterminate {sender, recver, cut_seq, sig}
+    Cover -> Server: POST /determinate masked as cover JSON
+    Server -> Server: Verify signature by either dialogue participant
+    Server -> Store: Delete dialogue_id records where seq <= cut_seq
+    Server --> Client: Masked cleanup result
+end
+
+@enduml

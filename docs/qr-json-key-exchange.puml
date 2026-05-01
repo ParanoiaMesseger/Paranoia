@@ -1,0 +1,33 @@
+@startuml
+title QR/JSON Key Exchange
+autonumber
+
+actor "Initiator user" as UserA
+participant "Initiator client" as A
+collections "QR or JSON\nout-of-band channel" as OOB
+participant "Responder client" as B
+actor "Responder user" as UserB
+
+UserA -> A: Create invitation for responder_id
+A -> A: Generate exchange_id and ephemeral X25519 keypair
+A -> A: Store local state with private key
+A --> OOB: Share invitation payload only
+OOB --> B: Import or scan invitation payload
+B -> B: Validate protocol, version, role, TTL and participants
+B -> B: Generate responder X25519 keypair
+B --> OOB: Share response payload only
+OOB --> A: Import or scan response payload
+A -> A: Validate exchange_id, participants, roles and TTL
+A -> A: Compute X25519 shared secret
+B -> B: Compute same X25519 shared secret
+A -> A: Derive session_key with HKDF-SHA256 transcript
+B -> B: Derive session_key with HKDF-SHA256 transcript
+A --> UserA: Show SAS from SHA256 transcript
+B --> UserB: Show SAS from SHA256 transcript
+UserA --> UserB: Compare SAS over independent channel
+UserA -> A: Confirm matching SAS
+UserB -> B: Confirm matching SAS
+A -> A: Save key into local dialogue keyring
+B -> B: Save key into local dialogue keyring
+
+@enduml
