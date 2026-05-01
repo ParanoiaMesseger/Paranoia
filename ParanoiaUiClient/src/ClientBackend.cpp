@@ -2,6 +2,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QCryptographicHash>
 #include <QThreadPool>
 #include <QPointer>
@@ -10,6 +11,8 @@
 #include <algorithm>
 
 namespace {
+constexpr qint64 MaxExportFileBytes = 16 * 1024 * 1024;
+
 QString takeRustString(char *ptr)
 {
     if (!ptr) return QString();
@@ -38,6 +41,16 @@ QString compactJson(const QJsonValue &value)
         return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
     }
     return QString();
+}
+
+bool isSupportedExportProfile(const QString &profileType)
+{
+    return profileType == "client" || profileType == "admin" || profileType == "full";
+}
+
+void setOwnerOnlyPermissions(const QString &path)
+{
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
 }
 }
 
@@ -778,6 +791,9 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
                                          const QString &receiverPubkeyB64,
                                          const QString &filePath)
 {
+    const QString normalizedProfile = profileType.trimmed();
+    if (!isSupportedExportProfile(normalizedProfile))
+        return errorResult("Неподдерживаемый тип профиля экспорта.");
     if (receiverPubkeyB64.trimmed().isEmpty())
         return errorResult("Не указан публичный ключ принимающего устройства.");
     if (filePath.trimmed().isEmpty())
@@ -786,10 +802,12 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
     // Собрать payload
     QJsonObject payload;
     payload["format_version"] = 1;
-    payload["profile_type"] = profileType;
+    payload["profile_type"] = normalizedProfile;
 
-    const bool includeClient = (profileType == "client" || profileType == "full");
-    const bool includeAdmin  = (profileType == "admin"  || profileType == "full");
+    const bool includeClient = (normalizedProfile == "client" || normalizedProfile == "full");
+    const bool includeAdmin  = (normalizedProfile == "admin"  || normalizedProfile == "full");
+    int exportedDialogues = 0;
+    int exportedKeyEntries = 0;
 
     if (includeClient) {
         if (m_server.isEmpty() || m_username.isEmpty() || m_privkey.isEmpty())
@@ -812,7 +830,12 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
             if (keyringArr.isEmpty()) continue;
             dlgObj["keyring"] = keyringArr;
             dialoguesArr.append(dlgObj);
+            ++exportedDialogues;
+            exportedKeyEntries += keyringArr.size();
         }
+
+        if (!peers.isEmpty() && exportedDialogues == 0)
+            return errorResult("Нет выбранных диалогов с keyring для экспорта.");
 
         QJsonObject serverObj;
         serverObj["url"] = m_server;
@@ -857,20 +880,36 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return errorResult("Не удалось открыть файл для записи: " + filePath);
-    file.write(envelopeJson.toUtf8());
+    const QByteArray envelopeBytes = envelopeJson.toUtf8();
+    if (file.write(envelopeBytes) != envelopeBytes.size()) {
+        file.close();
+        return errorResult("Не удалось полностью записать файл экспорта.");
+    }
     file.close();
+    setOwnerOnlyPermissions(filePath);
 
-    return QVariantMap{{"ok", true}, {"path", filePath}};
+    return QVariantMap{
+        {"ok", true},
+        {"path", filePath},
+        {"dialogues", exportedDialogues},
+        {"keyEntries", exportedKeyEntries},
+    };
 }
 
 QVariantMap ClientBackend::importProfile(const QString &filePath)
 {
     if (m_devicePrivkey.isEmpty())
         return errorResult("Device keypair не инициализирован.");
+    if (filePath.trimmed().isEmpty())
+        return errorResult("Не указан путь к файлу.");
 
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly))
         return errorResult("Не удалось открыть файл: " + filePath);
+    if (file.size() > MaxExportFileBytes) {
+        file.close();
+        return errorResult("Файл экспорта слишком большой.");
+    }
     const QString envelopeJson = QString::fromUtf8(file.readAll());
     file.close();
 
@@ -892,57 +931,85 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
     }
     const QString payloadJson = takeRustString(plaintextPtr);
 
-    const auto doc = QJsonDocument::fromJson(payloadJson.toUtf8());
-    if (!doc.isObject())
+    QJsonParseError parseError;
+    const auto doc = QJsonDocument::fromJson(payloadJson.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
         return errorResult("Некорректный формат payload после расшифровки.");
 
     const auto payload = doc.object();
     if (payload["format_version"].toInt() != 1)
         return errorResult("Неподдерживаемая версия формата payload.");
+    const QString profileType = payload["profile_type"].toString();
+    if (!isSupportedExportProfile(profileType))
+        return errorResult("Неподдерживаемый тип профиля в payload.");
+    const bool allowClientImport = (profileType == "client" || profileType == "full");
+    const bool allowAdminImport = (profileType == "admin" || profileType == "full");
 
     int importedDialogues = 0;
+    int importedKeyEntries = 0;
     int importedAdminServers = 0;
+    int skippedEntries = 0;
+    int conflicts = 0;
+    QSet<QString> touchedDialogues;
 
     // Импорт client-данных: merge по server+username+peer+start_seq (Z2a)
-    const QJsonArray servers = payload["servers"].toArray();
-    for (const auto &serverVal : servers) {
-        const auto serverObj = serverVal.toObject();
-        const QString url      = serverObj["url"].toString();
-        const QString username = serverObj["username"].toString();
-        if (url.isEmpty() || username.isEmpty()) continue;
+    if (allowClientImport) {
+        const QJsonArray servers = payload["servers"].toArray();
+        for (const auto &serverVal : servers) {
+            const auto serverObj = serverVal.toObject();
+            const QString url      = serverObj["url"].toString();
+            const QString username = serverObj["username"].toString();
+            if (url.isEmpty() || username.isEmpty()) continue;
 
-        // Импортируем подпись только для текущего пользователя данного сервера
-        const bool isCurrentClient = (url == m_server && username == m_username);
+            // Импортируем подпись только для текущего пользователя данного сервера
+            const bool isCurrentClient = (url == m_server && username == m_username);
 
-        const QJsonArray dialogues = serverObj["dialogues"].toArray();
-        for (const auto &dlgVal : dialogues) {
-            const auto dlgObj = dlgVal.toObject();
-            const QString peer = dlgObj["peer"].toString();
-            if (peer.isEmpty()) continue;
+            const QJsonArray dialogues = serverObj["dialogues"].toArray();
+            for (const auto &dlgVal : dialogues) {
+                const auto dlgObj = dlgVal.toObject();
+                const QString peer = dlgObj["peer"].toString();
+                if (peer.isEmpty()) continue;
 
-            const QJsonArray keyringArr = dlgObj["keyring"].toArray();
-            for (const auto &keyVal : keyringArr) {
-                const auto keyObj = keyVal.toObject();
-                const quint64 startSeq = static_cast<quint64>(keyObj["start_seq"].toDouble());
-                const QByteArray key = QByteArray::fromBase64(keyObj["key"].toString().toLatin1());
-                if (startSeq == 0 || key.size() != 32) continue;
+                const QJsonArray keyringArr = dlgObj["keyring"].toArray();
+                for (const auto &keyVal : keyringArr) {
+                    const auto keyObj = keyVal.toObject();
+                    const quint64 startSeq = static_cast<quint64>(keyObj["start_seq"].toDouble());
+                    const QByteArray key = QByteArray::fromBase64(keyObj["key"].toString().toLatin1());
+                    if (startSeq == 0 || key.size() != 32) {
+                        ++skippedEntries;
+                        continue;
+                    }
+                    if (!isCurrentClient) {
+                        ++skippedEntries;
+                        continue;
+                    }
 
-                // Проверяем, есть ли уже такая запись
-                bool exists = false;
-                if (isCurrentClient) {
+                    // Проверяем, есть ли уже такая запись
+                    bool exists = false;
+                    bool conflict = false;
                     for (auto &dlg : m_dialogs) {
                         if (dlg.peer != peer) continue;
                         for (auto &entry : dlg.keyring) {
                             if (entry.startSeq == startSeq) {
-                                // Перезаписываем только при совпадении ключа (Z2a)
                                 exists = true;
+                                conflict = (entry.key != key);
                                 break;
                             }
                         }
                         break;
                     }
-                    if (!exists) {
-                        upsertDialogKeyringEntry(peer, key, startSeq, false, false);
+                    if (conflict) {
+                        ++conflicts;
+                        continue;
+                    }
+                    if (exists) {
+                        ++skippedEntries;
+                        continue;
+                    }
+                    upsertDialogKeyringEntry(peer, key, startSeq, false, false);
+                    ++importedKeyEntries;
+                    if (!touchedDialogues.contains(peer)) {
+                        touchedDialogues.insert(peer);
                         ++importedDialogues;
                     }
                 }
@@ -951,20 +1018,22 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
     }
 
     // Импорт admin-данных
-    const QJsonArray adminServers = payload["admin_servers"].toArray();
-    for (const auto &adminVal : adminServers) {
-        const auto adminObj = adminVal.toObject();
-        const QString url     = adminObj["url"].toString();
-        const QString privkey = adminObj["admin_privkey_b64"].toString();
-        if (url.isEmpty() || privkey.isEmpty()) continue;
+    if (allowAdminImport) {
+        const QJsonArray adminServers = payload["admin_servers"].toArray();
+        for (const auto &adminVal : adminServers) {
+            const auto adminObj = adminVal.toObject();
+            const QString url     = adminObj["url"].toString();
+            const QString privkey = adminObj["admin_privkey_b64"].toString();
+            if (url.isEmpty() || privkey.isEmpty()) continue;
 
-        bool found = false;
-        for (auto &a : admin::Admin::admins) {
-            if (a.domain == url) { found = true; break; }
-        }
-        if (!found) {
-            admin::Admin::admins.push_back({url, privkey});
-            ++importedAdminServers;
+            bool found = false;
+            for (auto &a : admin::Admin::admins) {
+                if (a.domain == url) { found = true; break; }
+            }
+            if (!found) {
+                admin::Admin::admins.push_back({url, privkey});
+                ++importedAdminServers;
+            }
         }
     }
 
@@ -976,8 +1045,23 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
     return QVariantMap{
         {"ok", true},
         {"importedDialogues", importedDialogues},
+        {"importedKeyEntries", importedKeyEntries},
         {"importedAdminServers", importedAdminServers},
+        {"skippedEntries", skippedEntries},
+        {"conflicts", conflicts},
     };
+}
+
+QVariantMap ClientBackend::deleteExportFile(const QString &filePath)
+{
+    const QString trimmedPath = filePath.trimmed();
+    if (trimmedPath.isEmpty())
+        return errorResult("Не указан путь к файлу.");
+    if (!QFile::exists(trimmedPath))
+        return QVariantMap{{"ok", true}, {"deleted", false}, {"message", "Файл уже удалён."}};
+    if (!QFile::remove(trimmedPath))
+        return errorResult("Не удалось удалить файл экспорта: " + trimmedPath);
+    return QVariantMap{{"ok", true}, {"deleted", true}};
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -1089,6 +1173,8 @@ void ClientBackend::saveDeviceKey() const
     QJsonObject obj;
     obj["privkey_b64"] = m_devicePrivkey;
     f.write(QJsonDocument(obj).toJson());
+    f.close();
+    setOwnerOnlyPermissions("device_key.json");
 }
 
 void ClientBackend::loadDeviceKey()

@@ -74,6 +74,7 @@ public:
     // filePath: путь к файлу экспорта; расшифровывается device privkey
     // suggestDeleteFile: true если после успеха предложить удалить файл (Z3b)
     Q_INVOKABLE QVariantMap importProfile(const QString &filePath);
+    Q_INVOKABLE QVariantMap deleteExportFile(const QString &filePath);
 
 signals:
     void keyPairGenerated(const QString &pubkey, const QString &privkey);

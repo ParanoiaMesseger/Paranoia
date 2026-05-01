@@ -14,10 +14,61 @@ Popup {
     modal:   true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+    property var selectedExportPeers: ({})
+
+    function refreshExportDialogs() {
+        const dialogs = Backend.getDialogs()
+        exportDialogList.model = dialogs
+        const selected = {}
+        for (let i = 0; i < dialogs.length; ++i) {
+            if (dialogs[i].hasKey)
+                selected[dialogs[i].peer] = true
+        }
+        selectedExportPeers = selected
+    }
+
+    function setAllExportDialogs(checked) {
+        const selected = {}
+        const dialogs = exportDialogList.model || []
+        for (let i = 0; i < dialogs.length; ++i) {
+            if (dialogs[i].hasKey)
+                selected[dialogs[i].peer] = checked
+        }
+        selectedExportPeers = selected
+    }
+
+    function setExportDialogSelected(peer, checked) {
+        const selected = {}
+        const current = selectedExportPeers || {}
+        for (const key in current)
+            selected[key] = current[key]
+        selected[peer] = checked
+        selectedExportPeers = selected
+    }
+
+    function selectedPeerNames() {
+        const result = []
+        const dialogs = exportDialogList.model || []
+        for (let i = 0; i < dialogs.length; ++i) {
+            const peer = dialogs[i].peer
+            if (dialogs[i].hasKey && selectedExportPeers[peer] === true)
+                result.push(peer)
+        }
+        return result
+    }
+
     background: Rectangle {
         radius: Theme.radiusLg
         color:  Theme.bgSecondary
         border.color: Theme.border
+    }
+
+    Connections {
+        target: Backend
+        function onDialogsChanged() {
+            if (root.opened)
+                root.refreshExportDialogs()
+        }
     }
 
     onOpened: {
@@ -27,6 +78,7 @@ Popup {
         exportReceiverKey.text = ""
         exportFilePath.text    = ""
         importFilePath.text    = ""
+        root.refreshExportDialogs()
     }
 
     contentItem: ColumnLayout {
@@ -222,6 +274,118 @@ Popup {
                         }
                     }
 
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Диалоги для экспорта (X2c):"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSm
+                        font.family: Theme.fontFamily
+                        visible: profileCombo.currentIndex !== 1
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        visible: profileCombo.currentIndex !== 1
+
+                        ParaButton {
+                            Layout.fillWidth: true
+                            text: "Выбрать все"
+                            secondary: true
+                            onClicked: root.setAllExportDialogs(true)
+                        }
+
+                        ParaButton {
+                            Layout.fillWidth: true
+                            text: "Снять выбор"
+                            secondary: true
+                            onClicked: root.setAllExportDialogs(false)
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: Math.min(160, Math.max(48, exportDialogList.contentHeight + 2))
+                        color: Theme.bgPrimary
+                        radius: Theme.radiusSm
+                        border.color: Theme.border
+                        visible: profileCombo.currentIndex !== 1
+                        clip: true
+
+                        ListView {
+                            id: exportDialogList
+                            anchors.fill: parent
+                            model: []
+                            clip: true
+                            ScrollBar.vertical: ScrollBar {}
+
+                            delegate: Rectangle {
+                                width: ListView.view.width
+                                height: 38
+                                color: dialogExportArea.containsMouse ? Theme.bgSecondary : "transparent"
+                                opacity: modelData.hasKey ? 1.0 : 0.55
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 10
+                                    spacing: 8
+
+                                    Rectangle {
+                                        width: 18
+                                        height: 18
+                                        radius: 3
+                                        color: root.selectedExportPeers[modelData.peer] === true ? Theme.accent : "transparent"
+                                        border.color: modelData.hasKey ? Theme.accent : Theme.border
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: root.selectedExportPeers[modelData.peer] === true ? "✓" : ""
+                                            color: "#FFFFFF"
+                                            font.pixelSize: 12
+                                            font.family: Theme.fontFamily
+                                        }
+                                    }
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.peer
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSm
+                                        font.family: Theme.fontFamily
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Text {
+                                        text: modelData.hasKey ? "keyring" : "нет keyring"
+                                        color: modelData.hasKey ? Theme.textSecondary : Theme.error
+                                        font.pixelSize: Theme.fontXs
+                                        font.family: Theme.fontFamily
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: dialogExportArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: {
+                                        if (modelData.hasKey)
+                                            root.setExportDialogSelected(modelData.peer, !(root.selectedExportPeers[modelData.peer] === true))
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Нет диалогов с keyring"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSm
+                            font.family: Theme.fontFamily
+                            visible: exportDialogList.count === 0
+                        }
+                    }
+
                     // Публичный ключ получателя
                     ParaInput {
                         id: exportReceiverKey
@@ -267,16 +431,24 @@ Popup {
                             onClicked: {
                                 exportFeedback.text = ""
                                 const profile = ["client", "admin", "full"][profileCombo.currentIndex]
+                                const peers = profile === "admin" ? [] : root.selectedPeerNames()
+                                if (profile !== "admin" && peers.length === 0) {
+                                    exportFeedback.text = "Выберите хотя бы один диалог с keyring."
+                                    return
+                                }
                                 const res = Backend.exportProfile(
                                     profile,
-                                    [],
+                                    peers,
                                     exportReceiverKey.text.trim(),
                                     exportFilePath.text.trim()
                                 )
-                                if (res.ok)
+                                if (res.ok) {
                                     exportFeedback.text = "✓ Экспорт сохранён: " + res.path
-                                else
+                                    if (profile !== "admin")
+                                        exportFeedback.text += "\nДиалогов: " + res.dialogues + ", ключей: " + res.keyEntries
+                                } else {
                                     exportFeedback.text = res.error || "Ошибка экспорта."
+                                }
                             }
                         }
 
@@ -392,13 +564,13 @@ Popup {
                                 implicitWidth:  80
                                 implicitHeight: 32
                                 onClicked: {
-                                    Qt.callLater(function() {
-                                        let path = importFilePath.text.trim()
-                                        // Попытка удалить файл; результат только предупреждение
-                                        if (!Qt.removeFile || !Qt.removeFile(path))
-                                            importFeedback.text += "\n⚠ Удалите файл вручную: " + path
-                                        deleteFileBanner.visible = false
-                                    })
+                                    let path = importFilePath.text.trim()
+                                    const res = Backend.deleteExportFile(path)
+                                    if (res.ok)
+                                        importFeedback.text += "\nФайл экспорта удалён."
+                                    else
+                                        importFeedback.text += "\nУдалите файл вручную: " + path + " (" + (res.error || "ошибка") + ")"
+                                    deleteFileBanner.visible = false
                                 }
                             }
 
@@ -426,7 +598,12 @@ Popup {
                                 if (res.ok) {
                                     importFeedback.text =
                                         "✓ Импорт выполнен. Диалогов: " + res.importedDialogues +
+                                        ", ключей: " + res.importedKeyEntries +
                                         ", серверов: " + res.importedAdminServers
+                                    if (res.conflicts > 0)
+                                        importFeedback.text += "\nКонфликтов keyring: " + res.conflicts + " (не перезаписаны)"
+                                    if (res.skippedEntries > 0)
+                                        importFeedback.text += "\nПропущено записей: " + res.skippedEntries
                                     deleteFileBanner.visible = true
                                 } else {
                                     importFeedback.text = res.error || "Ошибка импорта."
