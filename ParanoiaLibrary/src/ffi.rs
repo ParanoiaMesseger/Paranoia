@@ -444,6 +444,11 @@ fn message_content_for_ui(content: &MessageContent) -> String {
 pub(crate) fn classify_send_error(err: &str) -> String {
     if err.contains("Duplicate seq") || err.contains("duplicate_seq") {
         "duplicate_seq".to_string()
+    } else if err.contains("Invalid seq")
+        || err.contains("invalid_seq")
+        || err.contains("expected seq")
+    {
+        "invalid_seq".to_string()
     } else {
         classify_network_error(err, "send_error")
     }
@@ -474,8 +479,21 @@ mod tests {
     #[test]
     fn duplicate_seq_is_classified() {
         assert_eq!(classify_send_error("Duplicate seq 42"), "duplicate_seq");
-        assert_eq!(classify_send_error("Push failed: Duplicate seq 1"), "duplicate_seq");
+        assert_eq!(
+            classify_send_error("Push failed: Duplicate seq 1"),
+            "duplicate_seq"
+        );
         assert_eq!(classify_send_error("error: duplicate_seq"), "duplicate_seq");
+    }
+
+    #[test]
+    fn invalid_seq_is_classified() {
+        assert_eq!(classify_send_error("Invalid seq 42"), "invalid_seq");
+        assert_eq!(
+            classify_send_error("Push failed: expected seq 7"),
+            "invalid_seq"
+        );
+        assert_eq!(classify_send_error("error: invalid_seq"), "invalid_seq");
     }
 
     #[test]
@@ -531,7 +549,8 @@ mod tests {
 
     #[test]
     fn receive_error_strips_raw_server_response() {
-        let raw = "Pull failed: {\"ok\":false,\"error\":\"internal: db_path=/var/data/users/bob.db\"}";
+        let raw =
+            "Pull failed: {\"ok\":false,\"error\":\"internal: db_path=/var/data/users/bob.db\"}";
         let classified = classify_network_error(raw, "receive_error");
         assert_eq!(classified, "receive_error");
         assert!(!classified.contains("db_path"));

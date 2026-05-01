@@ -8,10 +8,10 @@ use crate::{
     crypto,
     packet::PacketInner,
     store::LocalStore,
-    transport::{Transport, CorePush, CorePull, CoreDeterminate, RawPacket},
+    transport::{CoreDeterminate, CorePull, CorePush, RawPacket, Transport},
     types::{
-        ClientConfig, DialogueConfig, DialogueKey, FileAttachment, Message, MessageContent,
-        MessageStatus, CHUNK_SIZE_MAX, CHUNK_SIZE_MIN,
+        CHUNK_SIZE_MAX, CHUNK_SIZE_MIN, ClientConfig, DialogueConfig, DialogueKey, FileAttachment,
+        Message, MessageContent, MessageStatus,
     },
 };
 
@@ -52,7 +52,8 @@ impl Dialogue {
         mime_type: impl Into<String>,
         data: Vec<u8>,
     ) -> Result<Vec<Message>> {
-        self.send_chunked(filename.into(), mime_type.into(), data).await
+        self.send_chunked(filename.into(), mime_type.into(), data)
+            .await
     }
 
     pub async fn send_image(
@@ -60,11 +61,13 @@ impl Dialogue {
         filename: impl Into<String>,
         data: Vec<u8>,
     ) -> Result<Vec<Message>> {
-        self.send_chunked(filename.into(), "image/jpeg".into(), data).await
+        self.send_chunked(filename.into(), "image/jpeg".into(), data)
+            .await
     }
 
     pub async fn send_voice(&self, data: Vec<u8>) -> Result<Vec<Message>> {
-        self.send_chunked("voice.ogg".into(), "audio/ogg".into(), data).await
+        self.send_chunked("voice.ogg".into(), "audio/ogg".into(), data)
+            .await
     }
 
     pub async fn send_read_receipt(&self, up_to_seq: u64) -> Result<()> {
@@ -101,6 +104,7 @@ impl Dialogue {
         let raw_packets: Vec<RawPacket> = self.transport.pull(&core_pull).await?;
 
         if raw_packets.is_empty() {
+            self.store.set_last_pulled_seq(&self.key, after_seq)?;
             return Ok((vec![], 0));
         }
 
@@ -120,13 +124,14 @@ impl Dialogue {
                 }
             };
 
-            // Собственные пакеты — обновляем статус до Delivered
+            // Собственные пакеты из локальной БД — обновляем статус до Delivered.
+            // Если seq неизвестен локально, это история другого устройства того же пользователя.
             if inner.sender == *username {
                 if let Some(msg_id) = self.store.get_message_by_seq(&self.key, pkt.seq)? {
                     self.store
                         .update_status(&msg_id, MessageStatus::Delivered)?;
+                    continue;
                 }
-                continue;
             }
 
             // Обрабатываем входящий пакет
@@ -167,6 +172,8 @@ impl Dialogue {
 
     /// Отправить одиночный пакет любого типа.
     async fn send(&self, content: MessageContent) -> Result<Message> {
+        self.receive().await?;
+
         let username = &self.client_cfg.username;
         let partner = self.partner();
         let id = Uuid::new_v4().to_string();
@@ -263,8 +270,7 @@ impl Dialogue {
                 Ok(None)
             }
             MessageContent::Delete { target_id } => {
-                self.store
-                    .update_status(target_id, MessageStatus::Failed)?;
+                self.store.update_status(target_id, MessageStatus::Failed)?;
                 debug!("Delete receipt for message id={target_id}");
                 Ok(None)
             }
@@ -299,9 +305,7 @@ impl Dialogue {
                     transfer_id
                 );
 
-                if let Some(assembled) =
-                    self.store.try_assemble_chunks(transfer_id, &self.key)?
-                {
+                if let Some(assembled) = self.store.try_assemble_chunks(transfer_id, &self.key)? {
                     let msg = Message {
                         id: Uuid::new_v4().to_string(),
                         dialogue: self.key.clone(),

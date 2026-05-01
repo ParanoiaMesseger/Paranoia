@@ -57,6 +57,7 @@ int paranoia_delete_local_dialogue(ParanoiaHandle *handle, const char *user_a,
 // FFI-вызова в этом потоке. НЕ освобождать через paranoia_free_string.
 // Возможные значения:
 //   "duplicate_seq"          — сервер отклонил пакет из-за дублирующегося seq
+//   "invalid_seq"            — сервер отклонил пакет из-за устаревшего/неверного seq
 //   "server_unavailable"     — сетевая ошибка
 //   "decryption_failed:<N>"  — N сообщений не удалось расшифровать (неверный ключ)
 //   "send_error:<detail>"    — иная ошибка отправки

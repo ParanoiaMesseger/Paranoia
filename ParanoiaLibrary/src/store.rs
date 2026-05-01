@@ -81,9 +81,8 @@ impl LocalStore {
 
     // ── seq management ────────────────────────────────────────────────────
 
-    /// Атомарно получить следующий seq и инкрементировать счётчик.
-    /// Безопасно при нескольких устройствах: каждое устройство
-    /// имеет свою SQLite, seq уникален локально.
+    /// Атомарно получить следующий локально известный seq и инкрементировать счётчик.
+    /// Перед отправкой Dialogue синхронизирует last_pulled_seq через серверный pull.
     pub fn next_send_seq(&self, dialogue: &DialogueKey) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         // Upsert — создаём запись если нет, иначе инкрементируем
@@ -122,9 +121,11 @@ impl LocalStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO dialogue_state (dialogue_a, dialogue_b, last_pulled_seq, next_send_seq)
-             VALUES (?1, ?2, ?3, 1)
+             VALUES (?1, ?2, ?3, ?3 + 1)
              ON CONFLICT(dialogue_a, dialogue_b)
-             DO UPDATE SET last_pulled_seq = excluded.last_pulled_seq",
+             DO UPDATE SET
+                last_pulled_seq = MAX(dialogue_state.last_pulled_seq, excluded.last_pulled_seq),
+                next_send_seq = MAX(dialogue_state.next_send_seq, excluded.last_pulled_seq + 1)",
             params![dialogue.a, dialogue.b, seq as i64],
         )?;
         Ok(())
@@ -217,7 +218,7 @@ impl LocalStore {
             Ok(None)
         }
     }
-    
+
     pub fn get_messages(
         &self,
         dialogue: &DialogueKey,

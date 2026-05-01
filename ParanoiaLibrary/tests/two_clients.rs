@@ -338,13 +338,12 @@ async fn wrong_dialogue_key_causes_decrypt_error() {
     server.wait().ok();
 }
 
-// ── Task 6: duplicate seq после сброса БД ────────────────────────────────────
+// ── Multi-device: синхронизация seq после сброса БД ──────────────────────────
 
-/// После удаления локальной SQLite у Alice её счётчик seq сбрасывается в 1.
-/// Попытка отправить сообщение с уже использованным seq=1 отклоняется сервером.
-/// Ошибка содержит "Duplicate seq", что classify_send_error() кодирует как "duplicate_seq".
+/// После удаления локальной SQLite Alice сначала делает pull, восстанавливает
+/// последний серверный seq и отправляет следующее сообщение с seq=2.
 #[tokio::test]
-async fn duplicate_seq_after_db_reset_is_rejected_by_server() {
+async fn fresh_device_syncs_seq_after_db_reset() {
     let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
         Ok(path) => path,
         Err(_) => return,
@@ -389,29 +388,45 @@ async fn duplicate_seq_after_db_reset_is_rejected_by_server() {
         .await
         .expect("alice sends first");
 
-    // Удаляем клиент и БД Alice — счётчик seq сбросится в 1
+    // Удаляем клиент и БД Alice — локальное состояние seq сбросится.
     drop(alice_dialogue);
     drop(alice);
     let alice_db = temp.path().join("alice.sqlite");
     fs::remove_file(&alice_db).expect("remove alice db");
 
-    // Пересоздаём Alice с чистой БД (next_send_seq = 1)
+    // Пересоздаём Alice с чистой БД. send_text() должен сначала подтянуть
+    // серверную историю, сохранить неизвестный собственный пакет и выбрать seq=2.
     let fresh_alice = build_client(temp.path(), &server_url, "alice", alice_key);
     let fresh_dialogue = fresh_alice.open_dialogue(dialogue_config("alice", "bob", session_key));
 
-    // Сервер должен отклонить seq=1, т.к. он уже существует
-    let result = fresh_dialogue
-        .send_text("second message with dup seq")
-        .await;
+    let sent = fresh_dialogue
+        .send_text("second message after sync")
+        .await
+        .expect("fresh Alice sends with synchronized seq");
+    assert_eq!(sent.server_seq, Some(2));
+
+    let fresh_history = fresh_dialogue
+        .history(10, None)
+        .await
+        .expect("fresh Alice restored own history");
+    assert_eq!(fresh_history.len(), 2);
     assert!(
-        result.is_err(),
-        "send must fail: seq=1 is already on the server"
+        matches!(&fresh_history[0].content, MessageContent::Text(text) if text == "first message")
+    );
+    assert!(
+        matches!(&fresh_history[1].content, MessageContent::Text(text) if text == "second message after sync")
     );
 
-    let err_msg = result.unwrap_err().to_string();
+    let bob_dialogue = bob.open_dialogue(dialogue_config("bob", "alice", session_key));
+    let (bob_msgs, decrypt_errors) = bob_dialogue
+        .receive()
+        .await
+        .expect("bob receives both messages");
+    assert_eq!(decrypt_errors, 0);
+    assert_eq!(bob_msgs.len(), 2);
+    assert!(matches!(&bob_msgs[0].content, MessageContent::Text(text) if text == "first message"));
     assert!(
-        err_msg.contains("Duplicate seq"),
-        "error must indicate duplicate seq; got: {err_msg}"
+        matches!(&bob_msgs[1].content, MessageContent::Text(text) if text == "second message after sync")
     );
 
     server.kill().ok();
