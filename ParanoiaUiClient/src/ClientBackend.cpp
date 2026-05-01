@@ -192,32 +192,13 @@ void ClientBackend::registerUser(const QString &domain, const QString &username,
 
 void ClientBackend::addDialog(const QString &peer, const QString &sharedSecret)
 {
-    for (auto &d : m_dialogs) {
-        if (d.peer == peer) {
-            d.sessionKey = deriveKey(sharedSecret);
-            emit dialogsChanged();
-            saveDialogs();
-            return;
-        }
-    }
-    m_dialogs.append({peer, deriveKey(sharedSecret), QString()});
-    emit dialogsChanged();
-    saveDialogs();
+    upsertDialogKeyringEntry(peer.trimmed(), deriveKey(sharedSecret), 1, true, false);
 }
 
 void ClientBackend::updateDialogKey(const QString &peer, const QString &newSharedSecret)
 {
-    for (auto &d : m_dialogs) {
-        if (d.peer == peer) {
-            d.sessionKey = deriveKey(newSharedSecret);
-            // Сбрасываем кэш — при новом ключе старые сообщения нечитаемы
-            m_messageCache.remove(peer);
-            m_seenIds.remove(peer);
-            emit dialogsChanged();
-            saveDialogs();
-            return;
-        }
-    }
+    const QString trimmedPeer = peer.trimmed();
+    upsertDialogKeyringEntry(trimmedPeer, deriveKey(newSharedSecret), nextKeyStartSeq(trimmedPeer), false, false);
 }
 
 QVariantMap ClientBackend::createDialogKeyInvitation(const QString &peer)
@@ -340,7 +321,13 @@ QVariantMap ClientBackend::confirmDialogKeyExchange(const QString &peer,
         return errorResult("Некорректный ключ диалога.");
     }
 
-    upsertDialogSessionKey(trimmedPeer, sessionKey, updateExisting);
+    upsertDialogKeyringEntry(
+        trimmedPeer,
+        sessionKey,
+        updateExisting ? nextKeyStartSeq(trimmedPeer) : 1,
+        !updateExisting,
+        false
+    );
     return QVariantMap{
         {"ok", true},
         {"peer", trimmedPeer},
@@ -360,7 +347,7 @@ void ClientBackend::removeDialog(const QString &peer)
 bool ClientBackend::hasDialogKey(const QString &peer) const
 {
     const Dialog *dlg = findDialog(peer);
-    return dlg != nullptr && dlg->sessionKey.size() == 32;
+    return dlg != nullptr && !dlg->keyring.isEmpty();
 }
 
 QVariantList ClientBackend::getDialogs() const
@@ -370,7 +357,7 @@ QVariantList ClientBackend::getDialogs() const
         QVariantMap m;
         m["peer"]    = d.peer;
         m["lastMsg"] = d.lastMsg;
-        m["hasKey"]  = (d.sessionKey.size() == 32);
+        m["hasKey"]  = !d.keyring.isEmpty();
         result.append(m);
     }
     return result;
@@ -396,7 +383,6 @@ void ClientBackend::deleteDialogLocal(const QString &peer)
 
     QString peerCopy = peer;
     QString username = m_username;
-    QByteArray key   = dlg->sessionKey;
 
     QPointer<ClientBackend> self(this);
     QThreadPool::globalInstance()->start([self, peerCopy, username]() {
@@ -433,18 +419,18 @@ void ClientBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
 
     QString peerCopy = peer;
     QString username = m_username;
-    QByteArray key   = dlg->sessionKey;
+    QString keyringJson = dialogKeyringJson(*dlg);
 
     QPointer<ClientBackend> self(this);
-    QThreadPool::globalInstance()->start([self, peerCopy, username, key, cutSeq]() {
+    QThreadPool::globalInstance()->start([self, peerCopy, username, keyringJson, cutSeq]() {
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        int rc = paranoia_determinate(
+        int rc = paranoia_determinate_keyring(
             self->m_handle,
             username.toUtf8().constData(),
             peerCopy.toUtf8().constData(),
-            reinterpret_cast<const uint8_t *>(key.constData()),
+            keyringJson.toUtf8().constData(),
             cutSeq
         );
         QMetaObject::invokeMethod(self, [self, peerCopy, rc]() {
@@ -494,18 +480,18 @@ void ClientBackend::sendText(const QString &text)
 
     QString peer     = m_activePeer;
     QString username = m_username;
-    QByteArray key   = dlg->sessionKey;
+    QString keyringJson = dialogKeyringJson(*dlg);
 
     QPointer<ClientBackend> self(this);
-    QThreadPool::globalInstance()->start([self, peer, username, text, key]() {
+    QThreadPool::globalInstance()->start([self, peer, username, text, keyringJson]() {
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        char *json = paranoia_send_text_json(
+        char *json = paranoia_send_text_json_keyring(
             self->m_handle,
             username.toUtf8().constData(),
             peer.toUtf8().constData(),
-            reinterpret_cast<const uint8_t *>(key.constData()),
+            keyringJson.toUtf8().constData(),
             text.toUtf8().constData()
         );
         if (!json) {
@@ -539,18 +525,18 @@ void ClientBackend::fetchMessages()
 
     QString peer     = m_activePeer;
     QString username = m_username;
-    QByteArray key   = dlg->sessionKey;
+    QString keyringJson = dialogKeyringJson(*dlg);
 
     QPointer<ClientBackend> self(this);
-    QThreadPool::globalInstance()->start([self, peer, username, key]() {
+    QThreadPool::globalInstance()->start([self, peer, username, keyringJson]() {
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        char *json = paranoia_receive(
+        char *json = paranoia_receive_keyring(
             self->m_handle,
             username.toUtf8().constData(),
             peer.toUtf8().constData(),
-            reinterpret_cast<const uint8_t *>(key.constData())
+            keyringJson.toUtf8().constData()
         );
 
         // Проверяем на ошибки расшифровки даже при успешном получении
@@ -591,17 +577,17 @@ void ClientBackend::loadHistory(const QString &peer)
     if (!dlg) return;
 
     QString username = m_username;
-    QByteArray key = dlg->sessionKey;
+    QString keyringJson = dialogKeyringJson(*dlg);
     QPointer<ClientBackend> self(this);
-    QThreadPool::globalInstance()->start([self, peer, username, key]() {
+    QThreadPool::globalInstance()->start([self, peer, username, keyringJson]() {
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        char *json = paranoia_history(
+        char *json = paranoia_history_keyring(
             self->m_handle,
             username.toUtf8().constData(),
             peer.toUtf8().constData(),
-            reinterpret_cast<const uint8_t *>(key.constData()),
+            keyringJson.toUtf8().constData(),
             500
         );
         if (!json) return;
@@ -648,13 +634,33 @@ void ClientBackend::appendMessages(const QString &peer, const QVariantList &mess
     emit dialogsChanged();
 }
 
-void ClientBackend::upsertDialogSessionKey(const QString &peer, const QByteArray &sessionKey, bool clearCache)
+void ClientBackend::upsertDialogKeyringEntry(const QString &peer,
+                                             const QByteArray &sessionKey,
+                                             quint64 startSeq,
+                                             bool resetKeyring,
+                                             bool clearCache)
 {
-    if (sessionKey.size() != 32) return;
+    if (peer.isEmpty() || sessionKey.size() != 32 || startSeq == 0) return;
 
     for (auto &d : m_dialogs) {
         if (d.peer == peer) {
-            d.sessionKey = sessionKey;
+            if (resetKeyring) {
+                d.keyring.clear();
+            }
+            bool replaced = false;
+            for (auto &entry : d.keyring) {
+                if (entry.startSeq == startSeq) {
+                    entry.key = sessionKey;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                d.keyring.append({startSeq, sessionKey});
+            }
+            std::sort(d.keyring.begin(), d.keyring.end(), [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) {
+                return lhs.startSeq < rhs.startSeq;
+            });
             if (clearCache) {
                 m_messageCache.remove(peer);
                 m_seenIds.remove(peer);
@@ -665,7 +671,7 @@ void ClientBackend::upsertDialogSessionKey(const QString &peer, const QByteArray
         }
     }
 
-    m_dialogs.append({peer, sessionKey, QString()});
+    m_dialogs.append({peer, QList<DialogKeyEntry>{{startSeq, sessionKey}}, QString()});
     emit dialogsChanged();
     saveDialogs();
 }
@@ -680,6 +686,43 @@ void ClientBackend::onPollTimer()
 QByteArray ClientBackend::deriveKey(const QString &sharedSecret) const
 {
     return QCryptographicHash::hash(sharedSecret.toUtf8(), QCryptographicHash::Sha256);
+}
+
+QString ClientBackend::dialogKeyringJson(const Dialog &dialog) const
+{
+    QJsonArray arr;
+    for (const auto &entry : dialog.keyring) {
+        if (entry.key.size() != 32 || entry.startSeq == 0) continue;
+        QJsonObject obj;
+        obj["start_seq"] = static_cast<double>(entry.startSeq);
+        obj["key"] = QString::fromLatin1(entry.key.toBase64());
+        arr.append(obj);
+    }
+    return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
+
+quint64 ClientBackend::nextKeyStartSeq(const QString &peer) const
+{
+    quint64 maxSeq = 0;
+    for (const auto &msg : m_messageCache.value(peer)) {
+        bool ok = false;
+        quint64 seq = msg.toMap().value("seq").toULongLong(&ok);
+        if (ok && seq > maxSeq) maxSeq = seq;
+    }
+
+    QMutexLocker locker(&m_handleMutex);
+    if (m_handle) {
+        uint64_t lastPulled = 0;
+        int rc = paranoia_last_pulled_seq(
+            m_handle,
+            m_username.toUtf8().constData(),
+            peer.toUtf8().constData(),
+            &lastPulled
+        );
+        if (rc == 0 && lastPulled > maxSeq) maxSeq = static_cast<quint64>(lastPulled);
+    }
+
+    return maxSeq + 1;
 }
 
 QVariantList ClientBackend::parseMessages(const QString &json) const
@@ -750,7 +793,15 @@ void ClientBackend::saveDialogs() const
     for (const auto &d : m_dialogs) {
         QJsonObject o;
         o["peer"] = d.peer;
-        o["key"]  = QString::fromLatin1(d.sessionKey.toBase64());
+        QJsonArray keyring;
+        for (const auto &entry : d.keyring) {
+            if (entry.key.size() != 32 || entry.startSeq == 0) continue;
+            QJsonObject keyObj;
+            keyObj["start_seq"] = static_cast<double>(entry.startSeq);
+            keyObj["key"] = QString::fromLatin1(entry.key.toBase64());
+            keyring.append(keyObj);
+        }
+        o["keyring"] = keyring;
         o["lastMsg"] = d.lastMsg;
         arr.append(QJsonValue(o));
     }
@@ -769,10 +820,31 @@ void ClientBackend::loadDialogs()
     for (const auto &val : jsonArr) {
         auto obj = val.toObject();
         QString peer   = obj["peer"].toString();
-        QByteArray key = QByteArray::fromBase64(obj["key"].toString().toLatin1());
         QString lastMsg = obj["lastMsg"].toString();
-        if (!peer.isEmpty() && key.size() == 32)
-            m_dialogs.append({peer, key, lastMsg});
+        QList<DialogKeyEntry> keyring;
+
+        const QJsonArray keyringJson = obj["keyring"].toArray();
+        for (const auto &keyVal : keyringJson) {
+            const auto keyObj = keyVal.toObject();
+            const quint64 startSeq = static_cast<quint64>(keyObj["start_seq"].toDouble());
+            const QByteArray key = QByteArray::fromBase64(keyObj["key"].toString().toLatin1());
+            if (startSeq > 0 && key.size() == 32) {
+                keyring.append({startSeq, key});
+            }
+        }
+
+        if (keyring.isEmpty()) {
+            const QByteArray legacyKey = QByteArray::fromBase64(obj["key"].toString().toLatin1());
+            if (legacyKey.size() == 32) {
+                keyring.append({1, legacyKey});
+            }
+        }
+
+        std::sort(keyring.begin(), keyring.end(), [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) {
+            return lhs.startSeq < rhs.startSeq;
+        });
+        if (!peer.isEmpty() && !keyring.isEmpty())
+            m_dialogs.append({peer, keyring, lastMsg});
     }
 }
 

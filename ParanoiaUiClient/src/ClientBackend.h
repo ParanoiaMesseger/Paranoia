@@ -80,9 +80,14 @@ private slots:
     void onPollTimer();
 
 private:
+    struct DialogKeyEntry {
+        quint64 startSeq;
+        QByteArray key;
+    };
+
     struct Dialog {
         QString peer;
-        QByteArray sessionKey; // 32 bytes (SHA-256 of sharedSecret)
+        QList<DialogKeyEntry> keyring;
         QString lastMsg;
     };
 
@@ -104,9 +109,15 @@ private:
     void loadDialogs();
     void loadHistory(const QString &peer);
     void appendMessages(const QString &peer, const QVariantList &messages);
-    void upsertDialogSessionKey(const QString &peer, const QByteArray &sessionKey, bool clearCache);
+    void upsertDialogKeyringEntry(const QString &peer,
+                                  const QByteArray &sessionKey,
+                                  quint64 startSeq,
+                                  bool resetKeyring,
+                                  bool clearCache);
 
     QByteArray deriveKey(const QString &sharedSecret) const;
+    QString dialogKeyringJson(const Dialog &dialog) const;
+    quint64 nextKeyStartSeq(const QString &peer) const;
     QVariantList parseMessages(const QString &json) const;
     QString extractText(const QString &debugContent) const;
     Dialog *findDialog(const QString &peer);
