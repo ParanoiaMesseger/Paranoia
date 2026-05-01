@@ -4,6 +4,7 @@ pub mod client_cover_food;
 pub mod crypto;
 pub mod dialogue;
 pub mod packet;
+pub mod qr_exchange;
 pub mod store;
 pub mod transport;
 pub mod types;
