@@ -73,6 +73,22 @@ fn read_encrypted_secret_b64(path: &str, label: &str) -> Result<String> {
     Ok(String::from_utf8(plaintext)?.trim().to_string())
 }
 
+fn encrypt_profile_secret_b64(secret_b64: &str) -> Result<String> {
+    let pin = read_pin()?;
+    let ciphertext = encrypt_blob(&pin, secret_b64.trim().as_bytes())?;
+    Ok(B64.encode(ciphertext))
+}
+
+fn decrypt_profile_secret_b64(ciphertext_b64: &str) -> Result<String> {
+    let pin = read_pin()?;
+    let ciphertext = B64
+        .decode(ciphertext_b64.trim())
+        .context("invalid profile signing key ciphertext")?;
+    let plaintext =
+        decrypt_blob(&pin, &ciphertext).context("wrong PIN or corrupted profile signing key")?;
+    Ok(String::from_utf8(plaintext)?.trim().to_string())
+}
+
 fn validate_b64_32(value: &str, label: &str) -> Result<[u8; 32]> {
     let bytes = B64
         .decode(value.trim())
@@ -208,11 +224,23 @@ fn load_profile_signing_key(server_url: &str, username: &str) -> Result<Option<S
     let Some(profile) = store.profiles.get(&id) else {
         return Ok(None);
     };
-    if profile.signing_key_b64.trim().is_empty() {
+    let Some(secret_b64) = profile_signing_key_b64(profile)? else {
         return Ok(None);
-    }
-    let secret_bytes = validate_b64_32(&profile.signing_key_b64, "profile user secret")?;
+    };
+    let secret_bytes = validate_b64_32(&secret_b64, "profile user secret")?;
     Ok(Some(SigningKey::from_bytes(&secret_bytes)))
+}
+
+fn profile_signing_key_b64(profile: &ProfileDialogueStore) -> Result<Option<String>> {
+    if !profile.signing_key_ct_b64.trim().is_empty() {
+        return Ok(Some(decrypt_profile_secret_b64(
+            &profile.signing_key_ct_b64,
+        )?));
+    }
+    if !profile.signing_key_b64.trim().is_empty() {
+        return Ok(Some(profile.signing_key_b64.trim().to_string()));
+    }
+    Ok(None)
 }
 
 fn build_client(server_url: &str, username: &str, db_path: &str) -> Result<ParanoiaClient> {
@@ -486,6 +514,7 @@ fn profile_for_import<'a>(
             server_url: server.url.clone(),
             username: server.username.clone(),
             signing_key_b64: String::new(),
+            signing_key_ct_b64: String::new(),
             dialogues: Default::default(),
         });
     (profile, !existed)
@@ -502,11 +531,16 @@ fn import_server_profile(
         stats.profiles += 1;
     }
 
-    if profile.signing_key_b64.trim().is_empty() {
-        profile.signing_key_b64 = server.signing_key_b64.trim().to_string();
-    } else if profile.signing_key_b64.trim() != server.signing_key_b64.trim() {
-        stats.conflicts += 1;
-        return Ok(());
+    match profile_signing_key_b64(profile)? {
+        Some(existing_key) if existing_key.trim() != server.signing_key_b64.trim() => {
+            stats.conflicts += 1;
+            return Ok(());
+        }
+        Some(_) => {}
+        None => {
+            profile.signing_key_ct_b64 = encrypt_profile_secret_b64(&server.signing_key_b64)?;
+            profile.signing_key_b64.clear();
+        }
     }
 
     for dialogue in &server.dialogues {

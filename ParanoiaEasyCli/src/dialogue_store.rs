@@ -17,7 +17,10 @@ pub struct DialogueKeyStore {
 pub struct ProfileDialogueStore {
     pub server_url: String,
     pub username: String,
+    #[serde(default)]
     pub signing_key_b64: String,
+    #[serde(default)]
+    pub signing_key_ct_b64: String,
     #[serde(default)]
     pub dialogues: HashMap<String, Vec<StoredKeyEntry>>,
 }
