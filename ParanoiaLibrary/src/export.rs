@@ -8,15 +8,21 @@
 // Полезная нагрузка: UTF-8 JSON (ExportPayload), структура описана ниже.
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use chacha20poly1305::aead::Aead;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashSet;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const ECIES_VERSION: u8 = 1;
 const HKDF_INFO: &[u8] = b"Paranoia ECIES v1";
+pub const EXPORT_PAYLOAD_VERSION: u8 = 1;
+pub const MAX_EXPORT_SERVERS: usize = 16;
+pub const MAX_EXPORT_ADMIN_SERVERS: usize = 16;
+pub const MAX_EXPORT_DIALOGUES: usize = 1024;
+pub const MAX_EXPORT_KEY_ENTRIES: usize = 8192;
 
 // ── Структуры файла-конверта ─────────────────────────────────────────────────
 
@@ -75,6 +81,86 @@ pub struct ExportPayload {
     pub admin_servers: Vec<ExportAdminServer>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExportPayloadStats {
+    pub servers: usize,
+    pub admin_servers: usize,
+    pub dialogues: usize,
+    pub key_entries: usize,
+}
+
+/// Проверить payload экспорта перед импортом.
+///
+/// Валидация ограничивает размер вложенных списков и проверяет формат ключей, но
+/// не меняет криптографическую модель или формат экспортного контейнера.
+pub fn validate_export_payload(payload: &ExportPayload) -> Result<ExportPayloadStats> {
+    if payload.format_version != EXPORT_PAYLOAD_VERSION {
+        bail!("unsupported export payload version");
+    }
+    if payload.servers.len() > MAX_EXPORT_SERVERS {
+        bail!("too many export servers");
+    }
+    if payload.admin_servers.len() > MAX_EXPORT_ADMIN_SERVERS {
+        bail!("too many export admin servers");
+    }
+
+    let mut stats = ExportPayloadStats {
+        servers: payload.servers.len(),
+        admin_servers: payload.admin_servers.len(),
+        dialogues: 0,
+        key_entries: 0,
+    };
+
+    for server in &payload.servers {
+        if server.url.trim().is_empty() || server.username.trim().is_empty() {
+            bail!("empty export server identity");
+        }
+        decode_fixed_b64(&server.signing_key_b64, 32).context("invalid client signing key")?;
+        if stats.dialogues + server.dialogues.len() > MAX_EXPORT_DIALOGUES {
+            bail!("too many export dialogues");
+        }
+        stats.dialogues += server.dialogues.len();
+
+        let mut peers = HashSet::new();
+        for dialogue in &server.dialogues {
+            if dialogue.peer.trim().is_empty() {
+                bail!("empty export dialogue peer");
+            }
+            if !peers.insert(dialogue.peer.as_str()) {
+                bail!("duplicate export dialogue peer");
+            }
+            if dialogue.keyring.is_empty() {
+                bail!("empty export dialogue keyring");
+            }
+            if stats.key_entries + dialogue.keyring.len() > MAX_EXPORT_KEY_ENTRIES {
+                bail!("too many export keyring entries");
+            }
+            stats.key_entries += dialogue.keyring.len();
+
+            let mut start_seqs = HashSet::new();
+            for entry in &dialogue.keyring {
+                if entry.start_seq == 0 {
+                    bail!("invalid export keyring start_seq");
+                }
+                if !start_seqs.insert(entry.start_seq) {
+                    bail!("duplicate export keyring start_seq");
+                }
+                decode_fixed_b64(&entry.key, 32).context("invalid export dialogue key")?;
+            }
+        }
+    }
+
+    for admin in &payload.admin_servers {
+        if admin.url.trim().is_empty() {
+            bail!("empty export admin server url");
+        }
+        decode_fixed_b64(&admin.admin_privkey_b64, 32)
+            .context("invalid export admin private key")?;
+    }
+
+    Ok(stats)
+}
+
 // ── Генерация device keypair ─────────────────────────────────────────────────
 
 /// Сгенерировать X25519 device keypair для шифрования экспорта.
@@ -109,8 +195,8 @@ pub fn ecies_encrypt(receiver_pub: &[u8; 32], plaintext: &[u8]) -> Result<String
     }
 
     let enc_key = derive_enc_key(shared.as_bytes(), &eph_pub_bytes, receiver_pub);
-    let cipher = ChaCha20Poly1305::new_from_slice(&enc_key)
-        .map_err(|_| anyhow!("invalid key length"))?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&enc_key).map_err(|_| anyhow!("invalid key length"))?;
 
     let mut nonce_bytes = [0u8; 12];
     rand::fill(&mut nonce_bytes);
@@ -147,7 +233,9 @@ pub fn ecies_decrypt(device_priv: &[u8; 32], json_envelope: &str) -> Result<Vec<
         .context("invalid nonce base64")?
         .try_into()
         .map_err(|_| anyhow!("invalid nonce length"))?;
-    let ct = B64.decode(&envelope.ct).context("invalid ciphertext base64")?;
+    let ct = B64
+        .decode(&envelope.ct)
+        .context("invalid ciphertext base64")?;
 
     let device_secret = StaticSecret::from(*device_priv);
     let device_pub_bytes = *PublicKey::from(&device_secret).as_bytes();
@@ -158,8 +246,8 @@ pub fn ecies_decrypt(device_priv: &[u8; 32], json_envelope: &str) -> Result<Vec<
     }
 
     let enc_key = derive_enc_key(shared.as_bytes(), &eph_pub_bytes, &device_pub_bytes);
-    let cipher = ChaCha20Poly1305::new_from_slice(&enc_key)
-        .map_err(|_| anyhow!("invalid key length"))?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&enc_key).map_err(|_| anyhow!("invalid key length"))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     cipher
@@ -169,16 +257,20 @@ pub fn ecies_decrypt(device_priv: &[u8; 32], json_envelope: &str) -> Result<Vec<
 
 // ── Вспомогательные функции ──────────────────────────────────────────────────
 
-fn derive_enc_key(
-    shared: &[u8; 32],
-    eph_pub: &[u8; 32],
-    receiver_pub: &[u8; 32],
-) -> [u8; 32] {
+fn derive_enc_key(shared: &[u8; 32], eph_pub: &[u8; 32], receiver_pub: &[u8; 32]) -> [u8; 32] {
     let salt: Vec<u8> = eph_pub.iter().chain(receiver_pub.iter()).copied().collect();
     let hk = Hkdf::<Sha256>::new(Some(&salt), shared);
     let mut key = [0u8; 32];
     hk.expand(HKDF_INFO, &mut key).expect("hkdf expand");
     key
+}
+
+fn decode_fixed_b64(value: &str, expected_len: usize) -> Result<Vec<u8>> {
+    let decoded = B64.decode(value.trim()).context("invalid base64")?;
+    if decoded.len() != expected_len {
+        bail!("invalid decoded length");
+    }
+    Ok(decoded)
 }
 
 // ── Тесты ────────────────────────────────────────────────────────────────────
@@ -228,12 +320,12 @@ mod tests {
     #[test]
     fn export_payload_roundtrip() {
         let payload = ExportPayload {
-            format_version: 1,
+            format_version: EXPORT_PAYLOAD_VERSION,
             profile_type: ExportProfileType::Client,
             servers: vec![ExportServer {
                 url: "https://server.example.com".into(),
                 username: "alice".into(),
-                signing_key_b64: "AAAA".into(),
+                signing_key_b64: B64.encode([1u8; 32]),
                 dialogues: vec![ExportDialogue {
                     peer: "bob".into(),
                     keyring: vec![ExportKeyEntry {
@@ -249,5 +341,87 @@ mod tests {
         let decoded: ExportPayload = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.servers[0].username, "alice");
         assert_eq!(decoded.servers[0].dialogues[0].keyring[0].start_seq, 1);
+    }
+
+    #[test]
+    fn export_payload_validation_accepts_full_profile() {
+        let payload = ExportPayload {
+            format_version: EXPORT_PAYLOAD_VERSION,
+            profile_type: ExportProfileType::Full,
+            servers: vec![ExportServer {
+                url: "https://server.example.com".into(),
+                username: "alice".into(),
+                signing_key_b64: B64.encode([1u8; 32]),
+                dialogues: vec![ExportDialogue {
+                    peer: "bob".into(),
+                    keyring: vec![
+                        ExportKeyEntry {
+                            start_seq: 1,
+                            key: B64.encode([2u8; 32]),
+                        },
+                        ExportKeyEntry {
+                            start_seq: 42,
+                            key: B64.encode([3u8; 32]),
+                        },
+                    ],
+                }],
+            }],
+            admin_servers: vec![ExportAdminServer {
+                url: "https://server.example.com".into(),
+                admin_privkey_b64: B64.encode([4u8; 32]),
+            }],
+        };
+
+        let stats = validate_export_payload(&payload).expect("valid payload");
+        assert_eq!(stats.servers, 1);
+        assert_eq!(stats.admin_servers, 1);
+        assert_eq!(stats.dialogues, 1);
+        assert_eq!(stats.key_entries, 2);
+    }
+
+    #[test]
+    fn export_payload_validation_rejects_duplicate_start_seq() {
+        let payload = ExportPayload {
+            format_version: EXPORT_PAYLOAD_VERSION,
+            profile_type: ExportProfileType::Client,
+            servers: vec![ExportServer {
+                url: "https://server.example.com".into(),
+                username: "alice".into(),
+                signing_key_b64: B64.encode([1u8; 32]),
+                dialogues: vec![ExportDialogue {
+                    peer: "bob".into(),
+                    keyring: vec![
+                        ExportKeyEntry {
+                            start_seq: 1,
+                            key: B64.encode([2u8; 32]),
+                        },
+                        ExportKeyEntry {
+                            start_seq: 1,
+                            key: B64.encode([3u8; 32]),
+                        },
+                    ],
+                }],
+            }],
+            admin_servers: vec![],
+        };
+
+        let err = validate_export_payload(&payload).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn export_payload_validation_rejects_bad_private_keys() {
+        let payload = ExportPayload {
+            format_version: EXPORT_PAYLOAD_VERSION,
+            profile_type: ExportProfileType::Admin,
+            servers: vec![],
+            admin_servers: vec![ExportAdminServer {
+                url: "https://server.example.com".into(),
+                admin_privkey_b64: B64.encode([1u8; 31]),
+            }],
+        };
+
+        let err = validate_export_payload(&payload).unwrap_err();
+        assert!(err.to_string().contains("admin private key"));
     }
 }

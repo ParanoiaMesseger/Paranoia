@@ -1,24 +1,42 @@
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use paranoia_lib::{
-    AdminKeyPair, ClientConfig, Dialogue, DialogueConfig, DialogueKey, MessageContent,
-    ParanoiaClient, crypto,
+    AdminKeyPair, ClientConfig, Dialogue, DialogueConfig, DialogueKey, DialogueKeyEntry,
+    MessageContent, ParanoiaClient, crypto,
+    export::{
+        EXPORT_PAYLOAD_VERSION, ExportAdminServer, ExportDialogue, ExportKeyEntry, ExportPayload,
+        ExportProfileType, ExportServer, ecies_decrypt, ecies_encrypt, generate_device_keypair,
+        pubkey_from_privkey, validate_export_payload,
+    },
 };
 use rpassword::read_password;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 mod dialogue_store;
 
-use dialogue_store::{load_dialogue_store, set_dialogue_key};
+use dialogue_store::{
+    MergeOutcome, ProfileDialogueStore, base64_entry_to_key, key_entry_from_base64,
+    key_entry_from_hex, load_dialogue_store, merge_profile_keyring_entry, profile_id,
+    profile_keyring_entries, save_dialogue_store, set_dialogue_key,
+};
 
 const ADMIN_SECRETS: &str = "./ADMIN_SECRETS";
 const USER_SECRETS: &str = "./USER_SECRETS";
 const ADMIN_PUB: &str = "./ADMIN_PUB";
 const USER_PUB: &str = "./USER_PUB";
+const DEVICE_KEY: &str = "./DEVICE_KEY";
+const MAX_EXPORT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeviceKeyFile {
+    privkey_b64: String,
+    pubkey_b64: String,
+}
 
 fn read_pin() -> Result<String> {
     eprint!("Enter PIN: ");
@@ -47,6 +65,75 @@ fn decrypt_blob(pin: &str, data: &[u8]) -> Result<Vec<u8>> {
     crypto::decrypt(&key, data)
 }
 
+fn read_encrypted_secret_b64(path: &str, label: &str) -> Result<String> {
+    let pin = read_pin()?;
+    let data = fs::read(path).with_context(|| format!("failed to read {label}"))?;
+    let plaintext =
+        decrypt_blob(&pin, &data).with_context(|| format!("wrong PIN or corrupted {label}"))?;
+    Ok(String::from_utf8(plaintext)?.trim().to_string())
+}
+
+fn validate_b64_32(value: &str, label: &str) -> Result<[u8; 32]> {
+    let bytes = B64
+        .decode(value.trim())
+        .with_context(|| format!("invalid base64 for {label}"))?;
+    bytes
+        .try_into()
+        .map_err(|b: Vec<u8>| anyhow!("{label} must be 32 bytes, got {}", b.len()))
+}
+
+fn write_owner_only(path: impl AsRef<Path>, data: impl AsRef<[u8]>) -> Result<()> {
+    let path = path.as_ref();
+    fs::write(path, data).with_context(|| format!("failed to write {}", path.display()))?;
+    set_owner_only_permissions(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_only_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to set owner-only permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn load_or_create_device_key() -> Result<DeviceKeyFile> {
+    let path = Path::new(DEVICE_KEY);
+    if path.exists() {
+        let data = fs::read(path).context("failed to read DEVICE_KEY")?;
+        let key_file: DeviceKeyFile =
+            serde_json::from_slice(&data).context("failed to parse DEVICE_KEY")?;
+        let priv_bytes = validate_b64_32(&key_file.privkey_b64, "device private key")?;
+        let expected_pub = B64.encode(pubkey_from_privkey(&priv_bytes));
+        if key_file.pubkey_b64.trim() != expected_pub {
+            return Err(anyhow!("DEVICE_KEY public key does not match private key"));
+        }
+        return Ok(key_file);
+    }
+
+    let (priv_bytes, pub_bytes) = generate_device_keypair();
+    let key_file = DeviceKeyFile {
+        privkey_b64: B64.encode(priv_bytes),
+        pubkey_b64: B64.encode(pub_bytes),
+    };
+    let data = serde_json::to_vec_pretty(&key_file).context("failed to serialize DEVICE_KEY")?;
+    write_owner_only(path, data)?;
+    Ok(key_file)
+}
+
+fn save_admin_secret(secret_b64: &str) -> Result<()> {
+    let pair = AdminKeyPair::from_secret_b64(secret_b64).context("invalid admin private key")?;
+    let pin = read_pin()?;
+    let ciphertext = encrypt_blob(&pin, secret_b64.trim().as_bytes())?;
+    write_owner_only(ADMIN_SECRETS, ciphertext)?;
+    fs::write(ADMIN_PUB, pair.pubkey_b64()).context("failed to write ADMIN_PUB")?;
+    Ok(())
+}
+
 /// ADMIN INIT: сгенерировать админскую пару, зашифровать секрет, записать pub.
 fn admin_init() -> Result<()> {
     let pair = AdminKeyPair::generate(); // генерирует секрет 32 байта и pub.
@@ -55,7 +142,7 @@ fn admin_init() -> Result<()> {
 
     let pin = read_pin()?;
     let ciphertext = encrypt_blob(&pin, sk_b64.as_bytes())?;
-    fs::write(ADMIN_SECRETS, ciphertext).context("failed to write ADMIN_SECRETS")?;
+    write_owner_only(ADMIN_SECRETS, ciphertext)?;
     fs::write(ADMIN_PUB, pk_b64).context("failed to write ADMIN_PUB")?;
 
     println!("Admin keys generated.");
@@ -64,10 +151,7 @@ fn admin_init() -> Result<()> {
 }
 
 fn load_admin_keypair() -> Result<AdminKeyPair> {
-    let pin = read_pin()?;
-    let data = fs::read(ADMIN_SECRETS).context("failed to read ADMIN_SECRETS")?;
-    let plaintext = decrypt_blob(&pin, &data).context("wrong PIN or corrupted ADMIN_SECRETS")?;
-    let sk_b64 = String::from_utf8(plaintext)?;
+    let sk_b64 = read_encrypted_secret_b64(ADMIN_SECRETS, "ADMIN_SECRETS")?;
     AdminKeyPair::from_secret_b64(&sk_b64)
 }
 
@@ -104,7 +188,7 @@ fn user_init() -> Result<()> {
 
     let pin = read_pin()?;
     let ciphertext = encrypt_blob(&pin, sk_b64.as_bytes())?;
-    fs::write(USER_SECRETS, ciphertext).context("failed to write USER_SECRETS")?;
+    write_owner_only(USER_SECRETS, ciphertext)?;
     fs::write(USER_PUB, pk_b64).context("failed to write USER_PUB")?;
 
     println!("User keys generated.");
@@ -113,21 +197,29 @@ fn user_init() -> Result<()> {
 }
 
 fn load_user_signing_key() -> Result<SigningKey> {
-    let pin = read_pin()?;
-    let data = fs::read(USER_SECRETS).context("failed to read USER_SECRETS")?;
-    let plaintext = decrypt_blob(&pin, &data).context("wrong PIN or corrupted USER_SECRETS")?;
-    let sk_b64 = String::from_utf8(plaintext)?;
-    let bytes = B64.decode(sk_b64.trim())?;
-    if bytes.len() != 32 {
-        return Err(anyhow!("user secret must be 32 bytes, got {}", bytes.len()));
-    }
-    let mut secret_bytes = [0u8; 32];
-    secret_bytes.copy_from_slice(&bytes[..32]);
+    let sk_b64 = read_encrypted_secret_b64(USER_SECRETS, "USER_SECRETS")?;
+    let secret_bytes = validate_b64_32(&sk_b64, "user secret")?;
     Ok(SigningKey::from_bytes(&secret_bytes))
 }
 
+fn load_profile_signing_key(server_url: &str, username: &str) -> Result<Option<SigningKey>> {
+    let store = load_dialogue_store()?;
+    let id = profile_id(server_url, username);
+    let Some(profile) = store.profiles.get(&id) else {
+        return Ok(None);
+    };
+    if profile.signing_key_b64.trim().is_empty() {
+        return Ok(None);
+    }
+    let secret_bytes = validate_b64_32(&profile.signing_key_b64, "profile user secret")?;
+    Ok(Some(SigningKey::from_bytes(&secret_bytes)))
+}
+
 fn build_client(server_url: &str, username: &str, db_path: &str) -> Result<ParanoiaClient> {
-    let signing_key = load_user_signing_key()?;
+    let signing_key = match load_profile_signing_key(server_url, username)? {
+        Some(signing_key) => signing_key,
+        None => load_user_signing_key()?,
+    };
     let cfg = ClientConfig {
         server_url: server_url.to_string(),
         username: username.to_string(),
@@ -137,25 +229,32 @@ fn build_client(server_url: &str, username: &str, db_path: &str) -> Result<Paran
     ParanoiaClient::new(cfg) // создаёт Transport + LocalStore.
 }
 
-fn build_dialogue(client: &ParanoiaClient, username: &str, peer: &str) -> Result<Dialogue> {
+fn build_dialogue(
+    client: &ParanoiaClient,
+    server_url: &str,
+    username: &str,
+    peer: &str,
+) -> Result<Dialogue> {
     let store = load_dialogue_store()?;
-    let key_hex = store
-        .entries
-        .get(peer)
-        .context("no session_key for this peer, use 'dialogue init' or 'dialogue set-key' first")?;
-    let key_bytes = hex::decode(key_hex)?;
-    if key_bytes.len() != 32 {
-        return Err(anyhow!(
-            "stored session_key for peer '{}' has invalid length {}",
-            peer,
-            key_bytes.len()
-        ));
-    }
-    let mut session_key = [0u8; 32];
-    session_key.copy_from_slice(&key_bytes[..32]);
-
     let dkey = DialogueKey::new(username, peer);
-    let dcfg = DialogueConfig::single_key(dkey, session_key);
+    let dcfg = if let Some(entries) = profile_keyring_entries(&store, server_url, username, peer) {
+        let keyring = entries
+            .iter()
+            .map(|entry| {
+                Ok(DialogueKeyEntry {
+                    start_seq: entry.start_seq,
+                    key: base64_entry_to_key(entry)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        DialogueConfig::with_keyring(dkey, keyring)?
+    } else {
+        let key_hex = store.entries.get(peer).context(
+            "no session_key for this peer, use 'dialogue init', 'dialogue set-key' or import profile first",
+        )?;
+        let entry = key_entry_from_hex(1, key_hex)?;
+        DialogueConfig::single_key(dkey, base64_entry_to_key(&entry)?)
+    };
     Ok(client.open_dialogue(dcfg))
 }
 
@@ -168,7 +267,7 @@ async fn cmd_send(
     text: &str,
 ) -> Result<()> {
     let client = build_client(server_url, username, db_path)?;
-    let dialogue = build_dialogue(&client, username, peer)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
     let msg = dialogue.send_text(text).await?;
     println!("Sent: id={} seq={:?}", msg.id, msg.server_seq);
     Ok(())
@@ -177,10 +276,12 @@ async fn cmd_send(
 /// RECEIVE
 async fn cmd_receive(server_url: &str, username: &str, db_path: &str, peer: &str) -> Result<()> {
     let client = build_client(server_url, username, db_path)?;
-    let dialogue = build_dialogue(&client, username, peer)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
     let (msgs, decrypt_errors) = dialogue.receive().await?;
     if decrypt_errors > 0 {
-        eprintln!("Warning: {decrypt_errors} message(s) could not be decrypted (wrong session key?)");
+        eprintln!(
+            "Warning: {decrypt_errors} message(s) could not be decrypted (wrong session key?)"
+        );
     }
     for m in msgs {
         match &m.content {
@@ -204,7 +305,7 @@ async fn cmd_clear(
     cut_seq: u64,
 ) -> Result<()> {
     let client = build_client(server_url, username, db_path)?;
-    let dialogue = build_dialogue(&client, username, peer)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
     dialogue.clear_server_history(cut_seq).await?;
     println!("Server history cleared up to seq={}", cut_seq);
     Ok(())
@@ -224,6 +325,270 @@ fn cmd_dialogue_set_key(peer: &str) -> Result<()> {
     std::io::stdin().read_line(&mut line)?;
     set_dialogue_key(peer, line.trim())?;
     println!("Dialogue key updated for peer '{}'.", peer);
+    Ok(())
+}
+
+fn cmd_device_key_show() -> Result<()> {
+    let key = load_or_create_device_key()?;
+    println!("{}", key.pubkey_b64);
+    Ok(())
+}
+
+fn export_profile_type(profile: CliExportProfile) -> ExportProfileType {
+    match profile {
+        CliExportProfile::Client => ExportProfileType::Client,
+        CliExportProfile::Admin => ExportProfileType::Admin,
+        CliExportProfile::Full => ExportProfileType::Full,
+    }
+}
+
+fn export_includes_client(profile: CliExportProfile) -> bool {
+    matches!(profile, CliExportProfile::Client | CliExportProfile::Full)
+}
+
+fn export_includes_admin(profile: CliExportProfile) -> bool {
+    matches!(profile, CliExportProfile::Admin | CliExportProfile::Full)
+}
+
+fn selected_peer(peer: &str, peers: &[String]) -> bool {
+    peers.is_empty() || peers.iter().any(|candidate| candidate == peer)
+}
+
+fn export_dialogues(
+    server_url: &str,
+    username: &str,
+    peers: &[String],
+) -> Result<Vec<ExportDialogue>> {
+    let store = load_dialogue_store()?;
+    let id = profile_id(server_url, username);
+    let mut dialogues = Vec::new();
+
+    if let Some(profile) = store.profiles.get(&id) {
+        for (peer, entries) in &profile.dialogues {
+            if !selected_peer(peer, peers) {
+                continue;
+            }
+            let mut keyring = Vec::new();
+            for entry in entries {
+                let normalized = key_entry_from_base64(entry.start_seq, &entry.key)?;
+                keyring.push(ExportKeyEntry {
+                    start_seq: normalized.start_seq,
+                    key: normalized.key,
+                });
+            }
+            if !keyring.is_empty() {
+                keyring.sort_by_key(|entry| entry.start_seq);
+                dialogues.push(ExportDialogue {
+                    peer: peer.clone(),
+                    keyring,
+                });
+            }
+        }
+    } else {
+        for (peer, key_hex) in &store.entries {
+            if !selected_peer(peer, peers) {
+                continue;
+            }
+            let entry = key_entry_from_hex(1, key_hex)?;
+            dialogues.push(ExportDialogue {
+                peer: peer.clone(),
+                keyring: vec![ExportKeyEntry {
+                    start_seq: entry.start_seq,
+                    key: entry.key,
+                }],
+            });
+        }
+    }
+
+    dialogues.sort_by(|lhs, rhs| lhs.peer.cmp(&rhs.peer));
+    Ok(dialogues)
+}
+
+fn cmd_export(
+    server_url: &str,
+    profile: CliExportProfile,
+    username: Option<String>,
+    peers: Vec<String>,
+    receiver_pubkey_b64: String,
+    out: PathBuf,
+) -> Result<()> {
+    let receiver_pub = validate_b64_32(&receiver_pubkey_b64, "receiver device public key")?;
+    let mut payload = ExportPayload {
+        format_version: EXPORT_PAYLOAD_VERSION,
+        profile_type: export_profile_type(profile),
+        servers: Vec::new(),
+        admin_servers: Vec::new(),
+    };
+
+    if export_includes_client(profile) {
+        let username = username.context("--username is required for client/full export")?;
+        let signing_key_b64 = match load_profile_signing_key(server_url, &username)? {
+            Some(signing_key) => B64.encode(signing_key.to_bytes()),
+            None => read_encrypted_secret_b64(USER_SECRETS, "USER_SECRETS")?,
+        };
+        validate_b64_32(&signing_key_b64, "user signing key")?;
+        let dialogues = export_dialogues(server_url, &username, &peers)?;
+        if !peers.is_empty() && dialogues.len() != peers.len() {
+            return Err(anyhow!("some selected peers have no stored keyring"));
+        }
+        payload.servers.push(ExportServer {
+            url: server_url.to_string(),
+            username,
+            signing_key_b64,
+            dialogues,
+        });
+    }
+
+    if export_includes_admin(profile) {
+        let admin_privkey_b64 = read_encrypted_secret_b64(ADMIN_SECRETS, "ADMIN_SECRETS")?;
+        AdminKeyPair::from_secret_b64(&admin_privkey_b64).context("invalid admin private key")?;
+        payload.admin_servers.push(ExportAdminServer {
+            url: server_url.to_string(),
+            admin_privkey_b64,
+        });
+    }
+
+    let stats = validate_export_payload(&payload)?;
+    let plaintext = serde_json::to_vec(&payload).context("failed to serialize export payload")?;
+    let envelope = ecies_encrypt(&receiver_pub, &plaintext)?;
+    write_owner_only(&out, envelope.as_bytes())?;
+    println!(
+        "Export saved to {} (servers={}, admin_servers={}, dialogues={}, key_entries={}).",
+        out.display(),
+        stats.servers,
+        stats.admin_servers,
+        stats.dialogues,
+        stats.key_entries
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct ImportStats {
+    profiles: usize,
+    dialogues: usize,
+    key_entries: usize,
+    admin_servers: usize,
+    skipped: usize,
+    conflicts: usize,
+}
+
+fn profile_for_import<'a>(
+    store: &'a mut dialogue_store::DialogueKeyStore,
+    server: &ExportServer,
+) -> (&'a mut ProfileDialogueStore, bool) {
+    let id = profile_id(&server.url, &server.username);
+    let existed = store.profiles.contains_key(&id);
+    let profile = store
+        .profiles
+        .entry(id)
+        .or_insert_with(|| ProfileDialogueStore {
+            server_url: server.url.clone(),
+            username: server.username.clone(),
+            signing_key_b64: String::new(),
+            dialogues: Default::default(),
+        });
+    (profile, !existed)
+}
+
+fn import_server_profile(
+    store: &mut dialogue_store::DialogueKeyStore,
+    server: &ExportServer,
+    stats: &mut ImportStats,
+) -> Result<()> {
+    validate_b64_32(&server.signing_key_b64, "imported user signing key")?;
+    let (profile, created) = profile_for_import(store, server);
+    if created {
+        stats.profiles += 1;
+    }
+
+    if profile.signing_key_b64.trim().is_empty() {
+        profile.signing_key_b64 = server.signing_key_b64.trim().to_string();
+    } else if profile.signing_key_b64.trim() != server.signing_key_b64.trim() {
+        stats.conflicts += 1;
+        return Ok(());
+    }
+
+    for dialogue in &server.dialogues {
+        let mut touched_dialogue = false;
+        for entry in &dialogue.keyring {
+            let entry = key_entry_from_base64(entry.start_seq, &entry.key)?;
+            match merge_profile_keyring_entry(profile, &dialogue.peer, entry) {
+                MergeOutcome::Imported => {
+                    stats.key_entries += 1;
+                    touched_dialogue = true;
+                }
+                MergeOutcome::Skipped => stats.skipped += 1,
+                MergeOutcome::Conflict => stats.conflicts += 1,
+            }
+        }
+        if touched_dialogue {
+            stats.dialogues += 1;
+        }
+    }
+
+    Ok(())
+}
+
+fn maybe_import_current_admin(
+    server_url: &str,
+    payload: &ExportPayload,
+    stats: &mut ImportStats,
+) -> Result<()> {
+    let Some(admin) = payload
+        .admin_servers
+        .iter()
+        .find(|admin| admin.url == server_url)
+    else {
+        if !payload.admin_servers.is_empty() {
+            stats.skipped += payload.admin_servers.len();
+        }
+        return Ok(());
+    };
+
+    save_admin_secret(&admin.admin_privkey_b64)?;
+    stats.admin_servers += 1;
+    if payload.admin_servers.len() > 1 {
+        stats.skipped += payload.admin_servers.len() - 1;
+    }
+    Ok(())
+}
+
+fn cmd_import(server_url: &str, file: PathBuf) -> Result<()> {
+    let metadata =
+        fs::metadata(&file).with_context(|| format!("failed to stat {}", file.display()))?;
+    if metadata.len() > MAX_EXPORT_FILE_BYTES {
+        return Err(anyhow!("export file is larger than 16 MiB"));
+    }
+    let envelope =
+        fs::read_to_string(&file).with_context(|| format!("failed to read {}", file.display()))?;
+    let device = load_or_create_device_key()?;
+    let device_priv = validate_b64_32(&device.privkey_b64, "device private key")?;
+    let plaintext =
+        ecies_decrypt(&device_priv, &envelope).context("failed to decrypt export file")?;
+    let payload: ExportPayload =
+        serde_json::from_slice(&plaintext).context("invalid export payload JSON")?;
+    validate_export_payload(&payload)?;
+
+    let mut store = load_dialogue_store()?;
+    let mut stats = ImportStats::default();
+    for server in &payload.servers {
+        import_server_profile(&mut store, server, &mut stats)?;
+    }
+    if !payload.servers.is_empty() {
+        save_dialogue_store(&store)?;
+    }
+    maybe_import_current_admin(server_url, &payload, &mut stats)?;
+
+    println!(
+        "Import complete: profiles={}, dialogues={}, key_entries={}, admin_servers={}, skipped={}, conflicts={}",
+        stats.profiles,
+        stats.dialogues,
+        stats.key_entries,
+        stats.admin_servers,
+        stats.skipped,
+        stats.conflicts
+    );
     Ok(())
 }
 
@@ -257,6 +622,29 @@ enum Commands {
         #[command(subcommand)]
         cmd: DialogueCmd,
     },
+    /// Управление device key для шифрованного export/import
+    DeviceKey {
+        #[command(subcommand)]
+        cmd: DeviceKeyCmd,
+    },
+    /// Создать зашифрованный export-файл профиля
+    Export {
+        #[arg(long, value_enum)]
+        profile: CliExportProfile,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long = "peer")]
+        peers: Vec<String>,
+        #[arg(long)]
+        receiver_pub: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Импортировать зашифрованный export-файл профиля
+    Import {
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Отправка текстового сообщения
     Send {
         #[arg(long)]
@@ -282,6 +670,19 @@ enum Commands {
         #[arg(long)]
         cut_seq: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliExportProfile {
+    Client,
+    Admin,
+    Full,
+}
+
+#[derive(Subcommand)]
+enum DeviceKeyCmd {
+    /// Показать публичный ключ принимающего устройства
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -346,6 +747,23 @@ async fn main() -> Result<()> {
                 cmd_dialogue_set_key(&peer)?;
             }
         },
+        Commands::DeviceKey { cmd } => match cmd {
+            DeviceKeyCmd::Show => {
+                cmd_device_key_show()?;
+            }
+        },
+        Commands::Export {
+            profile,
+            username,
+            peers,
+            receiver_pub,
+            out,
+        } => {
+            cmd_export(&cli.server_url, profile, username, peers, receiver_pub, out)?;
+        }
+        Commands::Import { file } => {
+            cmd_import(&cli.server_url, file)?;
+        }
         Commands::Send {
             username,
             peer,
