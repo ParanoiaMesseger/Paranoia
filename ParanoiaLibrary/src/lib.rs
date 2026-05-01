@@ -3,6 +3,7 @@ pub mod client_cover;
 pub mod client_cover_food;
 pub mod crypto;
 pub mod dialogue;
+pub mod export;
 pub mod ffi;
 pub mod packet;
 pub mod qr_exchange;

@@ -95,6 +95,36 @@ char *paranoia_qr_confirm_exchange(const char *local_state_json,
                                    const char *peer_payload_json,
                                    const char *confirmed_fingerprint);
 
+// ── ECIES шифрование экспорта keyring ────────────────────────────────────────
+// Используется для шифрованного out-of-band переноса данных на новое устройство.
+// Схема: эфемерный X25519 ECDH + HKDF-SHA256 + ChaCha20-Poly1305.
+// Отправитель шифрует данные на публичном ключе принимающего устройства.
+// Принимающее устройство расшифровывает своим приватным ключом.
+
+// Сгенерировать X25519 device keypair.
+// out_privkey, out_pubkey заполняются base64-строками (32 байта каждый).
+// Освобождать через paranoia_free_string.
+void paranoia_ecies_generate_keypair(char **out_privkey, char **out_pubkey);
+
+// Вывести публичный ключ из base64-приватного ключа.
+// Возвращает base64-строку или NULL при ошибке. Освободить через paranoia_free_string.
+char *paranoia_ecies_pubkey(const char *privkey_b64);
+
+// Зашифровать строку (JSON payload экспорта) на публичном ключе принимающего.
+// receiver_pubkey_b64 — base64 X25519 публичный ключ принимающего устройства.
+// plaintext — UTF-8 строка для шифрования.
+// Возвращает JSON-конверт EciesEnvelope или NULL при ошибке.
+// Освободить через paranoia_free_string.
+char *paranoia_ecies_encrypt(const char *receiver_pubkey_b64, const char *plaintext);
+
+// Расшифровать JSON-конверт EciesEnvelope приватным ключом устройства.
+// device_privkey_b64 — base64 X25519 приватный ключ устройства.
+// envelope_json — JSON-конверт от paranoia_ecies_encrypt.
+// Возвращает исходную UTF-8 строку или NULL при ошибке.
+// Освободить через paranoia_free_string.
+// Ошибки: "ecies_decrypt_error", "ecies_unsupported_version", "invalid_device_key".
+char *paranoia_ecies_decrypt(const char *device_privkey_b64, const char *envelope_json);
+
 // ── Ошибки ────────────────────────────────────────────────────────────────────
 // Последняя ошибка текущего потока. Указатель действителен до следующего
 // FFI-вызова в этом потоке. НЕ освобождать через paranoia_free_string.
@@ -111,6 +141,9 @@ char *paranoia_qr_confirm_exchange(const char *local_state_json,
 //   "invalid_keyring"        — некорректный keyring JSON
 //   "invalid_keyring_key_length" — ключ keyring не 32 байта
 //   "invalid_keyring_start_seq" — некорректный start_seq keyring
+//   "ecies_decrypt_error"    — ошибка расшифровки ECIES (неверный ключ или повреждён файл)
+//   "ecies_unsupported_version" — неподдерживаемая версия ECIES конверта
+//   "invalid_device_key"     — некорректный device keypair (не 32 байта base64)
 //   "send_error:<detail>"    — иная ошибка отправки
 //   "receive_error:<detail>" — иная ошибка получения
 const char *paranoia_last_error();
