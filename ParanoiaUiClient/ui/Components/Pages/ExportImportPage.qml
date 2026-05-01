@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
+import QtQuick.Dialogs
 import ParanoiaUiClient
 
 // Диалог экспорта/импорта keyring (F2b/Y1c).
@@ -15,6 +16,13 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property var selectedExportPeers: ({})
+
+    function localFilePath(fileUrl) {
+        let value = decodeURIComponent(String(fileUrl))
+        if (value.startsWith("file://"))
+            value = value.substring(7)
+        return value
+    }
 
     function refreshExportDialogs() {
         const dialogs = Backend.getDialogs()
@@ -69,6 +77,22 @@ Popup {
             if (root.opened)
                 root.refreshExportDialogs()
         }
+    }
+
+    FileDialog {
+        id: exportSaveDialog
+        title: "Сохранить export-файл"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
+        onAccepted: exportFilePath.text = root.localFilePath(selectedFile)
+    }
+
+    FileDialog {
+        id: importOpenDialog
+        title: "Выбрать export-файл"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
+        onAccepted: importFilePath.text = root.localFilePath(selectedFile)
     }
 
     onOpened: {
@@ -395,11 +419,24 @@ Popup {
                     }
 
                     // Путь к файлу
-                    ParaInput {
-                        id: exportFilePath
+                    RowLayout {
                         Layout.fillWidth: true
-                        label:       "Путь для сохранения файла"
-                        placeholder: "/tmp/paranoia_export.json"
+                        spacing: 8
+
+                        ParaInput {
+                            id: exportFilePath
+                            Layout.fillWidth: true
+                            label:       "Путь для сохранения файла"
+                            placeholder: "/tmp/paranoia_export.json"
+                        }
+
+                        ParaButton {
+                            text: "Выбрать"
+                            secondary: true
+                            implicitWidth: 92
+                            Layout.alignment: Qt.AlignBottom
+                            onClicked: exportSaveDialog.open()
+                        }
                     }
 
                     Text {
@@ -508,11 +545,24 @@ Popup {
                     }
 
                     // Путь к файлу
-                    ParaInput {
-                        id: importFilePath
+                    RowLayout {
                         Layout.fillWidth: true
-                        label:       "Путь к файлу экспорта"
-                        placeholder: "/tmp/paranoia_export.json"
+                        spacing: 8
+
+                        ParaInput {
+                            id: importFilePath
+                            Layout.fillWidth: true
+                            label:       "Путь к файлу экспорта"
+                            placeholder: "/tmp/paranoia_export.json"
+                        }
+
+                        ParaButton {
+                            text: "Выбрать"
+                            secondary: true
+                            implicitWidth: 92
+                            Layout.alignment: Qt.AlignBottom
+                            onClicked: importOpenDialog.open()
+                        }
                     }
 
                     Text {
@@ -599,7 +649,8 @@ Popup {
                                     importFeedback.text =
                                         "✓ Импорт выполнен. Диалогов: " + res.importedDialogues +
                                         ", ключей: " + res.importedKeyEntries +
-                                        ", серверов: " + res.importedAdminServers
+                                        ", профилей: " + (res.importedProfiles || 0) +
+                                        ", admin-серверов: " + res.importedAdminServers
                                     if (res.conflicts > 0)
                                         importFeedback.text += "\nКонфликтов keyring: " + res.conflicts + " (не перезаписаны)"
                                     if (res.skippedEntries > 0)

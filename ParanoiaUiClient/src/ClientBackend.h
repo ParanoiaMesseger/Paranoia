@@ -47,6 +47,8 @@ public:
                                                      bool updateExisting);
     Q_INVOKABLE void removeDialog(const QString &peer);
     Q_INVOKABLE QVariantList getDialogs() const;
+    Q_INVOKABLE QVariantList getClientProfiles() const;
+    Q_INVOKABLE void switchClientProfile(const QString &profileId);
     Q_INVOKABLE QVariantList getAdminServers() const;
     Q_INVOKABLE bool hasDialogKey(const QString &peer) const;
 
@@ -114,6 +116,7 @@ private:
     QString m_server;
     QString m_username;
     QString m_privkey;
+    QString m_profileId;
     QString m_activePeer;
     QString m_devicePrivkey;
 
@@ -124,8 +127,14 @@ private:
 
     void saveClientConfig() const;
     void loadClientConfig();
+    void saveClientConfigForProfile(const QString &profileId,
+                                    const QString &server,
+                                    const QString &username,
+                                    const QString &privkey) const;
     void saveDialogs() const;
     void loadDialogs();
+    QList<Dialog> loadDialogsFromPath(const QString &path) const;
+    void saveDialogsToPath(const QString &path, const QList<Dialog> &dialogs) const;
     void saveDeviceKey() const;
     void loadDeviceKey();
     void loadHistory(const QString &peer);
