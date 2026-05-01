@@ -24,7 +24,7 @@ function(setup_paranoia_lib TARGET)
         string(REPLACE "-" "_" _upper "${_upper}")
         string(TOLOWER "${PARANOIA_CARGO_TARGET}" _lower)
         string(REPLACE "-" "_" _lower "${_lower}")
-        set(_clang "${_ndk_bin}/${PARANOIA_CARGO_TARGET}${CMAKE_SYSTEM_VERSION}-clang")
+        set(_clang "${_ndk_bin}/${PARANOIA_CARGO_TARGET}${ANDROID_PLATFORM_LEVEL}-clang")
         add_custom_target(paranoia_lib_build
             COMMAND ${CMAKE_COMMAND} -E env
                 "CARGO_TARGET_${_upper}_LINKER=${_clang}"
@@ -32,12 +32,14 @@ function(setup_paranoia_lib TARGET)
                 "AR_${_lower}=${_ndk_bin}/llvm-ar"
                 "PATH=$ENV{PATH}:${_ndk_bin}"
                 cargo build ${_cargo_args}
+            BYPRODUCTS "${PARANOIA_LIB_FILE}"
             WORKING_DIRECTORY "${RUST_LIB_DIR}"
             COMMENT "Building paranoia_lib (Rust) → ${PARANOIA_CARGO_TARGET}"
         )
     else()
         add_custom_target(paranoia_lib_build
             COMMAND cargo build ${_cargo_args}
+            BYPRODUCTS "${PARANOIA_LIB_FILE}"
             WORKING_DIRECTORY "${RUST_LIB_DIR}"
             COMMENT "Building paranoia_lib (Rust)"
         )
@@ -51,7 +53,7 @@ function(setup_paranoia_lib TARGET)
     target_link_libraries(${TARGET} PRIVATE paranoia_lib)
 
     if(ANDROID)
-        target_link_libraries(${TARGET} PRIVATE log)
+        target_link_libraries(${TARGET} PRIVATE log dl m)
     elseif(UNIX AND NOT APPLE)
         target_link_libraries(${TARGET} PRIVATE pthread dl)
     elseif(APPLE)
