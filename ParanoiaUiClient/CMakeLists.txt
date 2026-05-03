@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(ParanoiaUiClient VERSION 0.1 LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Qt6 REQUIRED COMPONENTS Quick Concurrent QuickControls2 QuickDialogs2 QuickLayouts)
@@ -43,6 +44,7 @@ qt_add_qml_module(appParanoiaUiClient
     ui/Components/ParaButton.qml
     ui/Components/ParaHeader.qml
     ui/Components/ParaInput.qml
+    ui/Components/QrCodeBox.qml
     ui/Components/ProgressStep.qml
     ui/Components/Pages/ClientLoginPage.qml
     ui/Components/Pages/ClientRegistrationPage.qml
@@ -97,6 +99,8 @@ include("${CMAKE_SOURCE_DIR}/deps/Libssh2.cmake")
 setup_libssh2(appParanoiaUiClient)
 include("${CMAKE_SOURCE_DIR}/deps/ParanoiaLib.cmake")
 setup_paranoia_lib(appParanoiaUiClient)
+include("${CMAKE_SOURCE_DIR}/deps/QrTools.cmake")
+setup_qr_tools(appParanoiaUiClient)
 
 qt_finalize_executable(appParanoiaUiClient)
 

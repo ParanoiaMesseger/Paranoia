@@ -6,7 +6,8 @@ Rectangle {
     id: root
     color: Theme.bgPrimary
 
-    signal connectToServer()
+    signal importProfile()
+    signal registerClient()
     signal installServer()
 
     ColumnLayout {
@@ -54,8 +55,17 @@ Rectangle {
         // ── Кнопки выбора ────────────────────────────────────
         ParaButton {
             Layout.fillWidth: true
-            text:             "Подключиться к серверу"
-            onClicked:        root.connectToServer()
+            text:             "Импорт профиля"
+            onClicked:        root.importProfile()
+        }
+
+        Item { Layout.preferredHeight: 12 }
+
+        ParaButton {
+            Layout.fillWidth: true
+            text:             "Регистрация клиентом"
+            secondary:        true
+            onClicked:        root.registerClient()
         }
 
         Item { Layout.preferredHeight: 12 }

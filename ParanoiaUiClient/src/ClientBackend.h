@@ -34,6 +34,9 @@ public:
     Q_INVOKABLE void loginClient(const QString &server, const QString &username, const QString &privkey);
     Q_INVOKABLE void connectAdmin(const QString &server, const QString &privkey);
     Q_INVOKABLE void registerUser(const QString &domain, const QString &username, const QString &pubkey);
+    Q_INVOKABLE QString qrCodePngDataUrl(const QString &payload, int size = 512) const;
+    Q_INVOKABLE QVariantMap decodeQrCodeFromImage(const QString &filePath) const;
+    Q_INVOKABLE QVariantMap registrationPublicKeyFromQr(const QString &payload) const;
 
     Q_INVOKABLE void addDialog(const QString &peer, const QString &sharedSecret);
     Q_INVOKABLE void updateDialogKey(const QString &peer, const QString &newSharedSecret);
@@ -63,7 +66,7 @@ public:
     Q_INVOKABLE void deleteDialogLocal(const QString &peer);
     Q_INVOKABLE void clearServerHistory(const QString &peer, quint64 cutSeq);
 
-    // Экспорт / импорт keyring (F2b / Y1c / Z)
+    // Экспорт / импорт keyring
     // profileType: "client", "admin", "full"
     // peers: список peer-имён для экспорта; пустой список = все диалоги
     // receiverPubkeyB64: X25519 публичный ключ принимающего устройства (base64)

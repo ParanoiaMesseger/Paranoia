@@ -4,18 +4,32 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import ParanoiaUiClient
 
-// Диалог экспорта/импорта keyring (F2b/Y1c).
-// Открывается как Popup из MainPage.
+// Диалог экспорта/импорта keyring
+// Открывается как Popup из стартового экрана и MainPage.
 Popup {
     id: root
     anchors.centerIn: Overlay.overlay
-    width:   Math.min(440, Overlay.overlay ? Overlay.overlay.width - 24 : 440)
+    width:   Math.min(520, Overlay.overlay ? Overlay.overlay.width - 24 : 520)
     height:  Math.min(680, Overlay.overlay ? Overlay.overlay.height - 40 : 680)
-    padding: 20
+    padding: width < 380 ? 14 : 20
     modal:   true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     property var selectedExportPeers: ({})
+    property bool importOnly: false
+    property int initialTabIndex: 0
+
+    signal profileImported()
+
+    function openExportImport() {
+        initialTabIndex = 0
+        open()
+    }
+
+    function openImport() {
+        initialTabIndex = 1
+        open()
+    }
 
     function localFilePath(fileUrl) {
         let value = decodeURIComponent(String(fileUrl))
@@ -96,7 +110,7 @@ Popup {
     }
 
     onOpened: {
-        tabBar.currentIndex = 0
+        tabBar.currentIndex = root.importOnly ? 1 : root.initialTabIndex
         exportFeedback.text = ""
         importFeedback.text = ""
         exportReceiverKey.text = ""
@@ -112,7 +126,7 @@ Popup {
         Text {
             Layout.alignment: Qt.AlignHCenter
             Layout.bottomMargin: 12
-            text: "Экспорт / Импорт профиля"
+            text: root.importOnly ? "Импорт профиля" : "Экспорт / Импорт профиля"
             color: Theme.textPrimary
             font.pixelSize: Theme.fontLg
             font.family:    Theme.fontFamily
@@ -123,12 +137,13 @@ Popup {
         Rectangle {
             Layout.fillWidth: true
             Layout.bottomMargin: 12
-            height: 56
+            implicitHeight: deviceKeyLayout.implicitHeight + 12
             color:  Theme.bgPrimary
             radius: Theme.radiusSm
             border.color: Theme.border
 
             ColumnLayout {
+                id: deviceKeyLayout
                 anchors.fill:        parent
                 anchors.leftMargin:  12
                 anchors.rightMargin: 8
@@ -136,8 +151,9 @@ Popup {
                 anchors.bottomMargin: 6
                 spacing: 2
 
-                Text {
-                    text:  "Ваш публичный ключ (для получателя экспорта):"
+                    Text {
+                        Layout.fillWidth: true
+                        text:  "Ваш публичный ключ (для получателя экспорта):"
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontXs
                     font.family:    Theme.fontFamily
@@ -148,6 +164,7 @@ Popup {
 
                     Text {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         text:  Backend.devicePubkey || "—"
                         color: Theme.textPrimary
                         font.pixelSize: 10
@@ -187,7 +204,8 @@ Popup {
         TabBar {
             id: tabBar
             Layout.fillWidth: true
-            Layout.bottomMargin: 12
+            Layout.bottomMargin: root.importOnly ? 0 : 12
+            visible: !root.importOnly
             background: Rectangle { color: Theme.bgSecondary }
 
             Repeater {
@@ -223,20 +241,26 @@ Popup {
         StackLayout {
             Layout.fillWidth:  true
             Layout.fillHeight: true
+            Layout.minimumWidth: 0
             currentIndex:      tabBar.currentIndex
 
             // ── ЭКСПОРТ ───────────────────────────────────
             ScrollView {
+                id: exportScroll
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumWidth: 0
                 clip: true
                 contentWidth: availableWidth
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                 ColumnLayout {
-                    width: parent.availableWidth
+                    width: exportScroll.availableWidth
                     spacing: 12
 
                     Text {
                         Layout.fillWidth: true
-                        text: "Создать зашифрованный файл переноса профиля на другое устройство. Файл шифруется на публичном ключе принимающего устройства (Y1c)."
+                        text: "Создать зашифрованный файл переноса профиля на другое устройство. Файл шифруется на публичном ключе принимающего устройства."
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSm
                         font.family:    Theme.fontFamily
@@ -254,43 +278,58 @@ Popup {
                     ComboBox {
                         id: profileCombo
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        implicitHeight: 44
                         model: ["client — клиентские данные", "admin — ключи администратора", "full — всё"]
                         background: Rectangle {
+                            implicitHeight: 44
                             radius: Theme.radiusSm
                             color:  Theme.bgInput
                             border.color: Theme.border
                         }
                         contentItem: Text {
                             leftPadding: 8
+                            rightPadding: 28
                             text:  profileCombo.displayText
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontSm
                             font.family:    Theme.fontFamily
                             verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
                         }
                         popup: Popup {
                             y: profileCombo.height
                             width: profileCombo.width
-                            padding: 4
+                            padding: 0
                             background: Rectangle {
                                 color: Theme.bgSecondary
                                 border.color: Theme.border
                                 radius: Theme.radiusSm
                             }
                             contentItem: ListView {
-                                implicitHeight: contentHeight
+                                id: profilePopupList
+                                implicitHeight: Math.min(contentHeight, 160)
                                 model: profileCombo.delegateModel
+                                currentIndex: profileCombo.highlightedIndex
                                 clip: true
+                                ScrollBar.vertical: ScrollBar {
+                                    policy: profilePopupList.contentHeight > profilePopupList.height
+                                            ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                                }
                             }
                         }
                         delegate: ItemDelegate {
-                            width: profileCombo.width
+                            width: ListView.view ? ListView.view.width : profileCombo.width
+                            height: 40
                             contentItem: Text {
                                 text:  modelData
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSm
                                 font.family:    Theme.fontFamily
                                 leftPadding: 8
+                                rightPadding: 8
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
                             }
                             background: Rectangle {
                                 color: hovered ? Theme.bgButton : "transparent"
@@ -307,13 +346,14 @@ Popup {
                         visible: profileCombo.currentIndex !== 1
                     }
 
-                    RowLayout {
+                    ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 8
                         visible: profileCombo.currentIndex !== 1
 
                         ParaButton {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "Выбрать все"
                             secondary: true
                             onClicked: root.setAllExportDialogs(true)
@@ -321,6 +361,7 @@ Popup {
 
                         ParaButton {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "Снять выбор"
                             secondary: true
                             onClicked: root.setAllExportDialogs(false)
@@ -414,18 +455,20 @@ Popup {
                     ParaInput {
                         id: exportReceiverKey
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         label:       "Публичный ключ принимающего устройства (base64)"
                         placeholder: "X25519 pubkey получателя…"
                     }
 
                     // Путь к файлу
-                    RowLayout {
+                    ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 8
 
                         ParaInput {
                             id: exportFilePath
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             label:       "Путь для сохранения файла"
                             placeholder: "/tmp/paranoia_export.json"
                         }
@@ -433,8 +476,8 @@ Popup {
                         ParaButton {
                             text: "Выбрать"
                             secondary: true
-                            implicitWidth: 92
-                            Layout.alignment: Qt.AlignBottom
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             onClicked: exportSaveDialog.open()
                         }
                     }
@@ -458,12 +501,13 @@ Popup {
                         visible: text.length > 0
                     }
 
-                    RowLayout {
+                    ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 12
 
                         ParaButton {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "Экспортировать"
                             onClicked: {
                                 exportFeedback.text = ""
@@ -491,6 +535,7 @@ Popup {
 
                         ParaButton {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "Закрыть"
                             secondary: true
                             onClicked: root.close()
@@ -501,11 +546,16 @@ Popup {
 
             // ── ИМПОРТ ───────────────────────────────────
             ScrollView {
+                id: importScroll
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumWidth: 0
                 clip: true
                 contentWidth: availableWidth
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                 ColumnLayout {
-                    width: parent.availableWidth
+                    width: importScroll.availableWidth
                     spacing: 12
 
                     Text {
@@ -527,7 +577,7 @@ Popup {
 
                     Rectangle {
                         Layout.fillWidth: true
-                        height: 36
+                        implicitHeight: 42
                         color:  Theme.bgPrimary
                         radius: Theme.radiusSm
                         border.color: Theme.border
@@ -535,6 +585,7 @@ Popup {
                         Text {
                             anchors.fill: parent
                             anchors.leftMargin: 8
+                            anchors.rightMargin: 8
                             verticalAlignment: Text.AlignVCenter
                             text:  Backend.devicePubkey || "—"
                             color: Theme.textPrimary
@@ -545,13 +596,14 @@ Popup {
                     }
 
                     // Путь к файлу
-                    RowLayout {
+                    ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 8
 
                         ParaInput {
                             id: importFilePath
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             label:       "Путь к файлу экспорта"
                             placeholder: "/tmp/paranoia_export.json"
                         }
@@ -559,8 +611,8 @@ Popup {
                         ParaButton {
                             text: "Выбрать"
                             secondary: true
-                            implicitWidth: 92
-                            Layout.alignment: Qt.AlignBottom
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             onClicked: importOpenDialog.open()
                         }
                     }
@@ -588,13 +640,14 @@ Popup {
                     Rectangle {
                         id: deleteFileBanner
                         Layout.fillWidth: true
-                        height: 60
+                        implicitHeight: deleteFileLayout.implicitHeight + 16
                         color:  Theme.bgPrimary
                         radius: Theme.radiusSm
                         border.color: Theme.border
                         visible: false
 
-                        RowLayout {
+                        ColumnLayout {
+                            id: deleteFileLayout
                             anchors.fill:        parent
                             anchors.leftMargin:  12
                             anchors.rightMargin: 12
@@ -611,8 +664,9 @@ Popup {
 
                             ParaButton {
                                 text:      "Удалить"
-                                implicitWidth:  80
-                                implicitHeight: 32
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                implicitHeight: 36
                                 onClicked: {
                                     let path = importFilePath.text.trim()
                                     const res = Backend.deleteExportFile(path)
@@ -627,19 +681,21 @@ Popup {
                             ParaButton {
                                 text:      "Нет"
                                 secondary: true
-                                implicitWidth:  60
-                                implicitHeight: 32
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                implicitHeight: 36
                                 onClicked: deleteFileBanner.visible = false
                             }
                         }
                     }
 
-                    RowLayout {
+                    ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 12
 
                         ParaButton {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "Импортировать"
                             onClicked: {
                                 importFeedback.text = ""
@@ -656,6 +712,7 @@ Popup {
                                     if (res.skippedEntries > 0)
                                         importFeedback.text += "\nПропущено записей: " + res.skippedEntries
                                     deleteFileBanner.visible = true
+                                    root.profileImported()
                                 } else {
                                     importFeedback.text = res.error || "Ошибка импорта."
                                 }
@@ -664,6 +721,7 @@ Popup {
 
                         ParaButton {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "Закрыть"
                             secondary: true
                             onClicked: root.close()

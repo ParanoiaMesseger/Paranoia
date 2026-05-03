@@ -11,18 +11,27 @@ ApplicationWindow {
     title:   "Paranoia"
     color:   Theme.bgPrimary
 
+    function openMainPageIfReady() {
+        if ((Backend.loggedIn || Backend.hasAdminAccess) && stackView.depth === 1) {
+            if (startupImportPopup.opened)
+                startupImportPopup.close()
+            stackView.replace(mainPage)
+        }
+    }
+
     // Авто-навигация при восстановлении сессии из сохранённых данных
     Connections {
         target: Backend
         function onLoginStateChanged() {
-            if (Backend.loggedIn && stackView.depth === 1)
-                stackView.replace(mainPage)
+            appWindow.openMainPageIfReady()
+        }
+        function onAdminStateChanged() {
+            appWindow.openMainPageIfReady()
         }
     }
 
     Component.onCompleted: {
-        // Если есть только админ-доступ (без клиентского логина) — сразу на главную
-        if (Backend.hasAdminAccess && !Backend.loggedIn)
+        if (Backend.loggedIn || Backend.hasAdminAccess)
             stackView.replace(mainPage)
     }
 
@@ -31,9 +40,16 @@ ApplicationWindow {
         anchors.fill: parent
 
         initialItem: HelloPage {
-            onConnectToServer: stackView.push(connectChoicePage)
+            onImportProfile:  startupImportPopup.openImport()
+            onRegisterClient: stackView.push(clientRegistrationPage)
             onInstallServer:   stackView.push(installServerPage)
         }
+    }
+
+    ExportImportPage {
+        id: startupImportPopup
+        importOnly: true
+        onProfileImported: appWindow.openMainPageIfReady()
     }
 
     Component {
@@ -45,44 +61,8 @@ ApplicationWindow {
     }
 
     Component {
-        id: connectChoicePage
-        ConnectChoicePage {
-            onBack:     stackView.pop()
-            onAsAdmin:  stackView.push(connectAdminPage)
-            onAsClient: stackView.push(connectClientChoicePage)
-        }
-    }
-
-    Component {
-        id: connectAdminPage
-        ConnectAdminPage {
-            onBack:      stackView.pop()
-            onConnected: stackView.replace(mainPage)
-        }
-    }
-
-    Component {
-        id: connectClientChoicePage
-        ConnectClientChoicePage {
-            onBack:      stackView.pop()
-            onRegister_: stackView.push(clientRegistrationPage)
-            onLogin:     stackView.push(clientLoginPage)
-        }
-    }
-
-    Component {
         id: clientRegistrationPage
         ClientRegistrationPage {
-            onBack: stackView.pop()
-            onProceedToLogin: function(privKey) {
-                stackView.replace(clientLoginPage, { autoFillKey: privKey })
-            }
-        }
-    }
-
-    Component {
-        id: clientLoginPage
-        ClientLoginPage {
             onBack:     stackView.pop()
             onLoggedIn: stackView.replace(mainPage)
         }
@@ -92,7 +72,7 @@ ApplicationWindow {
         id: mainPage
         MainPage {
             onOpenChat:         function(peer) { stackView.push(chatPage, { peer: peer }) }
-            onAddServer:        stackView.push(connectChoicePage)
+            onRegisterClient:   stackView.push(clientRegistrationPage)
             onInstallNewServer: stackView.push(installServerPage)
         }
     }

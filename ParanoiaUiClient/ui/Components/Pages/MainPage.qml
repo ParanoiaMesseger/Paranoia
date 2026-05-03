@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
+import QtQuick.Dialogs
 import ParanoiaUiClient
 
 Rectangle {
@@ -13,12 +14,24 @@ Rectangle {
     property bool qrExchangeUpdateExisting: false
 
     signal openChat(string peer)
-    signal addServer()
+    signal registerClient()
     signal installNewServer()
+
+    function contentIndexForTab(tabIndex) {
+        if (root.hasAdminAccess)
+            return tabIndex
+        return tabIndex === 0 ? 0 : 2
+    }
+
+    onHasAdminAccessChanged: {
+        if (!root.hasAdminAccess && tabBar.currentIndex > 1)
+            tabBar.currentIndex = 1
+    }
 
     Connections {
         target: Backend
         function onDialogsChanged()       { dialogsView.model = Backend.getDialogs() }
+        function onAdminStateChanged()    { adminServersView.model = Backend.getAdminServers() }
         function onUserRegistered()       { regFeedback.text = "Пользователь зарегистрирован ✓"; registerUserPopup.close() }
         function onRegisterUserError(msg) { regFeedback.text = msg }
         function onDialogDeleted(peer)    { dialogsView.model = Backend.getDialogs() }
@@ -27,6 +40,50 @@ Rectangle {
     }
 
     ExportImportPage { id: exportImportPopup }
+
+    FileDialog {
+        id: registrationQrImageDialog
+        title: "Выбрать изображение QR-кода"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
+        onAccepted: {
+            const decoded = Backend.decodeQrCodeFromImage(root.localFilePath(selectedFile))
+            if (!decoded.ok) {
+                regFeedback.text = decoded.error || "QR-код не прочитан."
+                return
+            }
+            const parsed = Backend.registrationPublicKeyFromQr(decoded.text)
+            if (!parsed.ok) {
+                regFeedback.text = parsed.error || "QR-код не содержит публичный ключ."
+                return
+            }
+            newUserPubKeyInput.text = parsed.pubkey
+            regFeedback.text = "QR-код прочитан ✓"
+        }
+    }
+
+    FileDialog {
+        id: qrPeerPayloadImageDialog
+        title: "Выбрать изображение QR payload"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
+        onAccepted: {
+            const decoded = Backend.decodeQrCodeFromImage(root.localFilePath(selectedFile))
+            if (!decoded.ok) {
+                qrExchangeFeedback.text = decoded.error || "QR-код не прочитан."
+                return
+            }
+            qrPeerPayloadJson.text = decoded.text
+            qrExchangeFeedback.text = "Payload считан из QR-кода."
+        }
+    }
+
+    function localFilePath(fileUrl) {
+        let value = decodeURIComponent(String(fileUrl))
+        if (value.startsWith("file://"))
+            value = value.substring(7)
+        return value
+    }
 
     function openQrExchange(peer, updateExisting) {
         qrExchangePeer = peer
@@ -82,19 +139,19 @@ Rectangle {
                     id: exportArea
                     anchors.fill: parent
                     hoverEnabled: true
-                    onClicked: exportImportPopup.open()
+                    onClicked: exportImportPopup.openExportImport()
                 }
             }
         }
 
-        // ── TabBar (always 3 fixed tabs) ──────────────────
+        // ── TabBar ─────────────────────────────────────────
         TabBar {
             id: tabBar
             Layout.fillWidth: true
             background: Rectangle { color: Theme.bgSecondary }
 
             Repeater {
-                model: ["Чаты", "Админ", "+"]
+                model: root.hasAdminAccess ? ["Чаты", "Админ", "+"] : ["Чаты", "+"]
 
                 TabButton {
                     required property string modelData
@@ -130,7 +187,7 @@ Rectangle {
         StackLayout {
             Layout.fillWidth:  true
             Layout.fillHeight: true
-            currentIndex:      tabBar.currentIndex
+            currentIndex:      root.contentIndexForTab(tabBar.currentIndex)
 
             // ── USER tab ──────────────────────────────────
             Rectangle {
@@ -144,14 +201,19 @@ Rectangle {
 
                     Text {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        text:           "Войдите в аккаунт"
+                        text:           "Нет клиентского профиля"
                         color:          Theme.textSecondary
                         font.pixelSize: Theme.fontMd
                         font.family:    Theme.fontFamily
                     }
                     ParaButton {
-                        text:      "Подключиться"
-                        onClicked: root.addServer()
+                        text:      "Импортировать профиль"
+                        onClicked: exportImportPopup.openImport()
+                    }
+                    ParaButton {
+                        text:      "Регистрация клиентом"
+                        secondary: true
+                        onClicked: root.registerClient()
                     }
                 }
 
@@ -399,18 +461,19 @@ Rectangle {
 
                     Text {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        text:           "Нет прав администратора"
+                        text:           "Нет администрируемых серверов"
                         color:          Theme.textSecondary
                         font.pixelSize: Theme.fontMd
                         font.family:    Theme.fontFamily
                     }
                     ParaButton {
-                        text:      "Войти как Админ"
-                        onClicked: root.addServer()
+                        text:      "Установить сервер"
+                        onClicked: root.installNewServer()
                     }
                 }
 
                 ListView {
+                    id: adminServersView
                     visible: root.hasAdminAccess
                     anchors.fill: parent
                     model:        Backend.getAdminServers()
@@ -477,7 +540,7 @@ Rectangle {
 
                     Text {
                         Layout.alignment: Qt.AlignHCenter
-                        text:             "Добавить сервер"
+                        text:             "Добавить профиль или сервер"
                         color:            Theme.textPrimary
                         font.pixelSize:   Theme.fontLg
                         font.family:      Theme.fontFamily
@@ -488,8 +551,15 @@ Rectangle {
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Подключиться к серверу"
-                        onClicked:        root.addServer()
+                        text:             "Импорт профиля"
+                        onClicked:        exportImportPopup.openImport()
+                    }
+
+                    ParaButton {
+                        Layout.fillWidth: true
+                        text:             "Регистрация клиентом"
+                        secondary:        true
+                        onClicked:        root.registerClient()
                     }
 
                     ParaButton {
@@ -1097,12 +1167,13 @@ Rectangle {
                 elide: Text.ElideRight
             }
 
-            RowLayout {
+            ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 8
 
                 ParaButton {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: "Создать invitation"
                     onClicked: {
                         let res = Backend.createDialogKeyInvitation(root.qrExchangePeer)
@@ -1119,6 +1190,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: "Создать response"
                     secondary: true
                     onClicked: {
@@ -1146,6 +1218,7 @@ Rectangle {
             TextArea {
                 id: qrLocalPayloadJson
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 implicitHeight: 86
                 readOnly: true
                 wrapMode: TextEdit.Wrap
@@ -1155,8 +1228,17 @@ Rectangle {
                 background: Rectangle { color: Theme.bgInput; border.color: Theme.border; radius: Theme.radiusSm }
             }
 
+            QrCodeBox {
+                Layout.alignment: Qt.AlignHCenter
+                boxSize: Math.min(240, qrExchangePopup.availableWidth - 32)
+                payload: qrLocalPayloadJson.text
+                caption: "QR payload"
+                visible: qrLocalPayloadJson.text.length > 0
+            }
+
             ParaButton {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 text: "Копировать payload"
                 secondary: true
                 onClicked: {
@@ -1182,6 +1264,7 @@ Rectangle {
             TextArea {
                 id: qrPeerPayloadJson
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 implicitHeight: 86
                 wrapMode: TextEdit.Wrap
                 color: Theme.textPrimary
@@ -1192,12 +1275,21 @@ Rectangle {
                 background: Rectangle { color: Theme.bgInput; border.color: Theme.border; radius: Theme.radiusSm }
             }
 
-            RowLayout {
+            ParaButton {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                text: "Считать payload из QR-изображения"
+                secondary: true
+                onClicked: qrPeerPayloadImageDialog.open()
+            }
+
+            ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 8
 
                 ParaButton {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: "Рассчитать SAS"
                     onClicked: {
                         let res = Backend.dialogKeyFingerprint(qrLocalStateJson.text, qrPeerPayloadJson.text.trim())
@@ -1212,6 +1304,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: "Подтвердить"
                     secondary: true
                     onClicked: {
@@ -1258,6 +1351,7 @@ Rectangle {
 
             ParaButton {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 text: "Закрыть"
                 secondary: true
                 onClicked: qrExchangePopup.close()
@@ -1272,8 +1366,8 @@ Rectangle {
     Popup {
         id:          registerUserPopup
         anchors.centerIn: Overlay.overlay
-        width:       340
-        padding:     24
+        width:       Math.min(420, Overlay.overlay.width - 24)
+        padding:     width < 360 ? 16 : 24
         modal:       true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
@@ -1320,8 +1414,17 @@ Rectangle {
             ParaInput {
                 id:              newUserPubKeyInput
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 label:           "Публичный ключ пользователя"
-                placeholder:     "Вставьте ключ…"
+                placeholder:     "Вставьте ключ или считайте QR…"
+            }
+
+            ParaButton {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                text: "Считать QR с изображения"
+                secondary: true
+                onClicked: registrationQrImageDialog.open()
             }
 
             Text {
@@ -1335,12 +1438,13 @@ Rectangle {
                 visible:             text.length > 0
             }
 
-            RowLayout {
+            ColumnLayout {
                 Layout.fillWidth: true
                 spacing:          12
 
                 ParaButton {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text:             "Зарегистрировать"
                     onClicked: {
                         let user   = newUserNameInput.text.trim()
@@ -1349,6 +1453,12 @@ Rectangle {
                             regFeedback.text = "Заполните все поля."
                             return
                         }
+                        const parsed = Backend.registrationPublicKeyFromQr(pubkey)
+                        if (!parsed.ok) {
+                            regFeedback.text = parsed.error || "Некорректный публичный ключ."
+                            return
+                        }
+                        pubkey = parsed.pubkey
                         regFeedback.text = ""
                         Backend.registerUser(root.registerTargetDomain, user, pubkey)
                     }
@@ -1356,6 +1466,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text:             "Закрыть"
                     secondary:        true
                     onClicked:        registerUserPopup.close()

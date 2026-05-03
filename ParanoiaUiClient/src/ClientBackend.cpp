@@ -11,7 +11,17 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QDateTime>
+#include <QBuffer>
+#include <QImage>
+#include <QPainter>
+#include <QUrl>
+#include <ReadBarcode.h>
+#include <Barcode.h>
+#include <ImageView.h>
+#include <ReaderOptions.h>
+#include <qrcodegen.hpp>
 #include <algorithm>
+#include <exception>
 
 namespace {
 constexpr qint64 MaxExportFileBytes = 16 * 1024 * 1024;
@@ -273,6 +283,106 @@ void ClientBackend::generateKeyPair()
             emit keyPairGenerated(pubkeyStr, secretStr);
         });
     });
+}
+
+QString ClientBackend::qrCodePngDataUrl(const QString &payload, int size) const
+{
+    const QByteArray data = payload.toUtf8();
+    if (data.isEmpty()) return QString();
+
+    const int requestedSize = std::clamp(size, 128, 2048);
+    try {
+        const std::vector<std::uint8_t> bytes(data.cbegin(), data.cend());
+        const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeBinary(
+            bytes,
+            qrcodegen::QrCode::Ecc::LOW
+        );
+        constexpr int border = 4;
+        const int modules = qr.getSize() + border * 2;
+        const int scale = std::max(1, requestedSize / modules);
+        const int imageSize = modules * scale;
+
+        QImage image(imageSize, imageSize, QImage::Format_RGB32);
+        image.fill(Qt::white);
+
+        QPainter painter(&image);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Qt::black);
+        for (int y = 0; y < qr.getSize(); ++y) {
+            for (int x = 0; x < qr.getSize(); ++x) {
+                if (qr.getModule(x, y)) {
+                    painter.drawRect((x + border) * scale,
+                                     (y + border) * scale,
+                                     scale,
+                                     scale);
+                }
+            }
+        }
+        painter.end();
+
+        QByteArray png;
+        QBuffer buffer(&png);
+        buffer.open(QIODevice::WriteOnly);
+        if (!image.save(&buffer, "PNG")) return QString();
+        return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
+    } catch (const std::exception &e) {
+        qWarning() << "QR generation failed:" << e.what();
+        return QString();
+    }
+}
+
+QVariantMap ClientBackend::decodeQrCodeFromImage(const QString &filePath) const
+{
+    QString path = filePath.trimmed();
+    if (path.startsWith(QStringLiteral("file://")))
+        path = QUrl(path).toLocalFile();
+    if (path.isEmpty())
+        return errorResult("Не указан файл изображения с QR-кодом.");
+
+    QImage image(path);
+    if (image.isNull())
+        return errorResult("Не удалось открыть изображение с QR-кодом.");
+
+    QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
+    try {
+        ZXing::ImageView view(gray.constBits(),
+                              gray.width(),
+                              gray.height(),
+                              ZXing::ImageFormat::Lum,
+                              gray.bytesPerLine());
+        ZXing::ReaderOptions options;
+        options.setFormats(ZXing::BarcodeFormat::QRCode)
+               .setTryHarder(true)
+               .setTryRotate(true)
+               .setTryInvert(true);
+        const auto barcodes = ZXing::ReadBarcodes(view, options);
+        for (const auto &barcode : barcodes) {
+            if (barcode.isValid()) {
+                return QVariantMap{{"ok", true}, {"text", QString::fromStdString(barcode.text())}};
+            }
+        }
+        return errorResult("QR-код на изображении не найден.");
+    } catch (const std::exception &e) {
+        return errorResult(QStringLiteral("Ошибка чтения QR-кода: ") + QString::fromUtf8(e.what()));
+    }
+}
+
+QVariantMap ClientBackend::registrationPublicKeyFromQr(const QString &payload) const
+{
+    QString text = payload.trimmed();
+    if (text.isEmpty())
+        return errorResult("QR-код не содержит данные регистрации.");
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &parseError);
+    if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
+        const QJsonObject obj = doc.object();
+        text = obj.value(QStringLiteral("pubkey")).toString().trimmed();
+    }
+
+    if (!decodeFixedBase64(text, 32))
+        return errorResult("QR-код не содержит корректный публичный ключ base64.");
+    return QVariantMap{{"ok", true}, {"pubkey", text}};
 }
 
 // ── Client Login ──────────────────────────────────────────────────────────────
