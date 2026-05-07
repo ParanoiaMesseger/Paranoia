@@ -156,7 +156,7 @@ Rectangle {
                     Layout.fillWidth: true
                     visible:          root.errorText.length > 0
                     text:             root.errorText
-                    color:            Theme.error          // или Theme.accent / "#e05c5c"
+                    color:            Theme.error
                     font.pixelSize:   13
                     wrapMode:         Text.WordWrap
                 }

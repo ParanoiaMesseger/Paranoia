@@ -1,61 +1,76 @@
 import QtQuick
 import QtQuick.Layouts
 import ParanoiaUiClient
+import QtQuick.VectorImage
 
 Rectangle {
     id: root
     color: Theme.bgPrimary
 
-    signal connectToServer()
+    signal importProfile()
+    signal registerClient()
     signal installServer()
 
     ColumnLayout {
         anchors.centerIn: parent
-        width:            320
-        spacing:          0
+        width:            Math.min(360, parent.width - 40)
+        anchors.margins: 20
+        spacing: 0
 
-        // ── Логотип / иконка ──────────────────────────────────
-        Rectangle {
+        VectorImage {
             Layout.alignment: Qt.AlignHCenter
-            width:  80; height: 80
-            radius: 40
-            color:  Theme.accent
+            Layout.fillWidth: true
+            Layout.preferredHeight: 104
 
-            Text {
-                anchors.centerIn: parent
-                text:  "🔒"
-                font.pixelSize: 36
-            }
+            source: "qrc:/logo_lockup_animated.svg"
+            fillMode: VectorImage.PreserveAspectFit
+            preferredRendererType: VectorImage.CurveRenderer
+
+            animations.loops: Animation.Infinite
+            assumeTrustedSource: true
         }
 
-        Item { Layout.preferredHeight: 24 }
+        Item { Layout.preferredHeight: 18 }
 
         Text {
             Layout.alignment:   Qt.AlignHCenter
-            text:               "Paranoia"
-            color:              Theme.textPrimary
-            font.pixelSize:     Theme.fontXl
+            text:               "PRIVATE MEMORY WIPE"
+            color:              Theme.accentHover
+            font.pixelSize:     Theme.fontSm
             font.family:        Theme.fontFamily
-            font.weight:        Font.Bold
+            font.weight:        Font.DemiBold
         }
 
         Item { Layout.preferredHeight: 8 }
 
         Text {
             Layout.alignment:   Qt.AlignHCenter
-            text:               "Безопасный мессенджер"
+            text:               "Мессенджер, который ничего о тебе не помнит"
             color:              Theme.textSecondary
             font.pixelSize:     Theme.fontSm
             font.family:        Theme.fontFamily
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode:           Text.WordWrap
+            Layout.fillWidth:   true
         }
 
         Item { Layout.preferredHeight: 48 }
 
         // ── Кнопки выбора ────────────────────────────────────
+        
         ParaButton {
             Layout.fillWidth: true
-            text:             "Подключиться к серверу"
-            onClicked:        root.connectToServer()
+            text:             "Регистрация"
+            onClicked:        root.registerClient()
+        }
+        
+        Item { Layout.preferredHeight: 12 }
+
+        ParaButton {
+            Layout.fillWidth: true
+            secondary:        true
+            text:             "Импорт"
+            onClicked:        root.importProfile()
         }
 
         Item { Layout.preferredHeight: 12 }
@@ -66,5 +81,20 @@ Rectangle {
             secondary:        true
             onClicked:        root.installServer()
         }
+
+    }
+    Text {
+        anchors {
+            left: parent.left
+            right: parent.right
+            bottom: parent.bottom
+            margins: 20
+        }
+        text:               "Version: " + appVersion
+        color: Theme.textSecondary
+        font.pixelSize: Theme.fontSm
+        font.family: Theme.fontFamily
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
     }
 }

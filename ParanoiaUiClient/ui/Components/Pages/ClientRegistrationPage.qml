@@ -1,6 +1,6 @@
-import QtQuick 2.15
-import QtQuick.Layouts 1.15
-import QtQuick.Controls 2.15
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
 import ParanoiaUiClient
 
 Rectangle {
@@ -8,18 +8,43 @@ Rectangle {
     color: Theme.bgPrimary
 
     signal back()
-    signal proceedToLogin(string privateKey)
+    signal loggedIn()
 
     property string publicKey:  ""
     property string privateKey: ""
+    property bool   generating: false
+    property bool   isLoading: false
+    property string errorMsg: ""
 
-    Component.onCompleted: generateKeys()
+    function registrationQrPayload() {
+        return JSON.stringify({
+            type: "paranoia.registration.pubkey.v1",
+            pubkey: root.publicKey
+        })
+    }
 
-    function generateKeys() {
-        // backend.generateKeyPair() → onKeysGenerated(pub, priv)
-        // Заглушка для UI:
-        publicKey  = "DEMO_PUBLIC_KEY_ABCDEF1234567890"
-        privateKey = "DEMO_PRIVATE_KEY_FEDCBA0987654321"
+    Connections {
+        target: Backend
+        function onKeyPairGenerated(pub, priv) {
+            root.publicKey  = pub
+            root.privateKey = priv
+            root.generating = false
+        }
+        function onLoginStateChanged() {
+            if (Backend.loggedIn) {
+                root.isLoading = false
+                root.loggedIn()
+            }
+        }
+        function onLoginError(msg) {
+            root.isLoading = false
+            root.errorMsg = msg
+        }
+    }
+
+    Component.onCompleted: {
+        generating = true
+        Backend.generateKeyPair()
     }
 
     ColumnLayout {
@@ -48,9 +73,27 @@ Rectangle {
 
                 Item { Layout.preferredHeight: 8 }
 
+                // Generating indicator
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 44
+                    radius: Theme.radiusMd
+                    color:  Theme.bgSecondary
+                    visible: root.generating
+
+                    Text {
+                        anchors.centerIn: parent
+                        text:  "Генерация ключей…"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSm
+                        font.family:    Theme.fontFamily
+                    }
+                }
+
                 Text {
                     Layout.fillWidth: true
-                    text:   "Ваш публичный ключ сгенерирован. Передайте его администратору сервера, чтобы он вас зарегистрировал."
+                    visible: !root.generating
+                    text:   "Ваш публичный ключ сгенерирован. Передайте его администратору сервера, затем укажите сервер и имя пользователя для входа."
                     color:  Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family:    Theme.fontFamily
@@ -65,6 +108,7 @@ Rectangle {
                     radius:     Theme.radiusMd
                     color:      Theme.bgInput
                     border.color: Theme.border
+                    visible: !root.generating
 
                     ScrollView {
                         anchors.fill:    parent
@@ -78,7 +122,7 @@ Rectangle {
                             readOnly:        true
                             wrapMode:        Text.WrapAnywhere
                             background:      null
-                            selectedTextColor: "#FFFFFF"
+                            selectedTextColor: Theme.textPrimary
                             selectionColor:  Theme.accentDark
                         }
                     }
@@ -89,36 +133,29 @@ Rectangle {
                     Layout.fillWidth: true
                     text:             "Скопировать публичный ключ"
                     secondary:        true
+                    visible:          !root.generating
                     onClicked: {
-                        // Clipboard.text = root.publicKey
+                        copyClipboard.text = root.publicKey
+                        copyClipboard.selectAll()
+                        copyClipboard.copy()
+                        text = "Скопировано ✓"
                     }
                 }
 
-                // ── QR-код ────────────────────────────────────
-                Rectangle {
-                    Layout.alignment: Qt.AlignHCenter
-                    width:  200; height: 200
-                    radius: Theme.radiusMd
-                    color:  "#FFFFFF"
+                // Clipboard helper (invisible)
+                TextEdit {
+                    id:      copyClipboard
+                    visible: false
+                    text:    root.publicKey
+                }
 
-                    // QR-код генерируется через QML-плагин или C++:
-                    // QrCodeItem { data: root.publicKey; anchors.fill: parent }
-                    Column {
-                        anchors.centerIn: parent
-                        spacing:          8
-                        Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            text:  "[ QR код ]"
-                            color: "#333333"
-                            font.pixelSize: Theme.fontMd
-                        }
-                        Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            text:  "Требует плагин"
-                            color: "#888888"
-                            font.pixelSize: Theme.fontXs
-                        }
-                    }
+                // ── QR для передачи публичного ключа админу ────
+                QrCodeBox {
+                    Layout.alignment: Qt.AlignHCenter
+                    boxSize: Math.min(240, Math.max(180, content.width - 48))
+                    payload: root.registrationQrPayload()
+                    caption: root.publicKey.length > 0 ? root.publicKey.substring(0, 12) + "..." : ""
+                    visible: !root.generating
                 }
 
                 Text {
@@ -127,14 +164,69 @@ Rectangle {
                     color:              Theme.textSecondary
                     font.pixelSize:     Theme.fontXs
                     font.family:        Theme.fontFamily
+                    visible:            !root.generating
                 }
 
                 Item { Layout.preferredHeight: 8 }
 
+                ParaInput {
+                    id: endpointInput
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    label: "Адрес сервера"
+                    placeholder: "https://example.com"
+                    visible: !root.generating
+                }
+
+                ParaInput {
+                    id: usernameInput
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    label: "Имя пользователя"
+                    placeholder: "username"
+                    visible: !root.generating
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: errorText.implicitHeight + 20
+                    radius: Theme.radiusSm
+                    color: Theme.errorBg
+                    visible: root.errorMsg !== ""
+
+                    Text {
+                        id: errorText
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        text: root.errorMsg
+                        color: Theme.error
+                        font.pixelSize: Theme.fontSm
+                        font.family: Theme.fontFamily
+                        wrapMode: Text.WordWrap
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
+
                 ParaButton {
                     Layout.fillWidth: true
-                    text:             "Я передал ключ → Войти"
-                    onClicked:        root.proceedToLogin(root.privateKey)
+                    text:             root.isLoading ? "Вход…" : "Я передал ключ, войти"
+                    enabled:          !root.generating && !root.isLoading
+                    onClicked: {
+                        const server = endpointInput.text.trim()
+                        const username = usernameInput.text.trim()
+                        if (server === "" || username === "") {
+                            root.errorMsg = "Укажите сервер и имя пользователя."
+                            return
+                        }
+                        if (root.privateKey === "") {
+                            root.errorMsg = "Ключи ещё не сгенерированы."
+                            return
+                        }
+                        root.errorMsg = ""
+                        root.isLoading = true
+                        Backend.loginClient(server, username, root.privateKey)
+                    }
                 }
 
                 Item { Layout.preferredHeight: 16 }

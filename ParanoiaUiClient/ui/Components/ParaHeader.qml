@@ -4,19 +4,26 @@ import ParanoiaUiClient
 Rectangle {
     id: root
     height:      56
-    color:       Theme.bgSecondary
+    color:       Theme.bgDark
 
     property string title: ""
     property bool   showBack: true
 
     signal backClicked()
 
-    // нижняя линия-разделитель
     Rectangle {
         anchors.bottom: parent.bottom
         width:  parent.width
-        height: 1
-        color:  Theme.separator
+        height: 2
+        color:  Theme.accentDim
+    }
+
+    Rectangle {
+        anchors.left: parent.left
+        anchors.bottom: parent.bottom
+        width:  root.width * .28
+        height: 2
+        color:  Theme.accent
     }
 
     RowLayout {
@@ -34,14 +41,16 @@ Rectangle {
             Rectangle {
                 anchors.centerIn: parent
                 width:  36; height: 36
-                radius: 18
-                color:  backArea.containsMouse ? Theme.bgInput : "transparent"
+                radius: Theme.radiusSm
+                color:  backArea.containsMouse ? Theme.bgCard : "transparent"
+                border.width: backArea.containsMouse ? 1 : 0
+                border.color: Theme.border
                 Behavior on color { ColorAnimation { duration: 120 } }
 
                 Text {
                     anchors.centerIn: parent
                     text:             "←"
-                    color:            Theme.accent
+                    color:            Theme.accentHover
                     font.pixelSize:   Theme.fontLg
                 }
 
@@ -61,7 +70,7 @@ Rectangle {
             color:            Theme.textPrimary
             font.pixelSize:   Theme.fontLg
             font.family:      Theme.fontFamily
-            font.weight:      Font.Medium
+            font.weight:      Font.DemiBold
             elide:            Text.ElideRight
         }
     }
