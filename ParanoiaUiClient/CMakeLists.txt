@@ -39,6 +39,10 @@ qt_add_qml_module(Paranoia
     src/adminStorage.cpp
     src/ClientBackend.h
     src/ClientBackend.cpp
+    src/QrCodeUtils.cpp
+    src/QrCodeUtils.hpp
+    src/Utils.cpp
+    src/Utils.hpp
     QML_FILES
     ui/Main.qml
     ui/Theme.qml
@@ -48,7 +52,6 @@ qt_add_qml_module(Paranoia
     ui/Components/QrCodeBox.qml
     ui/Components/ProgressStep.qml
     ui/Components/Pages/ClientRegistrationPage.qml
-    ui/Components/Pages/ConnectClientChoicePage.qml
     ui/Components/Pages/HelloPage.qml
     ui/Components/Pages/InstallServerPage.qml
     ui/Components/Pages/MainPage.qml

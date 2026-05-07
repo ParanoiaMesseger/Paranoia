@@ -38,7 +38,7 @@ fn generate_keypair() -> (String, String) {
     let mut priv_ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
     let mut pub_ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
     paranoia_ecies_generate_keypair(&mut priv_ptr, &mut pub_ptr);
-    let priv_b64 = take_string(priv_ptr).expect("privkey");
+    let priv_b64 = take_string(priv_ptr).expect("private_key");
     let pub_b64 = take_string(pub_ptr).expect("pubkey");
     (priv_b64, pub_b64)
 }
@@ -49,18 +49,18 @@ fn ecies_generate_keypair_returns_valid_32_byte_keys() {
 
     let priv_bytes = base64::engine::general_purpose::STANDARD
         .decode(&priv_b64)
-        .expect("valid base64 privkey");
+        .expect("valid base64 private_key");
     let pub_bytes = base64::engine::general_purpose::STANDARD
         .decode(&pub_b64)
         .expect("valid base64 pubkey");
 
-    assert_eq!(priv_bytes.len(), 32, "privkey must be 32 bytes");
+    assert_eq!(priv_bytes.len(), 32, "private_key must be 32 bytes");
     assert_eq!(pub_bytes.len(), 32, "pubkey must be 32 bytes");
     assert_ne!(priv_b64, pub_b64, "priv and pub must differ");
 }
 
 #[test]
-fn ecies_pubkey_derives_from_privkey() {
+fn ecies_pubkey_derives_from_private_key() {
     let (priv_b64, pub_b64) = generate_keypair();
 
     let derived = take_string(paranoia_ecies_pubkey(cs(&priv_b64).as_ptr()))

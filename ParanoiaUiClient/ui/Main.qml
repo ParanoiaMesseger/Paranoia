@@ -19,6 +19,14 @@ ApplicationWindow {
         }
     }
 
+    onClosing: function(close) {
+        if (stackView.depth > 1) {
+            close.accepted = false   // не закрываем приложение
+            stackView.pop()          // вызываем свою логику "назад"
+        }
+        // если depth == 1, close.accepted = true по умолчанию → выход
+    }
+
     // Авто-навигация при восстановлении сессии из сохранённых данных
     Connections {
         target: Backend

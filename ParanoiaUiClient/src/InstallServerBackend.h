@@ -56,8 +56,6 @@ private slots:
     void on_connected();
     void on_disconnected();
     void on_connectionError(const QString &reason);
-    void on_scriptStarted(const QString &scriptPath);
-    void on_scriptOutput(const QString &text);
     void on_scriptFinished(int exitCode);
     void on_scriptError(const QString &reason);
 
@@ -69,9 +67,6 @@ private:
 
     std::unique_ptr<ClientSSH> ssh;
     QString m_domain;
-    QString m_ip;
-    QString m_username;
-    QString m_password;
     QString private_admin_key = "private key";
     QString public_admin_key  = "public key";
     int m_port                = 1455;

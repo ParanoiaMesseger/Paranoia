@@ -59,7 +59,7 @@ pub struct ExportServer {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExportAdminServer {
     pub url: String,
-    pub admin_privkey_b64: String,
+    pub admin_private_key_b64: String,
 }
 
 /// Тип профиля экспорта (X1c).
@@ -154,7 +154,7 @@ pub fn validate_export_payload(payload: &ExportPayload) -> Result<ExportPayloadS
         if admin.url.trim().is_empty() {
             bail!("empty export admin server url");
         }
-        decode_fixed_b64(&admin.admin_privkey_b64, 32)
+        decode_fixed_b64(&admin.admin_private_key_b64, 32)
             .context("invalid export admin private key")?;
     }
 
@@ -164,7 +164,7 @@ pub fn validate_export_payload(payload: &ExportPayload) -> Result<ExportPayloadS
 // ── Генерация device keypair ─────────────────────────────────────────────────
 
 /// Сгенерировать X25519 device keypair для шифрования экспорта.
-/// Возвращает (privkey_bytes, pubkey_bytes).
+/// Возвращает (private_key_bytes, pubkey_bytes).
 pub fn generate_device_keypair() -> ([u8; 32], [u8; 32]) {
     let mut priv_bytes = [0u8; 32];
     rand::fill(&mut priv_bytes);
@@ -174,7 +174,7 @@ pub fn generate_device_keypair() -> ([u8; 32], [u8; 32]) {
 }
 
 /// Вывести публичный ключ из приватного.
-pub fn pubkey_from_privkey(priv_bytes: &[u8; 32]) -> [u8; 32] {
+pub fn pubkey_from_private_key(priv_bytes: &[u8; 32]) -> [u8; 32] {
     *PublicKey::from(&StaticSecret::from(*priv_bytes)).as_bytes()
 }
 
@@ -301,9 +301,9 @@ mod tests {
     }
 
     #[test]
-    fn pubkey_derived_from_privkey() {
+    fn pubkey_derived_from_private_key() {
         let (priv_bytes, pub_bytes) = generate_device_keypair();
-        assert_eq!(pubkey_from_privkey(&priv_bytes), pub_bytes);
+        assert_eq!(pubkey_from_private_key(&priv_bytes), pub_bytes);
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
             }],
             admin_servers: vec![ExportAdminServer {
                 url: "https://server.example.com".into(),
-                admin_privkey_b64: B64.encode([4u8; 32]),
+                admin_private_key_b64: B64.encode([4u8; 32]),
             }],
         };
 
@@ -417,7 +417,7 @@ mod tests {
             servers: vec![],
             admin_servers: vec![ExportAdminServer {
                 url: "https://server.example.com".into(),
-                admin_privkey_b64: B64.encode([1u8; 31]),
+                admin_private_key_b64: B64.encode([1u8; 31]),
             }],
         };
 

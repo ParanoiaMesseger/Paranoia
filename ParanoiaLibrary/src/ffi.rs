@@ -724,17 +724,17 @@ pub extern "C" fn paranoia_free_string(s: *mut c_char) {
 // ── ECIES device keypair & шифрование экспорта ───────────────────────────────
 
 /// Сгенерировать X25519 device keypair для шифрования экспорта.
-/// out_privkey и out_pubkey заполняются base64-строками (освободить через paranoia_free_string).
+/// out_private_key и out_pubkey заполняются base64-строками (освободить через paranoia_free_string).
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_ecies_generate_keypair(
-    out_privkey: *mut *mut c_char,
+    out_private_key: *mut *mut c_char,
     out_pubkey: *mut *mut c_char,
 ) {
     let (priv_bytes, pub_bytes) = crate::export::generate_device_keypair();
     let priv_b64 = base64::engine::general_purpose::STANDARD.encode(priv_bytes);
     let pub_b64 = base64::engine::general_purpose::STANDARD.encode(pub_bytes);
     unsafe {
-        *out_privkey = CString::new(priv_b64).unwrap().into_raw();
+        *out_private_key = CString::new(priv_b64).unwrap().into_raw();
         *out_pubkey = CString::new(pub_b64).unwrap().into_raw();
     }
 }
@@ -742,8 +742,8 @@ pub extern "C" fn paranoia_ecies_generate_keypair(
 /// Вывести публичный ключ устройства из base64-приватного ключа.
 /// Возвращает base64-строку или NULL при ошибке. Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
-pub extern "C" fn paranoia_ecies_pubkey(privkey_b64: *const c_char) -> *mut c_char {
-    let priv_b64 = match cstr_arg(privkey_b64) {
+pub extern "C" fn paranoia_ecies_pubkey(private_key_b64: *const c_char) -> *mut c_char {
+    let priv_b64 = match cstr_arg(private_key_b64) {
         Ok(v) => v,
         Err(_) => {
             set_last_error("invalid_argument");
@@ -761,7 +761,7 @@ pub extern "C" fn paranoia_ecies_pubkey(privkey_b64: *const c_char) -> *mut c_ch
             return std::ptr::null_mut();
         }
     };
-    let pub_bytes = crate::export::pubkey_from_privkey(&priv_bytes);
+    let pub_bytes = crate::export::pubkey_from_private_key(&priv_bytes);
     string_to_c(base64::engine::general_purpose::STANDARD.encode(pub_bytes))
 }
 
@@ -810,16 +810,16 @@ pub extern "C" fn paranoia_ecies_encrypt(
 }
 
 /// Расшифровать JSON-конверт EciesEnvelope приватным ключом устройства.
-/// device_privkey_b64 — base64 X25519 приватный ключ (32 байта).
+/// device_private_key_b64 — base64 X25519 приватный ключ (32 байта).
 /// envelope_json — JSON-конверт, полученный от paranoia_ecies_encrypt.
 /// Возвращает исходную UTF-8 строку (plaintext) или NULL при ошибке.
 /// Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_ecies_decrypt(
-    device_privkey_b64: *const c_char,
+    device_private_key_b64: *const c_char,
     envelope_json: *const c_char,
 ) -> *mut c_char {
-    let priv_b64 = match cstr_arg(device_privkey_b64) {
+    let priv_b64 = match cstr_arg(device_private_key_b64) {
         Ok(v) => v,
         Err(_) => {
             set_last_error("invalid_argument");

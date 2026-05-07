@@ -46,7 +46,4 @@ QtObject {
     readonly property string fontFamily: "Segoe UI"
     readonly property string monoFamily: "monospace"
 
-    // ── Brand assets ─────────────────────────────────────
-    readonly property url logoSymbol: "qrc:/logo_symbol_animated.svg"
-    readonly property url logoLockupAnimated: "qrc:/logo_lockup_animated.svg"
 }

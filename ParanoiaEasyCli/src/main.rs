@@ -9,7 +9,7 @@ use paranoia_lib::{
     export::{
         EXPORT_PAYLOAD_VERSION, ExportAdminServer, ExportDialogue, ExportKeyEntry, ExportPayload,
         ExportProfileType, ExportServer, ecies_decrypt, ecies_encrypt, generate_device_keypair,
-        pubkey_from_privkey, validate_export_payload,
+        pubkey_from_private_key, validate_export_payload,
     },
 };
 use rpassword::read_password;
@@ -34,7 +34,7 @@ const MAX_EXPORT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DeviceKeyFile {
-    privkey_b64: String,
+    private_key_b64: String,
     pubkey_b64: String,
 }
 
@@ -123,8 +123,8 @@ fn load_or_create_device_key() -> Result<DeviceKeyFile> {
         let data = fs::read(path).context("failed to read DEVICE_KEY")?;
         let key_file: DeviceKeyFile =
             serde_json::from_slice(&data).context("failed to parse DEVICE_KEY")?;
-        let priv_bytes = validate_b64_32(&key_file.privkey_b64, "device private key")?;
-        let expected_pub = B64.encode(pubkey_from_privkey(&priv_bytes));
+        let priv_bytes = validate_b64_32(&key_file.private_key_b64, "device private key")?;
+        let expected_pub = B64.encode(pubkey_from_private_key(&priv_bytes));
         if key_file.pubkey_b64.trim() != expected_pub {
             return Err(anyhow!("DEVICE_KEY public key does not match private key"));
         }
@@ -133,7 +133,7 @@ fn load_or_create_device_key() -> Result<DeviceKeyFile> {
 
     let (priv_bytes, pub_bytes) = generate_device_keypair();
     let key_file = DeviceKeyFile {
-        privkey_b64: B64.encode(priv_bytes),
+        private_key_b64: B64.encode(priv_bytes),
         pubkey_b64: B64.encode(pub_bytes),
     };
     let data = serde_json::to_vec_pretty(&key_file).context("failed to serialize DEVICE_KEY")?;
@@ -468,11 +468,11 @@ fn cmd_export(
     }
 
     if export_includes_admin(profile) {
-        let admin_privkey_b64 = read_encrypted_secret_b64(ADMIN_SECRETS, "ADMIN_SECRETS")?;
-        AdminKeyPair::from_secret_b64(&admin_privkey_b64).context("invalid admin private key")?;
+        let admin_private_key_b64 = read_encrypted_secret_b64(ADMIN_SECRETS, "ADMIN_SECRETS")?;
+        AdminKeyPair::from_secret_b64(&admin_private_key_b64).context("invalid admin private key")?;
         payload.admin_servers.push(ExportAdminServer {
             url: server_url.to_string(),
-            admin_privkey_b64,
+            admin_private_key_b64,
         });
     }
 
@@ -580,7 +580,7 @@ fn maybe_import_current_admin(
         return Ok(());
     };
 
-    save_admin_secret(&admin.admin_privkey_b64)?;
+    save_admin_secret(&admin.admin_private_key_b64)?;
     stats.admin_servers += 1;
     if payload.admin_servers.len() > 1 {
         stats.skipped += payload.admin_servers.len() - 1;
@@ -597,7 +597,7 @@ fn cmd_import(server_url: &str, file: PathBuf) -> Result<()> {
     let envelope =
         fs::read_to_string(&file).with_context(|| format!("failed to read {}", file.display()))?;
     let device = load_or_create_device_key()?;
-    let device_priv = validate_b64_32(&device.privkey_b64, "device private key")?;
+    let device_priv = validate_b64_32(&device.private_key_b64, "device private key")?;
     let plaintext =
         ecies_decrypt(&device_priv, &envelope).context("failed to decrypt export file")?;
     let payload: ExportPayload =

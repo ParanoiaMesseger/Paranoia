@@ -16,7 +16,6 @@
 #include <sys/select.h>
 #endif
 
-#include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
 #include <QRegularExpression>
@@ -29,39 +28,34 @@
 
 Q_DECLARE_METATYPE(SshConnectionParams)
 
-namespace {
+namespace
+{
 #if defined(_WIN32)
-const SshSocket invalidSocket = INVALID_SOCKET;
+    const SshSocket invalidSocket = INVALID_SOCKET;
 
-QString socketErrorString()
-{
-    return QString("WinSock error %1").arg(WSAGetLastError());
-}
+    QString socketErrorString() { return QString("WinSock error %1").arg(WSAGetLastError()); }
 
-void closeSocket(SshSocket socket) { closesocket(socket); }
+    void closeSocket(SshSocket socket) { closesocket(socket); }
 
-void setSocketTimeout(SshSocket socket, int timeoutMs)
-{
-    DWORD timeout = static_cast<DWORD>(timeoutMs);
-    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
-}
+    void setSocketTimeout(SshSocket socket, int timeoutMs)
+    {
+        DWORD timeout = static_cast<DWORD>(timeoutMs);
+        setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+        setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+    }
 #else
-const SshSocket invalidSocket = -1;
+    const SshSocket invalidSocket = -1;
 
-QString socketErrorString()
-{
-    return QString::fromLocal8Bit(std::strerror(errno));
-}
+    QString socketErrorString() { return QString::fromLocal8Bit(std::strerror(errno)); }
 
-void closeSocket(SshSocket socket) { ::close(socket); }
+    void closeSocket(SshSocket socket) { ::close(socket); }
 
-void setSocketTimeout(SshSocket socket, int timeoutMs)
-{
-    timeval tv{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
-    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-}
+    void setSocketTimeout(SshSocket socket, int timeoutMs)
+    {
+        timeval tv{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
+        setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
 #endif
 }
 
@@ -74,8 +68,6 @@ ClientSSH::ClientSSH(QObject *parent) : QObject(parent), thread_(new QThread(thi
     connect(worker_, &SshWorker::connected, this, &ClientSSH::connected);
     connect(worker_, &SshWorker::disconnected, this, &ClientSSH::disconnected);
     connect(worker_, &SshWorker::connectionError, this, &ClientSSH::connectionError);
-    connect(worker_, &SshWorker::scriptStarted, this, &ClientSSH::scriptStarted);
-    connect(worker_, &SshWorker::scriptOutput, this, &ClientSSH::scriptOutput);
     connect(worker_, &SshWorker::scriptFinished, this, &ClientSSH::scriptFinished);
     connect(worker_, &SshWorker::scriptError, this, &ClientSSH::scriptError);
 
@@ -125,17 +117,13 @@ QByteArray ClientSSH::getScriptContent(const QString &path)
     return f.readAll();
 }
 
-void ClientSSH::runScript(QByteArray scriptContent, const QString &localScriptPath)
+void ClientSSH::runScript(QByteArray scriptContent)
 {
-    emit _runScriptRequested(scriptContent, localScriptPath);
+    if (scriptContent.isEmpty()) return;
+    emit _runScriptRequested(scriptContent);
 }
 
-void ClientSSH::runScript(const QString &path)
-{
-    auto contnet = getScriptContent(path);
-    if (contnet.isEmpty()) return;
-    emit _runScriptRequested(contnet, path);
-}
+void ClientSSH::runScriptByPath(const QString &path) { emit _runScriptRequested(getScriptContent(path)); }
 
 void ClientSSH::disconnectFromHost() { emit _disconnectRequested(); }
 
@@ -182,17 +170,13 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
 {
     cleanup();
     qDebug() << "connectToHost : " << params.host;
-    params_ = params;
-
 #if defined(_WIN32)
     if (!winsockReady_) ERR_CONNECT("WinSock не инициализирован");
 #endif
-
     addrinfo hints{}, *res = nullptr;
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     QString portStr   = QString::number(params.port);
-
     if (getaddrinfo(params.host.toUtf8(), portStr.toUtf8(), &hints, &res) != 0)
         ERR_CONNECT(QString("Не удалось разрешить хост: %1").arg(params.host));
     sock_ = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -201,9 +185,7 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
         freeaddrinfo(res);
         ERR_CONNECT(QString("Ошибка создания сокета: %1").arg(reason));
     }
-
     setSocketTimeout(sock_, params.timeoutMs);
-
 #if defined(_WIN32)
     const int connectResult = ::connect(sock_, res->ai_addr, static_cast<int>(res->ai_addrlen));
 #else
@@ -241,7 +223,7 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
     emit connected();
 }
 
-void SshWorker::runScript(QByteArray scriptContent, const QString &localScriptPath)
+void SshWorker::runScript(QByteArray scriptContent)
 {
     std::cout << "RUN>" << scriptContent.toStdString();
     std::cout.flush();
@@ -295,8 +277,6 @@ void SshWorker::runScript(QByteArray scriptContent, const QString &localScriptPa
     }
     libssh2_channel_send_eof(ch);
 
-    emit scriptStarted(localScriptPath);
-
     char buf[4096];
     while (true) {
         rc = libssh2_channel_read(ch, buf, sizeof(buf));
@@ -307,7 +287,6 @@ void SshWorker::runScript(QByteArray scriptContent, const QString &localScriptPa
         if (rc <= 0) break;
         std::cout << "$>" << QString::fromUtf8(buf, rc).toStdString();
         std::cout.flush();
-        emit scriptOutput(QString::fromUtf8(buf, rc));
     }
 
     libssh2_channel_wait_eof(ch);

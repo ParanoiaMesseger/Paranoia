@@ -62,6 +62,12 @@ Column {
             // ── Убираем системное выделение ──
             selectionColor:      Theme.accentDark
             selectedTextColor:   Theme.textPrimary
+
+            // ── Фикс Android Material: сбрасываем паддинги под floating label ──
+            topPadding: 0
+            bottomPadding: 0
+            leftPadding: 0
+            rightPadding: 0
         }
     }
 

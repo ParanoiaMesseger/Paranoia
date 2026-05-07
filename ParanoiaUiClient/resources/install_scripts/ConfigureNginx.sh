@@ -24,7 +24,7 @@ server {
     server_name {DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/{DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{DOMAIN}/privkey.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{DOMAIN}/private_key.pem;
 
     client_max_body_size 1024M;
 

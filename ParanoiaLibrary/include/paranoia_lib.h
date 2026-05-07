@@ -102,13 +102,13 @@ char *paranoia_qr_confirm_exchange(const char *local_state_json,
 // Принимающее устройство расшифровывает своим приватным ключом.
 
 // Сгенерировать X25519 device keypair.
-// out_privkey, out_pubkey заполняются base64-строками (32 байта каждый).
+// out_private_key, out_pubkey заполняются base64-строками (32 байта каждый).
 // Освобождать через paranoia_free_string.
-void paranoia_ecies_generate_keypair(char **out_privkey, char **out_pubkey);
+void paranoia_ecies_generate_keypair(char **out_private_key, char **out_pubkey);
 
 // Вывести публичный ключ из base64-приватного ключа.
 // Возвращает base64-строку или NULL при ошибке. Освободить через paranoia_free_string.
-char *paranoia_ecies_pubkey(const char *privkey_b64);
+char *paranoia_ecies_pubkey(const char *private_key_b64);
 
 // Зашифровать строку (JSON payload экспорта) на публичном ключе принимающего.
 // receiver_pubkey_b64 — base64 X25519 публичный ключ принимающего устройства.
@@ -118,12 +118,12 @@ char *paranoia_ecies_pubkey(const char *privkey_b64);
 char *paranoia_ecies_encrypt(const char *receiver_pubkey_b64, const char *plaintext);
 
 // Расшифровать JSON-конверт EciesEnvelope приватным ключом устройства.
-// device_privkey_b64 — base64 X25519 приватный ключ устройства.
+// device_private_key_b64 — base64 X25519 приватный ключ устройства.
 // envelope_json — JSON-конверт от paranoia_ecies_encrypt.
 // Возвращает исходную UTF-8 строку или NULL при ошибке.
 // Освободить через paranoia_free_string.
 // Ошибки: "ecies_decrypt_error", "ecies_unsupported_version", "invalid_device_key".
-char *paranoia_ecies_decrypt(const char *device_privkey_b64, const char *envelope_json);
+char *paranoia_ecies_decrypt(const char *device_private_key_b64, const char *envelope_json);
 
 // ── Ошибки ────────────────────────────────────────────────────────────────────
 // Последняя ошибка текущего потока. Указатель действителен до следующего

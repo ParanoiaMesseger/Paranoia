@@ -9,7 +9,6 @@ Rectangle {
     color: Theme.bgPrimary
 
     property bool hasAdminAccess: Backend.hasAdminAccess
-    property bool hasUserAccess:  Backend.loggedIn
     property string qrExchangePeer: ""
     property bool qrExchangeUpdateExisting: false
 
@@ -47,12 +46,12 @@ Rectangle {
         fileMode: FileDialog.OpenFile
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
         onAccepted: {
-            const decoded = Backend.decodeQrCodeFromImage(root.localFilePath(selectedFile))
+            const decoded = QrCodeUtils.decodeFromImage(root.localFilePath(selectedFile))
             if (!decoded.ok) {
                 regFeedback.text = decoded.error || "QR-код не прочитан."
                 return
             }
-            const parsed = Backend.registrationPublicKeyFromQr(decoded.text)
+            const parsed = QrCodeUtils.registrationPublicKeyFromQr(decoded.text)
             if (!parsed.ok) {
                 regFeedback.text = parsed.error || "QR-код не содержит публичный ключ."
                 return
@@ -68,7 +67,7 @@ Rectangle {
         fileMode: FileDialog.OpenFile
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
         onAccepted: {
-            const decoded = Backend.decodeQrCodeFromImage(root.localFilePath(selectedFile))
+            const decoded = QrCodeUtils.decodeFromImage(root.localFilePath(selectedFile))
             if (!decoded.ok) {
                 qrExchangeFeedback.text = decoded.error || "QR-код не прочитан."
                 return
@@ -1482,7 +1481,7 @@ Rectangle {
                             regFeedback.text = "Заполните все поля."
                             return
                         }
-                        const parsed = Backend.registrationPublicKeyFromQr(pubkey)
+                        const parsed = QrCodeUtils.registrationPublicKeyFromQr(pubkey)
                         if (!parsed.ok) {
                             regFeedback.text = parsed.error || "Некорректный публичный ключ."
                             return

@@ -10,7 +10,7 @@ Rectangle {
     property int boxSize: 220
 
     readonly property string qrSource: payload.length > 0
-        ? Backend.qrCodePngDataUrl(payload, 768)
+        ? QrCodeUtils.pngDataUrl(payload, 768)
         : ""
 
     implicitWidth: boxSize

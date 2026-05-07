@@ -1,5 +1,7 @@
 #include "ClientBackend.h"
-#include <QJsonDocument>
+
+#include "Utils.hpp"
+
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -7,220 +9,9 @@
 #include <QThreadPool>
 #include <QPointer>
 #include <QDebug>
-#include <QFile>
 #include <QDir>
 #include <QFileInfo>
-#include <QDateTime>
-#include <QBuffer>
-#include <QImage>
-#include <QPainter>
-#include <QUrl>
-#include <ReadBarcode.h>
-#include <Barcode.h>
-#include <ImageView.h>
-#include <ReaderOptions.h>
-#include <qrcodegen.hpp>
 #include <algorithm>
-#include <exception>
-
-namespace {
-constexpr qint64 MaxExportFileBytes = 16 * 1024 * 1024;
-constexpr int MaxImportServers = 16;
-constexpr int MaxImportAdminServers = 16;
-constexpr int MaxImportDialogues = 1024;
-constexpr int MaxImportKeyEntries = 8192;
-
-void setOwnerOnlyPermissions(const QString &path);
-
-QString takeRustString(char *ptr)
-{
-    if (!ptr) return QString();
-    QString value = QString::fromUtf8(ptr);
-    paranoia_free_string(ptr);
-    return value;
-}
-
-QString lastRustError()
-{
-    const char *err = paranoia_last_error();
-    return err ? QString::fromUtf8(err) : QString();
-}
-
-QVariantMap errorResult(const QString &message)
-{
-    return QVariantMap{{"ok", false}, {"error", message}};
-}
-
-QString compactJson(const QJsonValue &value)
-{
-    if (value.isObject()) {
-        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
-    }
-    if (value.isArray()) {
-        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
-    }
-    return QString();
-}
-
-bool isSupportedExportProfile(const QString &profileType)
-{
-    return profileType == "client" || profileType == "admin" || profileType == "full";
-}
-
-QString normalizedServerUrl(const QString &server)
-{
-    QString url = server.trimmed();
-    if (url.isEmpty()) return QString();
-    if (!url.startsWith("http://") && !url.startsWith("https://"))
-        url = "https://" + url;
-    while (url.endsWith('/') && !url.endsWith("://"))
-        url.chop(1);
-    return url;
-}
-
-QString profileIdFor(const QString &server, const QString &username)
-{
-    const QByteArray input = normalizedServerUrl(server).toUtf8() + "\n" + username.trimmed().toUtf8();
-    return QString::fromLatin1(QCryptographicHash::hash(input, QCryptographicHash::Sha256).toHex());
-}
-
-QString profilesRootPath()
-{
-    return QStringLiteral("profiles");
-}
-
-QString profilesManifestPath()
-{
-    return QStringLiteral("profiles.json");
-}
-
-QString profileDirPath(const QString &profileId)
-{
-    return QDir(profilesRootPath()).filePath(profileId);
-}
-
-QString profileClientPath(const QString &profileId)
-{
-    return QDir(profileDirPath(profileId)).filePath(QStringLiteral("client.json"));
-}
-
-QString profileDialogsPath(const QString &profileId)
-{
-    return QDir(profileDirPath(profileId)).filePath(QStringLiteral("dialogs.json"));
-}
-
-QString profileDbPath(const QString &profileId)
-{
-    return QDir(profileDirPath(profileId)).filePath(QStringLiteral("paranoia.db"));
-}
-
-bool ensureProfileDir(const QString &profileId)
-{
-    QDir root;
-    if (!root.exists(profilesRootPath()) && !root.mkpath(profilesRootPath()))
-        return false;
-    return root.mkpath(profileDirPath(profileId));
-}
-
-QJsonObject readJsonObjectFile(const QString &path)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) return {};
-    const auto doc = QJsonDocument::fromJson(file.readAll());
-    return doc.isObject() ? doc.object() : QJsonObject{};
-}
-
-QJsonArray readJsonArrayFile(const QString &path)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) return {};
-    const auto doc = QJsonDocument::fromJson(file.readAll());
-    return doc.isArray() ? doc.array() : QJsonArray{};
-}
-
-void writeJsonObjectFile(const QString &path, const QJsonObject &obj)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-    file.write(QJsonDocument(obj).toJson());
-    file.close();
-    setOwnerOnlyPermissions(path);
-}
-
-QJsonObject loadProfilesManifest()
-{
-    QJsonObject manifest = readJsonObjectFile(profilesManifestPath());
-    if (!manifest.value("profiles").isArray())
-        manifest["profiles"] = QJsonArray{};
-    return manifest;
-}
-
-void saveProfilesManifest(const QJsonObject &manifest)
-{
-    writeJsonObjectFile(profilesManifestPath(), manifest);
-}
-
-void upsertProfileManifest(const QString &profileId,
-                           const QString &server,
-                           const QString &username,
-                           bool makeLast)
-{
-    QJsonObject manifest = loadProfilesManifest();
-    QJsonArray profiles = manifest.value("profiles").toArray();
-    bool found = false;
-    for (int i = 0; i < profiles.size(); ++i) {
-        QJsonObject obj = profiles.at(i).toObject();
-        if (obj.value("id").toString() != profileId) continue;
-        obj["server"] = normalizedServerUrl(server);
-        obj["username"] = username;
-        obj["updated_at"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-        profiles[i] = obj;
-        found = true;
-        break;
-    }
-    if (!found) {
-        QJsonObject obj;
-        obj["id"] = profileId;
-        obj["server"] = normalizedServerUrl(server);
-        obj["username"] = username;
-        obj["updated_at"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-        profiles.append(obj);
-    }
-    manifest["profiles"] = profiles;
-    if (makeLast)
-        manifest["last_profile_id"] = profileId;
-    saveProfilesManifest(manifest);
-}
-
-bool decodeFixedBase64(const QString &value, int expectedSize, QByteArray *out = nullptr)
-{
-    const QByteArray decoded = QByteArray::fromBase64(
-        value.trimmed().toLatin1(),
-        QByteArray::Base64Encoding | QByteArray::AbortOnBase64DecodingErrors
-    );
-    if (decoded.size() != expectedSize) return false;
-    if (out) *out = decoded;
-    return true;
-}
-
-quint64 readSeq(const QJsonValue &value, bool *ok)
-{
-    bool parsed = false;
-    quint64 seq = 0;
-    if (value.isString()) {
-        seq = value.toString().toULongLong(&parsed);
-    } else {
-        seq = value.toVariant().toULongLong(&parsed);
-    }
-    if (ok) *ok = parsed && seq > 0;
-    return seq;
-}
-
-void setOwnerOnlyPermissions(const QString &path)
-{
-    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-}
-}
 
 ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 {
@@ -248,20 +39,16 @@ bool ClientBackend::isLoggedIn() const
 }
 
 QString ClientBackend::username() const { return m_username; }
+
 QString ClientBackend::server() const { return m_server; }
 
-bool ClientBackend::hasAdminAccess() const
-{
-    return !admin::Admin::admins.empty();
-}
-
-QString ClientBackend::activePeer() const { return m_activePeer; }
+bool ClientBackend::hasAdminAccess() const { return !admin::Admin::admins.empty(); }
 
 QString ClientBackend::devicePubkey() const
 {
-    if (m_devicePrivkey.isEmpty()) return QString();
+    if (m_devicePrivkey.isEmpty()) return {};
     char *pub = paranoia_ecies_pubkey(m_devicePrivkey.toUtf8().constData());
-    if (!pub) return QString();
+    if (!pub) return {};
     QString result = QString::fromUtf8(pub);
     paranoia_free_string(pub);
     return result;
@@ -279,150 +66,43 @@ void ClientBackend::generateKeyPair()
         QString pubkeyStr = pubkey ? QString::fromUtf8(pubkey) : QString();
         paranoia_free_string(secret);
         paranoia_free_string(pubkey);
-        QMetaObject::invokeMethod(this, [this, pubkeyStr, secretStr]() {
-            emit keyPairGenerated(pubkeyStr, secretStr);
-        });
+        QMetaObject::invokeMethod(this,
+                                  [this, pubkeyStr, secretStr]() { emit keyPairGenerated(pubkeyStr, secretStr); });
     });
-}
-
-QString ClientBackend::qrCodePngDataUrl(const QString &payload, int size) const
-{
-    const QByteArray data = payload.toUtf8();
-    if (data.isEmpty()) return QString();
-
-    const int requestedSize = std::clamp(size, 128, 2048);
-    try {
-        const std::vector<std::uint8_t> bytes(data.cbegin(), data.cend());
-        const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeBinary(
-            bytes,
-            qrcodegen::QrCode::Ecc::LOW
-        );
-        constexpr int border = 4;
-        const int modules = qr.getSize() + border * 2;
-        const int scale = std::max(1, requestedSize / modules);
-        const int imageSize = modules * scale;
-
-        QImage image(imageSize, imageSize, QImage::Format_RGB32);
-        image.fill(Qt::white);
-
-        QPainter painter(&image);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(Qt::black);
-        for (int y = 0; y < qr.getSize(); ++y) {
-            for (int x = 0; x < qr.getSize(); ++x) {
-                if (qr.getModule(x, y)) {
-                    painter.drawRect((x + border) * scale,
-                                     (y + border) * scale,
-                                     scale,
-                                     scale);
-                }
-            }
-        }
-        painter.end();
-
-        QByteArray png;
-        QBuffer buffer(&png);
-        buffer.open(QIODevice::WriteOnly);
-        if (!image.save(&buffer, "PNG")) return QString();
-        return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
-    } catch (const std::exception &e) {
-        qWarning() << "QR generation failed:" << e.what();
-        return QString();
-    }
-}
-
-QVariantMap ClientBackend::decodeQrCodeFromImage(const QString &filePath) const
-{
-    QString path = filePath.trimmed();
-    if (path.startsWith(QStringLiteral("file://")))
-        path = QUrl(path).toLocalFile();
-    if (path.isEmpty())
-        return errorResult("Не указан файл изображения с QR-кодом.");
-
-    QImage image(path);
-    if (image.isNull())
-        return errorResult("Не удалось открыть изображение с QR-кодом.");
-
-    QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
-    try {
-        ZXing::ImageView view(gray.constBits(),
-                              gray.width(),
-                              gray.height(),
-                              ZXing::ImageFormat::Lum,
-                              gray.bytesPerLine());
-        ZXing::ReaderOptions options;
-        options.setFormats(ZXing::BarcodeFormat::QRCode)
-               .setTryHarder(true)
-               .setTryRotate(true)
-               .setTryInvert(true);
-        const auto barcodes = ZXing::ReadBarcodes(view, options);
-        for (const auto &barcode : barcodes) {
-            if (barcode.isValid()) {
-                return QVariantMap{{"ok", true}, {"text", QString::fromStdString(barcode.text())}};
-            }
-        }
-        return errorResult("QR-код на изображении не найден.");
-    } catch (const std::exception &e) {
-        return errorResult(QStringLiteral("Ошибка чтения QR-кода: ") + QString::fromUtf8(e.what()));
-    }
-}
-
-QVariantMap ClientBackend::registrationPublicKeyFromQr(const QString &payload) const
-{
-    QString text = payload.trimmed();
-    if (text.isEmpty())
-        return errorResult("QR-код не содержит данные регистрации.");
-
-    QJsonParseError parseError;
-    const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &parseError);
-    if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
-        const QJsonObject obj = doc.object();
-        text = obj.value(QStringLiteral("pubkey")).toString().trimmed();
-    }
-
-    if (!decodeFixedBase64(text, 32))
-        return errorResult("QR-код не содержит корректный публичный ключ base64.");
-    return QVariantMap{{"ok", true}, {"pubkey", text}};
 }
 
 // ── Client Login ──────────────────────────────────────────────────────────────
 
-void ClientBackend::loginClient(const QString &server, const QString &username, const QString &privkey)
+void ClientBackend::loginClient(const QString &server, const QString &username, const QString &private_key)
 {
-    const QString url = normalizedServerUrl(server);
+    const QString url             = Utils::normalizedServerUrl(server);
     const QString trimmedUsername = username.trimmed();
-    const QString profileId = profileIdFor(url, trimmedUsername);
-    if (!ensureProfileDir(profileId)) {
+    const QString profileId       = Utils::profileIdFor(url, trimmedUsername);
+    if (!Utils::ensureProfileDir(profileId)) {
         emit loginError("Не удалось подготовить каталог профиля.");
         return;
     }
-    const QString dbPath = profileDbPath(profileId);
+    const QString dbPath = Utils::profileDbPath(profileId);
 
-    QPointer<ClientBackend> self(this);
-    QThreadPool::globalInstance()->start([self, url, trimmedUsername, privkey, dbPath, profileId]() {
-        auto *handle = paranoia_client_new(
-            url.toUtf8().constData(),
-            trimmedUsername.toUtf8().constData(),
-            privkey.toUtf8().constData(),
-            dbPath.toUtf8().constData()
-        );
-        QMetaObject::invokeMethod(self, [self, handle, url, trimmedUsername, privkey, profileId]() {
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, url, trimmedUsername, private_key, dbPath, profileId]() {
+        auto *handle = paranoia_client_new(url.toUtf8().constData(), trimmedUsername.toUtf8().constData(),
+                                           private_key.toUtf8().constData(), dbPath.toUtf8().constData());
+        QMetaObject::invokeMethod(self, [self, handle, url, trimmedUsername, private_key, profileId]() {
             if (!self) {
                 if (handle) paranoia_client_free(handle);
                 return;
             }
             {
                 QMutexLocker locker(&self->m_handleMutex);
-                if (self->m_handle) {
-                    paranoia_client_free(self->m_handle);
-                }
+                if (self->m_handle) { paranoia_client_free(self->m_handle); }
                 self->m_handle = handle;
             }
             if (handle) {
-                self->m_server   = url;
-                self->m_username = trimmedUsername;
-                self->m_privkey  = privkey;
-                self->m_profileId = profileId;
+                self->m_server      = url;
+                self->m_username    = trimmedUsername;
+                self->m_private_key = private_key;
+                self->m_profileId   = profileId;
                 self->m_activePeer.clear();
                 self->m_messageCache.clear();
                 self->m_seenIds.clear();
@@ -437,43 +117,16 @@ void ClientBackend::loginClient(const QString &server, const QString &username, 
     });
 }
 
-// ── Admin Connect ─────────────────────────────────────────────────────────────
-
-void ClientBackend::connectAdmin(const QString &server, const QString &privkey)
-{
-    QByteArray keyBytes = QByteArray::fromBase64(privkey.toUtf8());
-    if (keyBytes.size() != 32) {
-        emit connectError("Неверный формат ключа (ожидается 32 байта в base64).");
-        return;
-    }
-
-    QString url = server;
-    if (!url.startsWith("http://") && !url.startsWith("https://"))
-        url = "https://" + url;
-
-    bool exists = false;
-    for (auto &a : admin::Admin::admins) {
-        if (a.domain == url) {
-            a.private_key = privkey;
-            exists = true;
-            break;
-        }
-    }
-    if (!exists)
-        admin::Admin::admins.push_back({url, privkey});
-    admin::Admin::saveAdmins();
-
-    emit adminStateChanged();
-    emit adminConnected();
-}
-
 // ── Register User (admin action) ──────────────────────────────────────────────
 
 void ClientBackend::registerUser(const QString &domain, const QString &username, const QString &pubkey)
 {
-    admin::Admin *found = nullptr;
+    const admin::Admin *found = nullptr;
     for (auto &a : admin::Admin::admins)
-        if (a.domain == domain) { found = &a; break; }
+        if (a.domain == domain) {
+            found = &a;
+            break;
+        }
 
     if (!found) {
         emit registerUserError("Нет прав администратора для этого сервера.");
@@ -482,8 +135,10 @@ void ClientBackend::registerUser(const QString &domain, const QString &username,
 
     found->regUser(username, pubkey).then([this](bool ok) {
         QMetaObject::invokeMethod(this, [this, ok]() {
-            if (ok) emit userRegistered();
-            else    emit registerUserError("Ошибка регистрации. Проверьте данные.");
+            if (ok)
+                emit userRegistered();
+            else
+                emit registerUserError("Ошибка регистрации. Проверьте данные.");
         });
     });
 }
@@ -491,9 +146,7 @@ void ClientBackend::registerUser(const QString &domain, const QString &username,
 // ── Dialogs Management ────────────────────────────────────────────────────────
 
 void ClientBackend::addDialog(const QString &peer, const QString &sharedSecret)
-{
-    upsertDialogKeyringEntry(peer.trimmed(), deriveKey(sharedSecret), 1, true, false);
-}
+{ upsertDialogKeyringEntry(peer.trimmed(), deriveKey(sharedSecret), 1, true, false); }
 
 void ClientBackend::updateDialogKey(const QString &peer, const QString &newSharedSecret)
 {
@@ -501,32 +154,22 @@ void ClientBackend::updateDialogKey(const QString &peer, const QString &newShare
     upsertDialogKeyringEntry(trimmedPeer, deriveKey(newSharedSecret), nextKeyStartSeq(trimmedPeer), false, false);
 }
 
-QVariantMap ClientBackend::createDialogKeyInvitation(const QString &peer)
+QVariantMap ClientBackend::createDialogKeyInvitation(const QString &peer) const
 {
     const QString trimmedPeer = peer.trimmed();
-    if (m_username.isEmpty() || trimmedPeer.isEmpty()) {
-        return errorResult("Не указан пользователь или собеседник.");
-    }
+    if (m_username.isEmpty() || trimmedPeer.isEmpty())
+        return Utils::errorResult("Не указан пользователь или собеседник.");
 
-    const QString bundleJson = takeRustString(paranoia_qr_create_invitation(
-        m_username.toUtf8().constData(),
-        trimmedPeer.toUtf8().constData()
-    ));
-    if (bundleJson.isEmpty()) {
-        return errorResult(lastRustError());
-    }
+    const QString bundleJson = Utils::takeRustString(
+        paranoia_qr_create_invitation(m_username.toUtf8().constData(), trimmedPeer.toUtf8().constData()));
+    if (bundleJson.isEmpty()) return Utils::lastRustErrorResult();
 
     const auto doc = QJsonDocument::fromJson(bundleJson.toUtf8());
-    if (!doc.isObject()) {
-        return errorResult("Некорректный JSON invitation.");
-    }
-    const auto obj = doc.object();
-    const QString stateJson = compactJson(obj.value("state"));
-    const QString payloadJson = compactJson(obj.value("payload"));
-    if (stateJson.isEmpty() || payloadJson.isEmpty()) {
-        return errorResult("Некорректный JSON invitation.");
-    }
-
+    if (!doc.isObject()) return Utils::errorResult("Некорректный JSON invitation.");
+    const auto obj            = doc.object();
+    const QString stateJson   = Utils::compactJson(obj.value("state"));
+    const QString payloadJson = Utils::compactJson(obj.value("payload"));
+    if (stateJson.isEmpty() || payloadJson.isEmpty()) return Utils::errorResult("Некорректный JSON invitation.");
     return QVariantMap{
         {"ok", true},
         {"peer", trimmedPeer},
@@ -537,34 +180,19 @@ QVariantMap ClientBackend::createDialogKeyInvitation(const QString &peer)
 
 QVariantMap ClientBackend::createDialogKeyResponse(const QString &invitationPayloadJson)
 {
-    if (m_username.isEmpty() || invitationPayloadJson.trimmed().isEmpty()) {
-        return errorResult("Нет invitation payload или имени пользователя.");
-    }
-
-    const QString bundleJson = takeRustString(paranoia_qr_create_response(
-        invitationPayloadJson.toUtf8().constData(),
-        m_username.toUtf8().constData()
-    ));
-    if (bundleJson.isEmpty()) {
-        return errorResult(lastRustError());
-    }
-
+    if (m_username.isEmpty() || invitationPayloadJson.trimmed().isEmpty())
+        return Utils::errorResult("Нет invitation payload или имени пользователя.");
+    const QString bundleJson = Utils::takeRustString(
+        paranoia_qr_create_response(invitationPayloadJson.toUtf8().constData(), m_username.toUtf8().constData()));
+    if (bundleJson.isEmpty()) { return Utils::lastRustErrorResult(); }
     const auto doc = QJsonDocument::fromJson(bundleJson.toUtf8());
-    if (!doc.isObject()) {
-        return errorResult("Некорректный JSON response.");
-    }
-    const auto obj = doc.object();
-    const QString stateJson = compactJson(obj.value("state"));
-    const QString payloadJson = compactJson(obj.value("payload"));
-    if (stateJson.isEmpty() || payloadJson.isEmpty()) {
-        return errorResult("Некорректный JSON response.");
-    }
-
+    if (!doc.isObject()) { return Utils::errorResult("Некорректный JSON response."); }
+    const auto obj            = doc.object();
+    const QString stateJson   = Utils::compactJson(obj.value("state"));
+    const QString payloadJson = Utils::compactJson(obj.value("payload"));
+    if (stateJson.isEmpty() || payloadJson.isEmpty()) return Utils::errorResult("Некорректный JSON response.");
     QVariantMap fingerprint = dialogKeyFingerprint(stateJson, invitationPayloadJson);
-    if (!fingerprint.value("ok").toBool()) {
-        return fingerprint;
-    }
-
+    if (!fingerprint.value("ok").toBool()) return fingerprint;
     return QVariantMap{
         {"ok", true},
         {"stateJson", stateJson},
@@ -575,59 +203,30 @@ QVariantMap ClientBackend::createDialogKeyResponse(const QString &invitationPayl
 
 QVariantMap ClientBackend::dialogKeyFingerprint(const QString &localStateJson, const QString &peerPayloadJson)
 {
-    if (localStateJson.trimmed().isEmpty() || peerPayloadJson.trimmed().isEmpty()) {
-        return errorResult("Нет state или payload для расчёта SAS.");
-    }
-
-    const QString fingerprint = takeRustString(paranoia_qr_fingerprint(
-        localStateJson.toUtf8().constData(),
-        peerPayloadJson.toUtf8().constData()
-    ));
-    if (fingerprint.isEmpty()) {
-        return errorResult(lastRustError());
-    }
-
+    if (localStateJson.trimmed().isEmpty() || peerPayloadJson.trimmed().isEmpty())
+        return Utils::errorResult("Нет state или payload для расчёта SAS.");
+    const QString fingerprint = Utils::takeRustString(
+        paranoia_qr_fingerprint(localStateJson.toUtf8().constData(), peerPayloadJson.toUtf8().constData()));
+    if (fingerprint.isEmpty()) return Utils::lastRustErrorResult();
     return QVariantMap{{"ok", true}, {"fingerprint", fingerprint}};
 }
 
-QVariantMap ClientBackend::confirmDialogKeyExchange(const QString &peer,
-                                                    const QString &localStateJson,
-                                                    const QString &peerPayloadJson,
-                                                    const QString &fingerprint,
-                                                    bool updateExisting)
+QVariantMap ClientBackend::confirmDialogKeyExchange(const QString &peer, const QString &localStateJson,
+                                                    const QString &peerPayloadJson, const QString &fingerprint,
+                                                    const bool updateExisting)
 {
     const QString trimmedPeer = peer.trimmed();
-    if (trimmedPeer.isEmpty()) {
-        return errorResult("Не указан собеседник.");
-    }
-
-    const QString completedJson = takeRustString(paranoia_qr_confirm_exchange(
-        localStateJson.toUtf8().constData(),
-        peerPayloadJson.toUtf8().constData(),
-        fingerprint.toUtf8().constData()
-    ));
-    if (completedJson.isEmpty()) {
-        return errorResult(lastRustError());
-    }
+    if (trimmedPeer.isEmpty()) return Utils::errorResult("Не указан собеседник.");
+    const QString completedJson = Utils::takeRustString(paranoia_qr_confirm_exchange(
+        localStateJson.toUtf8().constData(), peerPayloadJson.toUtf8().constData(), fingerprint.toUtf8().constData()));
+    if (completedJson.isEmpty()) return Utils::lastRustErrorResult();
 
     const auto doc = QJsonDocument::fromJson(completedJson.toUtf8());
-    if (!doc.isObject()) {
-        return errorResult("Некорректный JSON завершения обмена.");
-    }
-    const QByteArray sessionKey = QByteArray::fromBase64(
-        doc.object().value("session_key_b64").toString().toLatin1()
-    );
-    if (sessionKey.size() != 32) {
-        return errorResult("Некорректный ключ диалога.");
-    }
-
-    upsertDialogKeyringEntry(
-        trimmedPeer,
-        sessionKey,
-        updateExisting ? nextKeyStartSeq(trimmedPeer) : 1,
-        !updateExisting,
-        false
-    );
+    if (!doc.isObject()) return Utils::errorResult("Некорректный JSON завершения обмена.");
+    const QByteArray sessionKey = QByteArray::fromBase64(doc.object().value("session_key_b64").toString().toLatin1());
+    if (sessionKey.size() != 32) return Utils::errorResult("Некорректный ключ диалога.");
+    upsertDialogKeyringEntry(trimmedPeer, sessionKey, updateExisting ? nextKeyStartSeq(trimmedPeer) : 1,
+                             !updateExisting, false);
     return QVariantMap{
         {"ok", true},
         {"peer", trimmedPeer},
@@ -644,52 +243,12 @@ void ClientBackend::removeDialog(const QString &peer)
     saveDialogs();
 }
 
-bool ClientBackend::hasDialogKey(const QString &peer) const
-{
-    const Dialog *dlg = findDialog(peer);
-    return dlg != nullptr && !dlg->keyring.isEmpty();
-}
-
 QVariantList ClientBackend::getDialogs() const
 {
     QVariantList result;
-    for (const auto &d : m_dialogs) {
-        QVariantMap m;
-        m["peer"]    = d.peer;
-        m["lastMsg"] = d.lastMsg;
-        m["hasKey"]  = !d.keyring.isEmpty();
-        result.append(m);
-    }
+    for (const auto &[peer, keyring, lastMsg] : m_dialogs)
+        result.append(QVariantMap{{"peer", peer}, {"lastMsg", lastMsg}, {"hasKey", !keyring.isEmpty()}});
     return result;
-}
-
-QVariantList ClientBackend::getClientProfiles() const
-{
-    QVariantList result;
-    const QJsonArray profiles = loadProfilesManifest().value("profiles").toArray();
-    for (const auto &value : profiles) {
-        const QJsonObject obj = value.toObject();
-        QVariantMap item;
-        item["id"] = obj.value("id").toString();
-        item["server"] = obj.value("server").toString();
-        item["username"] = obj.value("username").toString();
-        item["active"] = (item["id"].toString() == m_profileId);
-        result.append(item);
-    }
-    return result;
-}
-
-void ClientBackend::switchClientProfile(const QString &profileId)
-{
-    const QJsonObject obj = readJsonObjectFile(profileClientPath(profileId.trimmed()));
-    const QString server = obj.value("server").toString();
-    const QString username = obj.value("username").toString();
-    const QString privkey = obj.value("privkey").toString();
-    if (server.isEmpty() || username.isEmpty() || privkey.isEmpty()) {
-        emit loginError("Профиль клиента не найден или повреждён.");
-        return;
-    }
-    loginClient(server, username, privkey);
 }
 
 QVariantList ClientBackend::getAdminServers() const
@@ -718,11 +277,8 @@ void ClientBackend::deleteDialogLocal(const QString &peer)
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        int rc = paranoia_delete_local_dialogue(
-            self->m_handle,
-            username.toUtf8().constData(),
-            peerCopy.toUtf8().constData()
-        );
+        int rc = paranoia_delete_local_dialogue(self->m_handle, username.toUtf8().constData(),
+                                                peerCopy.toUtf8().constData());
         QMetaObject::invokeMethod(self, [self, peerCopy, rc]() {
             if (!self) return;
             if (rc == 0) {
@@ -731,7 +287,7 @@ void ClientBackend::deleteDialogLocal(const QString &peer)
                 emit self->dialogDeleted(peerCopy);
                 emit self->messagesReceived({});
             } else {
-                QString err = QString::fromUtf8(paranoia_last_error());
+                const QString err = QString::fromUtf8(paranoia_last_error());
                 emit self->serverHistoryError("Ошибка удаления локальной истории: " + err);
             }
         });
@@ -740,14 +296,14 @@ void ClientBackend::deleteDialogLocal(const QString &peer)
 
 void ClientBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
 {
-    auto *dlg = findDialog(peer);
+    const auto *dlg = findDialog(peer);
     if (!dlg) {
         emit serverHistoryError("Диалог не найден.");
         return;
     }
 
-    QString peerCopy = peer;
-    QString username = m_username;
+    QString peerCopy    = peer;
+    QString username    = m_username;
     QString keyringJson = dialogKeyringJson(*dlg);
 
     QPointer<ClientBackend> self(this);
@@ -755,13 +311,8 @@ void ClientBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        int rc = paranoia_determinate_keyring(
-            self->m_handle,
-            username.toUtf8().constData(),
-            peerCopy.toUtf8().constData(),
-            keyringJson.toUtf8().constData(),
-            cutSeq
-        );
+        int rc = paranoia_determinate_keyring(self->m_handle, username.toUtf8().constData(),
+                                              peerCopy.toUtf8().constData(), keyringJson.toUtf8().constData(), cutSeq);
         QMetaObject::invokeMethod(self, [self, peerCopy, rc]() {
             if (!self) return;
             if (rc == 0) {
@@ -807,8 +358,8 @@ void ClientBackend::sendText(const QString &text)
         return;
     }
 
-    QString peer     = m_activePeer;
-    QString username = m_username;
+    QString peer        = m_activePeer;
+    QString username    = m_username;
     QString keyringJson = dialogKeyringJson(*dlg);
 
     QPointer<ClientBackend> self(this);
@@ -816,13 +367,9 @@ void ClientBackend::sendText(const QString &text)
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        char *json = paranoia_send_text_json_keyring(
-            self->m_handle,
-            username.toUtf8().constData(),
-            peer.toUtf8().constData(),
-            keyringJson.toUtf8().constData(),
-            text.toUtf8().constData()
-        );
+        char *json =
+            paranoia_send_text_json_keyring(self->m_handle, username.toUtf8().constData(), peer.toUtf8().constData(),
+                                            keyringJson.toUtf8().constData(), text.toUtf8().constData());
         if (!json) {
             QString err = QString::fromUtf8(paranoia_last_error());
             QMetaObject::invokeMethod(self, [self, err]() {
@@ -849,11 +396,11 @@ void ClientBackend::sendText(const QString &text)
 void ClientBackend::fetchMessages()
 {
     if (m_activePeer.isEmpty()) return;
-    auto *dlg = findDialog(m_activePeer);
+    const auto *dlg = findDialog(m_activePeer);
     if (!dlg) return;
 
-    QString peer     = m_activePeer;
-    QString username = m_username;
+    QString peer        = m_activePeer;
+    QString username    = m_username;
     QString keyringJson = dialogKeyringJson(*dlg);
 
     QPointer<ClientBackend> self(this);
@@ -861,12 +408,8 @@ void ClientBackend::fetchMessages()
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        char *json = paranoia_receive_keyring(
-            self->m_handle,
-            username.toUtf8().constData(),
-            peer.toUtf8().constData(),
-            keyringJson.toUtf8().constData()
-        );
+        char *json = paranoia_receive_keyring(self->m_handle, username.toUtf8().constData(), peer.toUtf8().constData(),
+                                              keyringJson.toUtf8().constData());
 
         // Проверяем на ошибки расшифровки даже при успешном получении
         QString lastErr = QString::fromUtf8(paranoia_last_error());
@@ -895,30 +438,20 @@ void ClientBackend::fetchMessages()
     });
 }
 
-QVariantList ClientBackend::getCachedMessages(const QString &peer) const
-{
-    return m_messageCache.value(peer);
-}
-
 void ClientBackend::loadHistory(const QString &peer)
 {
-    auto *dlg = findDialog(peer);
+    const auto *dlg = findDialog(peer);
     if (!dlg) return;
 
-    QString username = m_username;
+    QString username    = m_username;
     QString keyringJson = dialogKeyringJson(*dlg);
     QPointer<ClientBackend> self(this);
     QThreadPool::globalInstance()->start([self, peer, username, keyringJson]() {
         if (!self) return;
         QMutexLocker locker(&self->m_handleMutex);
         if (!self->m_handle) return;
-        char *json = paranoia_history_keyring(
-            self->m_handle,
-            username.toUtf8().constData(),
-            peer.toUtf8().constData(),
-            keyringJson.toUtf8().constData(),
-            500
-        );
+        char *json = paranoia_history_keyring(self->m_handle, username.toUtf8().constData(), peer.toUtf8().constData(),
+                                              keyringJson.toUtf8().constData(), 500);
         if (!json) return;
         QString jsonStr = QString::fromUtf8(json);
         paranoia_free_string(json);
@@ -936,7 +469,7 @@ void ClientBackend::appendMessages(const QString &peer, const QVariantList &mess
     if (messages.isEmpty()) return;
 
     auto &cache = m_messageCache[peer];
-    auto &seen = m_seenIds[peer];
+    auto &seen  = m_seenIds[peer];
     for (const auto &msg : messages) {
         QString id = msg.toMap()["id"].toString();
         if (!id.isEmpty() && !seen.contains(id)) {
@@ -963,33 +496,25 @@ void ClientBackend::appendMessages(const QString &peer, const QVariantList &mess
     emit dialogsChanged();
 }
 
-void ClientBackend::upsertDialogKeyringEntry(const QString &peer,
-                                             const QByteArray &sessionKey,
-                                             quint64 startSeq,
-                                             bool resetKeyring,
-                                             bool clearCache)
+void ClientBackend::upsertDialogKeyringEntry(const QString &peer, const QByteArray &sessionKey, quint64 startSeq,
+                                             bool resetKeyring, bool clearCache)
 {
     if (peer.isEmpty() || sessionKey.size() != 32 || startSeq == 0) return;
 
     for (auto &d : m_dialogs) {
         if (d.peer == peer) {
-            if (resetKeyring) {
-                d.keyring.clear();
-            }
+            if (resetKeyring) { d.keyring.clear(); }
             bool replaced = false;
             for (auto &entry : d.keyring) {
                 if (entry.startSeq == startSeq) {
                     entry.key = sessionKey;
-                    replaced = true;
+                    replaced  = true;
                     break;
                 }
             }
-            if (!replaced) {
-                d.keyring.append({startSeq, sessionKey});
-            }
-            std::sort(d.keyring.begin(), d.keyring.end(), [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) {
-                return lhs.startSeq < rhs.startSeq;
-            });
+            if (!replaced) { d.keyring.append({startSeq, sessionKey}); }
+            std::sort(d.keyring.begin(), d.keyring.end(),
+                      [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
             if (clearCache) {
                 m_messageCache.remove(peer);
                 m_seenIds.remove(peer);
@@ -1005,17 +530,12 @@ void ClientBackend::upsertDialogKeyringEntry(const QString &peer,
     saveDialogs();
 }
 
-void ClientBackend::onPollTimer()
-{
-    fetchMessages();
-}
+void ClientBackend::onPollTimer() { fetchMessages(); }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 QByteArray ClientBackend::deriveKey(const QString &sharedSecret) const
-{
-    return QCryptographicHash::hash(sharedSecret.toUtf8(), QCryptographicHash::Sha256);
-}
+{ return QCryptographicHash::hash(sharedSecret.toUtf8(), QCryptographicHash::Sha256); }
 
 QString ClientBackend::dialogKeyringJson(const Dialog &dialog) const
 {
@@ -1024,7 +544,7 @@ QString ClientBackend::dialogKeyringJson(const Dialog &dialog) const
         if (entry.key.size() != 32 || entry.startSeq == 0) continue;
         QJsonObject obj;
         obj["start_seq"] = static_cast<double>(entry.startSeq);
-        obj["key"] = QString::fromLatin1(entry.key.toBase64());
+        obj["key"]       = QString::fromLatin1(entry.key.toBase64());
         arr.append(obj);
     }
     return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
@@ -1034,7 +554,7 @@ quint64 ClientBackend::nextKeyStartSeq(const QString &peer) const
 {
     quint64 maxSeq = 0;
     for (const auto &msg : m_messageCache.value(peer)) {
-        bool ok = false;
+        bool ok     = false;
         quint64 seq = msg.toMap().value("seq").toULongLong(&ok);
         if (ok && seq > maxSeq) maxSeq = seq;
     }
@@ -1042,12 +562,8 @@ quint64 ClientBackend::nextKeyStartSeq(const QString &peer) const
     QMutexLocker locker(&m_handleMutex);
     if (m_handle) {
         uint64_t lastPulled = 0;
-        int rc = paranoia_last_pulled_seq(
-            m_handle,
-            m_username.toUtf8().constData(),
-            peer.toUtf8().constData(),
-            &lastPulled
-        );
+        int rc =
+            paranoia_last_pulled_seq(m_handle, m_username.toUtf8().constData(), peer.toUtf8().constData(), &lastPulled);
         if (rc == 0 && lastPulled > maxSeq) maxSeq = static_cast<quint64>(lastPulled);
     }
 
@@ -1070,8 +586,7 @@ QVariantList ClientBackend::parseMessages(const QString &json) const
         msg["seq"]    = obj["seq"].toVariant();
         msg["isMe"]   = (obj["sender"].toString() == m_username);
         // Пропускаем служебные сообщения (подтверждения прочтения, удаления)
-        if (!msg["text"].toString().isEmpty())
-            result.append(msg);
+        if (!msg["text"].toString().isEmpty()) result.append(msg);
     }
     return result;
 }
@@ -1079,44 +594,39 @@ QVariantList ClientBackend::parseMessages(const QString &json) const
 QString ClientBackend::extractText(const QString &raw) const
 {
     // Parse Rust Debug format: Text("hello") → hello
-    if (raw.startsWith("Text(\"") && raw.endsWith("\")"))
-        return raw.mid(6, raw.length() - 8);
-    if (raw.startsWith("Image("))  return "[Изображение]";
-    if (raw.startsWith("File("))   return "[Файл]";
-    if (raw.startsWith("Voice("))  return "[Голосовое]";
-    if (raw.startsWith("ReadReceipt(") || raw.startsWith("Delete("))
-        return QString();
+    if (raw.startsWith("Text(\"") && raw.endsWith("\")")) return raw.mid(6, raw.length() - 8);
+    if (raw.startsWith("Image(")) return "[Изображение]";
+    if (raw.startsWith("File(")) return "[Файл]";
+    if (raw.startsWith("Voice(")) return "[Голосовое]";
+    if (raw.startsWith("ReadReceipt(") || raw.startsWith("Delete(")) return QString();
     return raw;
 }
 
 // ── Export / Import ───────────────────────────────────────────────────────────
 
-QVariantMap ClientBackend::exportProfile(const QString &profileType,
-                                         const QStringList &peers,
-                                         const QString &receiverPubkeyB64,
-                                         const QString &filePath)
+QVariantMap ClientBackend::exportProfile(const QString &profileType, const QStringList &peers,
+                                         const QString &receiverPubkeyB64, const QString &filePath)
 {
     const QString normalizedProfile = profileType.trimmed();
-    if (!isSupportedExportProfile(normalizedProfile))
-        return errorResult("Неподдерживаемый тип профиля экспорта.");
+    if (!Utils::isSupportedExportProfile(normalizedProfile))
+        return Utils::errorResult("Неподдерживаемый тип профиля экспорта.");
     if (receiverPubkeyB64.trimmed().isEmpty())
-        return errorResult("Не указан публичный ключ принимающего устройства.");
-    if (filePath.trimmed().isEmpty())
-        return errorResult("Не указан путь к файлу.");
+        return Utils::errorResult("Не указан публичный ключ принимающего устройства.");
+    if (filePath.trimmed().isEmpty()) return Utils::errorResult("Не указан путь к файлу.");
 
     // Собрать payload
     QJsonObject payload;
     payload["format_version"] = 1;
-    payload["profile_type"] = normalizedProfile;
+    payload["profile_type"]   = normalizedProfile;
 
     const bool includeClient = (normalizedProfile == "client" || normalizedProfile == "full");
-    const bool includeAdmin  = (normalizedProfile == "admin"  || normalizedProfile == "full");
-    int exportedDialogues = 0;
-    int exportedKeyEntries = 0;
+    const bool includeAdmin  = (normalizedProfile == "admin" || normalizedProfile == "full");
+    int exportedDialogues    = 0;
+    int exportedKeyEntries   = 0;
 
     if (includeClient) {
-        if (m_server.isEmpty() || m_username.isEmpty() || m_privkey.isEmpty())
-            return errorResult("Нет активной клиентской сессии для экспорта.");
+        if (m_server.isEmpty() || m_username.isEmpty() || m_private_key.isEmpty())
+            return Utils::errorResult("Нет активной клиентской сессии для экспорта.");
 
         QJsonArray dialoguesArr;
         for (const auto &dlg : m_dialogs) {
@@ -1129,7 +639,7 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
                 if (entry.key.size() != 32 || entry.startSeq == 0) continue;
                 QJsonObject keyObj;
                 keyObj["start_seq"] = static_cast<double>(entry.startSeq);
-                keyObj["key"] = QString::fromLatin1(entry.key.toBase64());
+                keyObj["key"]       = QString::fromLatin1(entry.key.toBase64());
                 keyringArr.append(keyObj);
             }
             if (keyringArr.isEmpty()) continue;
@@ -1140,13 +650,13 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
         }
 
         if (!peers.isEmpty() && exportedDialogues == 0)
-            return errorResult("Нет выбранных диалогов с keyring для экспорта.");
+            return Utils::errorResult("Нет выбранных диалогов с keyring для экспорта.");
 
         QJsonObject serverObj;
-        serverObj["url"] = m_server;
-        serverObj["username"] = m_username;
-        serverObj["signing_key_b64"] = m_privkey;
-        serverObj["dialogues"] = dialoguesArr;
+        serverObj["url"]             = m_server;
+        serverObj["username"]        = m_username;
+        serverObj["signing_key_b64"] = m_private_key;
+        serverObj["dialogues"]       = dialoguesArr;
 
         payload["servers"] = QJsonArray{serverObj};
     }
@@ -1155,43 +665,40 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
         QJsonArray adminArr;
         for (const auto &a : admin::Admin::admins) {
             QJsonObject adminObj;
-            adminObj["url"] = a.domain;
-            adminObj["admin_privkey_b64"] = a.private_key;
+            adminObj["url"]                   = a.domain;
+            adminObj["admin_private_key_b64"] = a.private_key;
             adminArr.append(adminObj);
         }
         payload["admin_servers"] = adminArr;
     }
 
     if (!includeClient) payload["servers"] = QJsonArray{};
-    if (!includeAdmin)  payload["admin_servers"] = QJsonArray{};
+    if (!includeAdmin) payload["admin_servers"] = QJsonArray{};
 
-    const QString payloadJson = QString::fromUtf8(
-        QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    const QString payloadJson = QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact));
 
     // Зашифровать
-    char *envelopePtr = paranoia_ecies_encrypt(
-        receiverPubkeyB64.trimmed().toUtf8().constData(),
-        payloadJson.toUtf8().constData()
-    );
+    char *envelopePtr =
+        paranoia_ecies_encrypt(receiverPubkeyB64.trimmed().toUtf8().constData(), payloadJson.toUtf8().constData());
     if (!envelopePtr) {
-        const QString err = lastRustError();
+        const QString err = Utils::lastRustError();
         if (err == "invalid_device_key")
-            return errorResult("Некорректный публичный ключ принимающего устройства.");
-        return errorResult("Ошибка шифрования экспорта.");
+            return Utils::errorResult("Некорректный публичный ключ принимающего устройства.");
+        return Utils::errorResult("Ошибка шифрования экспорта.");
     }
-    const QString envelopeJson = takeRustString(envelopePtr);
+    const QString envelopeJson = Utils::takeRustString(envelopePtr);
 
     // Сохранить в файл
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return errorResult("Не удалось открыть файл для записи: " + filePath);
+        return Utils::errorResult("Не удалось открыть файл для записи: " + filePath);
     const QByteArray envelopeBytes = envelopeJson.toUtf8();
     if (file.write(envelopeBytes) != envelopeBytes.size()) {
         file.close();
-        return errorResult("Не удалось полностью записать файл экспорта.");
+        return Utils::errorResult("Не удалось полностью записать файл экспорта.");
     }
     file.close();
-    setOwnerOnlyPermissions(filePath);
+    Utils::setOwnerOnlyPermissions(filePath);
 
     return QVariantMap{
         {"ok", true},
@@ -1203,66 +710,56 @@ QVariantMap ClientBackend::exportProfile(const QString &profileType,
 
 QVariantMap ClientBackend::importProfile(const QString &filePath)
 {
-    if (m_devicePrivkey.isEmpty())
-        return errorResult("Device keypair не инициализирован.");
-    if (filePath.trimmed().isEmpty())
-        return errorResult("Не указан путь к файлу.");
+    if (m_devicePrivkey.isEmpty()) return Utils::errorResult("Device keypair не инициализирован.");
+    if (filePath.trimmed().isEmpty()) return Utils::errorResult("Не указан путь к файлу.");
 
     QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly))
-        return errorResult("Не удалось открыть файл: " + filePath);
-    if (file.size() > MaxExportFileBytes) {
+    if (!file.open(QIODevice::ReadOnly)) return Utils::errorResult("Не удалось открыть файл: " + filePath);
+    if (file.size() > Utils::MaxExportFileBytes) {
         file.close();
-        return errorResult("Файл экспорта слишком большой.");
+        return Utils::errorResult("Файл экспорта слишком большой.");
     }
     const QString envelopeJson = QString::fromUtf8(file.readAll());
     file.close();
 
-    if (envelopeJson.trimmed().isEmpty())
-        return errorResult("Файл пуст.");
+    if (envelopeJson.trimmed().isEmpty()) return Utils::errorResult("Файл пуст.");
 
     // Расшифровать
-    char *plaintextPtr = paranoia_ecies_decrypt(
-        m_devicePrivkey.toUtf8().constData(),
-        envelopeJson.toUtf8().constData()
-    );
+    char *plaintextPtr =
+        paranoia_ecies_decrypt(m_devicePrivkey.toUtf8().constData(), envelopeJson.toUtf8().constData());
     if (!plaintextPtr) {
-        const QString err = lastRustError();
+        const QString err = Utils::lastRustError();
         if (err == "ecies_decrypt_error")
-            return errorResult("Не удалось расшифровать файл. Файл зашифрован на другой ключ или повреждён.");
-        if (err == "ecies_unsupported_version")
-            return errorResult("Неподдерживаемая версия формата экспорта.");
-        return errorResult("Ошибка расшифровки.");
+            return Utils::errorResult("Не удалось расшифровать файл. Файл зашифрован на другой ключ или повреждён.");
+        if (err == "ecies_unsupported_version") return Utils::errorResult("Неподдерживаемая версия формата экспорта.");
+        return Utils::errorResult("Ошибка расшифровки.");
     }
-    const QString payloadJson = takeRustString(plaintextPtr);
+    const QString payloadJson = Utils::takeRustString(plaintextPtr);
 
     QJsonParseError parseError;
     const auto doc = QJsonDocument::fromJson(payloadJson.toUtf8(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject())
-        return errorResult("Некорректный формат payload после расшифровки.");
+        return Utils::errorResult("Некорректный формат payload после расшифровки.");
 
     const auto payload = doc.object();
-    if (payload["format_version"].toInt() != 1)
-        return errorResult("Неподдерживаемая версия формата payload.");
+    if (payload["format_version"].toInt() != 1) return Utils::errorResult("Неподдерживаемая версия формата payload.");
     const QString profileType = payload["profile_type"].toString();
-    if (!isSupportedExportProfile(profileType))
-        return errorResult("Неподдерживаемый тип профиля в payload.");
+    if (!Utils::isSupportedExportProfile(profileType))
+        return Utils::errorResult("Неподдерживаемый тип профиля в payload.");
     const bool allowClientImport = (profileType == "client" || profileType == "full");
-    const bool allowAdminImport = (profileType == "admin" || profileType == "full");
+    const bool allowAdminImport  = (profileType == "admin" || profileType == "full");
 
-    int importedDialogues = 0;
-    int importedKeyEntries = 0;
+    int importedDialogues    = 0;
+    int importedKeyEntries   = 0;
     int importedAdminServers = 0;
-    int skippedEntries = 0;
-    int conflicts = 0;
-    int importedProfiles = 0;
+    int skippedEntries       = 0;
+    int conflicts            = 0;
+    int importedProfiles     = 0;
     QString activateServer;
     QString activateUsername;
     QString activatePrivkey;
 
-    const auto mergeKeyringEntry = [](QList<Dialog> &dialogs,
-                                      const QString &peer,
-                                      const QByteArray &key,
+    const auto mergeKeyringEntry = [](QList<Dialog> &dialogs, const QString &peer, const QByteArray &key,
                                       quint64 startSeq) -> int {
         for (auto &dlg : dialogs) {
             if (dlg.peer != peer) continue;
@@ -1271,9 +768,8 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
                 return entry.key == key ? 0 : -1;
             }
             dlg.keyring.append({startSeq, key});
-            std::sort(dlg.keyring.begin(), dlg.keyring.end(), [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) {
-                return lhs.startSeq < rhs.startSeq;
-            });
+            std::sort(dlg.keyring.begin(), dlg.keyring.end(),
+                      [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
             return 1;
         }
         dialogs.append({peer, QList<DialogKeyEntry>{{startSeq, key}}, QString()});
@@ -1283,41 +779,42 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
     // Импорт client-данных: merge по server+username+peer+start_seq (Z2a)
     if (allowClientImport) {
         const QJsonArray servers = payload["servers"].toArray();
-        if (servers.size() > MaxImportServers)
-            return errorResult("Слишком много client-профилей в export payload.");
-        int totalDialogues = 0;
+        if (servers.size() > Utils::MaxImportServers)
+            return Utils::errorResult("Слишком много client-профилей в export payload.");
+        int totalDialogues  = 0;
         int totalKeyEntries = 0;
         for (const auto &serverVal : servers) {
-            const auto serverObj = serverVal.toObject();
-            const QString url = normalizedServerUrl(serverObj["url"].toString());
-            const QString username = serverObj["username"].toString().trimmed();
+            const auto serverObj     = serverVal.toObject();
+            const QString url        = Utils::normalizedServerUrl(serverObj["url"].toString());
+            const QString username   = serverObj["username"].toString().trimmed();
             const QString signingKey = serverObj["signing_key_b64"].toString().trimmed();
             if (url.isEmpty() || username.isEmpty()) continue;
-            if (!decodeFixedBase64(signingKey, 32))
-                return errorResult("Некорректный private signing key в client-профиле export payload.");
+            if (!Utils::decodeFixedBase64(signingKey, 32))
+                return Utils::errorResult("Некорректный private signing key в client-профиле export payload.");
 
-            const QString profileId = profileIdFor(url, username);
+            const QString profileId    = Utils::profileIdFor(url, username);
             const bool isCurrentClient = (profileId == m_profileId);
-            const bool profileExists = QFile::exists(profileClientPath(profileId));
+            const bool profileExists   = QFile::exists(Utils::profileClientPath(profileId));
             if (profileExists) {
-                const QJsonObject existing = readJsonObjectFile(profileClientPath(profileId));
-                const QString existingKey = existing.value("privkey").toString().trimmed();
+                const QJsonObject existing = Utils::readJsonObjectFile(Utils::profileClientPath(profileId));
+                const QString existingKey  = existing.value("private_key").toString().trimmed();
                 if (!existingKey.isEmpty() && existingKey != signingKey) {
                     ++conflicts;
                     continue;
                 }
             }
 
-            QList<Dialog> targetDialogs = isCurrentClient ? m_dialogs : loadDialogsFromPath(profileDialogsPath(profileId));
+            QList<Dialog> targetDialogs =
+                isCurrentClient ? m_dialogs : loadDialogsFromPath(Utils::profileDialogsPath(profileId));
             QSet<QString> touchedDialogues;
 
             const QJsonArray dialogues = serverObj["dialogues"].toArray();
-            if (totalDialogues + dialogues.size() > MaxImportDialogues)
-                return errorResult("Слишком много диалогов в export payload.");
+            if (totalDialogues + dialogues.size() > Utils::MaxImportDialogues)
+                return Utils::errorResult("Слишком много диалогов в export payload.");
             totalDialogues += dialogues.size();
 
             for (const auto &dlgVal : dialogues) {
-                const auto dlgObj = dlgVal.toObject();
+                const auto dlgObj  = dlgVal.toObject();
                 const QString peer = dlgObj["peer"].toString();
                 if (peer.isEmpty()) {
                     ++skippedEntries;
@@ -1329,16 +826,16 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
                     ++skippedEntries;
                     continue;
                 }
-                if (totalKeyEntries + keyringArr.size() > MaxImportKeyEntries)
-                    return errorResult("Слишком много keyring entries в export payload.");
+                if (totalKeyEntries + keyringArr.size() > Utils::MaxImportKeyEntries)
+                    return Utils::errorResult("Слишком много keyring entries в export payload.");
                 totalKeyEntries += keyringArr.size();
 
                 for (const auto &keyVal : keyringArr) {
-                    const auto keyObj = keyVal.toObject();
-                    bool seqOk = false;
-                    const quint64 startSeq = readSeq(keyObj["start_seq"], &seqOk);
+                    const auto keyObj      = keyVal.toObject();
+                    bool seqOk             = false;
+                    const quint64 startSeq = Utils::readSeq(keyObj["start_seq"], &seqOk);
                     QByteArray key;
-                    if (!seqOk || !decodeFixedBase64(keyObj["key"].toString(), 32, &key)) {
+                    if (!seqOk || !Utils::decodeFixedBase64(keyObj["key"].toString(), 32, &key)) {
                         ++skippedEntries;
                         continue;
                     }
@@ -1361,14 +858,13 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
             }
 
             saveClientConfigForProfile(profileId, url, username, signingKey);
-            saveDialogsToPath(profileDialogsPath(profileId), targetDialogs);
-            upsertProfileManifest(profileId, url, username, isCurrentClient || m_profileId.isEmpty());
-            if (!profileExists)
-                ++importedProfiles;
+            saveDialogsToPath(Utils::profileDialogsPath(profileId), targetDialogs);
+            Utils::upsertProfileManifest(profileId, url, username, isCurrentClient || m_profileId.isEmpty());
+            if (!profileExists) ++importedProfiles;
             if (m_profileId.isEmpty() && activatePrivkey.isEmpty()) {
-                activateServer = url;
+                activateServer   = url;
                 activateUsername = username;
-                activatePrivkey = signingKey;
+                activatePrivkey  = signingKey;
             }
             if (isCurrentClient) {
                 m_dialogs = targetDialogs;
@@ -1382,22 +878,23 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
     // Импорт admin-данных
     if (allowAdminImport) {
         const QJsonArray adminServers = payload["admin_servers"].toArray();
-        if (adminServers.size() > MaxImportAdminServers)
-            return errorResult("Слишком много admin-профилей в export payload.");
+        if (adminServers.size() > Utils::MaxImportAdminServers)
+            return Utils::errorResult("Слишком много admin-профилей в export payload.");
         for (const auto &adminVal : adminServers) {
-            const auto adminObj = adminVal.toObject();
-            const QString url     = normalizedServerUrl(adminObj["url"].toString());
-            const QString privkey = adminObj["admin_privkey_b64"].toString().trimmed();
-            if (url.isEmpty() || privkey.isEmpty()) continue;
-            if (!decodeFixedBase64(privkey, 32))
-                return errorResult("Некорректный private admin key в export payload.");
-
+            const auto adminObj       = adminVal.toObject();
+            const QString url         = Utils::normalizedServerUrl(adminObj["url"].toString());
+            const QString private_key = adminObj["admin_private_key_b64"].toString().trimmed();
+            if (url.isEmpty() || private_key.isEmpty()) continue;
+            if (!Utils::decodeFixedBase64(private_key, 32))
+                return Utils::errorResult("Некорректный private admin key в export payload.");
             bool found = false;
-            for (auto &a : admin::Admin::admins) {
-                if (a.domain == url) { found = true; break; }
-            }
+            for (auto &a : admin::Admin::admins)
+                if (a.domain == url) {
+                    found = true;
+                    break;
+                }
             if (!found) {
-                admin::Admin::admins.push_back({url, privkey});
+                admin::Admin::admins.push_back({url, private_key});
                 ++importedAdminServers;
             }
         }
@@ -1408,8 +905,7 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
         emit adminStateChanged();
     }
 
-    if (!activatePrivkey.isEmpty())
-        loginClient(activateServer, activateUsername, activatePrivkey);
+    if (!activatePrivkey.isEmpty()) loginClient(activateServer, activateUsername, activatePrivkey);
 
     return QVariantMap{
         {"ok", true},
@@ -1425,12 +921,10 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
 QVariantMap ClientBackend::deleteExportFile(const QString &filePath)
 {
     const QString trimmedPath = filePath.trimmed();
-    if (trimmedPath.isEmpty())
-        return errorResult("Не указан путь к файлу.");
+    if (trimmedPath.isEmpty()) return Utils::errorResult("Не указан путь к файлу.");
     if (!QFile::exists(trimmedPath))
         return QVariantMap{{"ok", true}, {"deleted", false}, {"message", "Файл уже удалён."}};
-    if (!QFile::remove(trimmedPath))
-        return errorResult("Не удалось удалить файл экспорта: " + trimmedPath);
+    if (!QFile::remove(trimmedPath)) return Utils::errorResult("Не удалось удалить файл экспорта: " + trimmedPath);
     return QVariantMap{{"ok", true}, {"deleted", true}};
 }
 
@@ -1438,38 +932,35 @@ QVariantMap ClientBackend::deleteExportFile(const QString &filePath)
 
 void ClientBackend::saveClientConfig() const
 {
-    if (m_server.isEmpty() || m_username.isEmpty() || m_privkey.isEmpty()) return;
-    const QString profileId = m_profileId.isEmpty() ? profileIdFor(m_server, m_username) : m_profileId;
-    saveClientConfigForProfile(profileId, m_server, m_username, m_privkey);
-    upsertProfileManifest(profileId, m_server, m_username, true);
+    if (m_server.isEmpty() || m_username.isEmpty() || m_private_key.isEmpty()) return;
+    const QString profileId = m_profileId.isEmpty() ? Utils::profileIdFor(m_server, m_username) : m_profileId;
+    saveClientConfigForProfile(profileId, m_server, m_username, m_private_key);
+    Utils::upsertProfileManifest(profileId, m_server, m_username, true);
 }
 
-void ClientBackend::saveClientConfigForProfile(const QString &profileId,
-                                               const QString &server,
-                                               const QString &username,
-                                               const QString &privkey) const
+void ClientBackend::saveClientConfigForProfile(const QString &profileId, const QString &server, const QString &username,
+                                               const QString &private_key)
 {
-    if (profileId.isEmpty() || server.isEmpty() || username.isEmpty() || privkey.isEmpty()) return;
-    if (!ensureProfileDir(profileId)) return;
+    if (profileId.isEmpty() || server.isEmpty() || username.isEmpty() || private_key.isEmpty()) return;
+    if (!Utils::ensureProfileDir(profileId)) return;
     QJsonObject obj;
-    obj["server"] = normalizedServerUrl(server);
-    obj["username"] = username;
-    obj["privkey"] = privkey;
-    writeJsonObjectFile(profileClientPath(profileId), obj);
+    obj["server"]      = Utils::normalizedServerUrl(server);
+    obj["username"]    = username;
+    obj["private_key"] = private_key;
+    Utils::writeJsonObjectFile(Utils::profileClientPath(profileId), obj);
 }
 
 void ClientBackend::loadClientConfig()
 {
-    const QJsonObject manifest = loadProfilesManifest();
-    QString profileId = manifest.value("last_profile_id").toString();
+    const QJsonObject manifest = Utils::loadProfilesManifest();
+    QString profileId          = manifest.value("last_profile_id").toString();
     QJsonObject obj;
-    if (!profileId.isEmpty())
-        obj = readJsonObjectFile(profileClientPath(profileId));
+    if (!profileId.isEmpty()) obj = Utils::readJsonObjectFile(Utils::profileClientPath(profileId));
     if (obj.isEmpty()) {
         const QJsonArray profiles = manifest.value("profiles").toArray();
         for (const auto &value : profiles) {
             const QString candidate = value.toObject().value("id").toString();
-            obj = readJsonObjectFile(profileClientPath(candidate));
+            obj                     = Utils::readJsonObjectFile(Utils::profileClientPath(candidate));
             if (!obj.isEmpty()) {
                 profileId = candidate;
                 break;
@@ -1477,33 +968,29 @@ void ClientBackend::loadClientConfig()
         }
     }
     if (obj.isEmpty()) {
-        QFile legacy("client.json");
-        if (!legacy.open(QIODevice::ReadOnly)) return;
-        const auto doc = QJsonDocument::fromJson(legacy.readAll());
+        const auto doc = QJsonDocument::fromJson(Utils::readAll("client.json"));
         if (!doc.isObject()) return;
-        obj = doc.object();
-        profileId = profileIdFor(obj.value("server").toString(), obj.value("username").toString());
+        obj       = doc.object();
+        profileId = Utils::profileIdFor(obj.value("server").toString(), obj.value("username").toString());
     }
 
-    QString server   = obj.value("server").toString();
-    QString username = obj.value("username").toString();
-    QString privkey  = obj.value("privkey").toString();
-    if (server.isEmpty() || username.isEmpty() || privkey.isEmpty()) return;
-    loginClient(server, username, privkey);
+    QString server      = obj.value("server").toString();
+    QString username    = obj.value("username").toString();
+    QString private_key = obj.value("private_key").toString();
+    if (server.isEmpty() || username.isEmpty() || private_key.isEmpty()) return;
+    loginClient(server, username, private_key);
 }
 
 void ClientBackend::saveDialogs() const
 {
     if (m_profileId.isEmpty()) return;
-    saveDialogsToPath(profileDialogsPath(m_profileId), m_dialogs);
+    saveDialogsToPath(Utils::profileDialogsPath(m_profileId), m_dialogs);
 }
 
-void ClientBackend::saveDialogsToPath(const QString &path, const QList<Dialog> &dialogs) const
+void ClientBackend::saveDialogsToPath(const QString &path, const QList<Dialog> &dialogs)
 {
-    const QString profileId = QDir(profilesRootPath()).relativeFilePath(QFileInfo(path).dir().path());
-    if (!profileId.isEmpty() && !profileId.startsWith(".."))
-        ensureProfileDir(profileId);
-
+    const QString profileId = QDir(Utils::profilesRootPath()).relativeFilePath(QFileInfo(path).dir().path());
+    if (!profileId.isEmpty() && !profileId.startsWith("..")) Utils::ensureProfileDir(profileId);
     QJsonArray arr;
     for (const auto &d : dialogs) {
         QJsonObject o;
@@ -1513,7 +1000,7 @@ void ClientBackend::saveDialogsToPath(const QString &path, const QList<Dialog> &
             if (entry.key.size() != 32 || entry.startSeq == 0) continue;
             QJsonObject keyObj;
             keyObj["start_seq"] = static_cast<double>(entry.startSeq);
-            keyObj["key"] = QString::fromLatin1(entry.key.toBase64());
+            keyObj["key"]       = QString::fromLatin1(entry.key.toBase64());
             keyring.append(keyObj);
         }
         o["keyring"] = keyring;
@@ -1524,14 +1011,14 @@ void ClientBackend::saveDialogsToPath(const QString &path, const QList<Dialog> &
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
     f.write(QJsonDocument(arr).toJson());
     f.close();
-    setOwnerOnlyPermissions(path);
+    Utils::setOwnerOnlyPermissions(path);
 }
 
 void ClientBackend::loadDialogs()
 {
     m_dialogs.clear();
     if (m_profileId.isEmpty()) return;
-    const QString path = profileDialogsPath(m_profileId);
+    const QString path = Utils::profileDialogsPath(m_profileId);
     if (QFile::exists(path)) {
         m_dialogs = loadDialogsFromPath(path);
         return;
@@ -1542,39 +1029,33 @@ void ClientBackend::loadDialogs()
     }
 }
 
-QList<ClientBackend::Dialog> ClientBackend::loadDialogsFromPath(const QString &path) const
+QList<ClientBackend::Dialog> ClientBackend::loadDialogsFromPath(const QString &path)
 {
     QList<Dialog> dialogs;
-    const QJsonArray jsonArr = readJsonArrayFile(path);
+    const QJsonArray jsonArr = Utils::readJsonArrayFile(path);
     for (const auto &val : jsonArr) {
-        auto obj = val.toObject();
-        QString peer   = obj["peer"].toString();
+        auto obj        = val.toObject();
+        QString peer    = obj["peer"].toString();
         QString lastMsg = obj["lastMsg"].toString();
         QList<DialogKeyEntry> keyring;
 
         const QJsonArray keyringJson = obj["keyring"].toArray();
         for (const auto &keyVal : keyringJson) {
-            const auto keyObj = keyVal.toObject();
-            bool ok = false;
-            const quint64 startSeq = readSeq(keyObj["start_seq"], &ok);
-            const QByteArray key = QByteArray::fromBase64(keyObj["key"].toString().toLatin1());
-            if (ok && key.size() == 32) {
-                keyring.append({startSeq, key});
-            }
+            const auto keyObj      = keyVal.toObject();
+            bool ok                = false;
+            const quint64 startSeq = Utils::readSeq(keyObj["start_seq"], &ok);
+            const QByteArray key   = QByteArray::fromBase64(keyObj["key"].toString().toLatin1());
+            if (ok && key.size() == 32) { keyring.append({startSeq, key}); }
         }
 
         if (keyring.isEmpty()) {
             const QByteArray legacyKey = QByteArray::fromBase64(obj["key"].toString().toLatin1());
-            if (legacyKey.size() == 32) {
-                keyring.append({1, legacyKey});
-            }
+            if (legacyKey.size() == 32) { keyring.append({1, legacyKey}); }
         }
 
-        std::sort(keyring.begin(), keyring.end(), [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) {
-            return lhs.startSeq < rhs.startSeq;
-        });
-        if (!peer.isEmpty() && !keyring.isEmpty())
-            dialogs.append({peer, keyring, lastMsg});
+        std::sort(keyring.begin(), keyring.end(),
+                  [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
+        if (!peer.isEmpty() && !keyring.isEmpty()) dialogs.append({peer, keyring, lastMsg});
     }
     return dialogs;
 }
@@ -1598,26 +1079,22 @@ void ClientBackend::saveDeviceKey() const
     QFile f("device_key.json");
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
     QJsonObject obj;
-    obj["privkey_b64"] = m_devicePrivkey;
+    obj["private_key_b64"] = m_devicePrivkey;
     f.write(QJsonDocument(obj).toJson());
     f.close();
-    setOwnerOnlyPermissions("device_key.json");
+    Utils::setOwnerOnlyPermissions("device_key.json");
 }
 
 void ClientBackend::loadDeviceKey()
 {
-    QFile f("device_key.json");
-    if (f.open(QIODevice::ReadOnly)) {
-        auto doc = QJsonDocument::fromJson(f.readAll());
-        if (doc.isObject()) {
-            const QString priv = doc.object()["privkey_b64"].toString();
-            if (!priv.isEmpty() && QByteArray::fromBase64(priv.toLatin1()).size() == 32) {
-                m_devicePrivkey = priv;
-                return;
-            }
+    auto doc = QJsonDocument::fromJson(Utils::readAll("device_key.json"));
+    if (doc.isObject()) {
+        const QString priv = doc.object()["private_key_b64"].toString();
+        if (!priv.isEmpty() && QByteArray::fromBase64(priv.toLatin1()).size() == 32) {
+            m_devicePrivkey = priv;
+            return;
         }
     }
-
     // Генерируем новый keypair при первом запуске
     char *privPtr = nullptr;
     char *pubPtr  = nullptr;

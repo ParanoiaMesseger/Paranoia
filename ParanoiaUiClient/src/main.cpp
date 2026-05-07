@@ -34,11 +34,9 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("Backend", &backend);
     engine.rootContext()->setContextProperty("appVersion", APP_VERSION);
 
-    QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app,
-        [](const QList<QQmlError> &warnings) {
-            for (const auto &warning : warnings)
-                qWarning().noquote() << warning.toString();
-        });
+    QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app, [](const QList<QQmlError> &warnings) {
+        for (const auto &warning : warnings) qWarning().noquote() << warning.toString();
+    });
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
@@ -46,7 +44,8 @@ int main(int argc, char *argv[])
             qCritical().noquote() << "QML root object creation failed. Import paths:"
                                   << engine.importPathList().join(", ");
             QCoreApplication::exit(-1);
-        }, Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
 
     engine.loadFromModule("ParanoiaUiClient", "Main");
     if (engine.rootObjects().isEmpty()) {
