@@ -3,11 +3,13 @@ pub mod client_cover;
 pub mod client_cover_food;
 pub mod crypto;
 pub mod dialogue;
+pub mod export;
+pub mod ffi;
 pub mod packet;
+pub mod qr_exchange;
 pub mod store;
 pub mod transport;
 pub mod types;
-pub mod ffi;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -15,8 +17,8 @@ use std::sync::Arc;
 pub use admin::AdminKeyPair;
 pub use dialogue::Dialogue;
 pub use types::{
-    ClientConfig, DialogueConfig, DialogueKey, FileAttachment, Message, MessageContent,
-    MessageStatus,
+    ClientConfig, DialogueConfig, DialogueKey, DialogueKeyEntry, FileAttachment, Message,
+    MessageContent, MessageStatus,
 };
 
 use client_cover_food::FoodDeliveryClientCover;
@@ -52,5 +54,13 @@ impl ParanoiaClient {
 
     pub fn transport(&self) -> Arc<Transport> {
         Arc::clone(&self.transport)
+    }
+
+    pub fn delete_local_dialogue(&self, key: &DialogueKey) -> anyhow::Result<()> {
+        self.store.delete_dialogue(key)
+    }
+
+    pub fn last_pulled_seq(&self, key: &DialogueKey) -> anyhow::Result<u64> {
+        self.store.get_last_pulled_seq(key)
     }
 }

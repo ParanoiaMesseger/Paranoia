@@ -1,8 +1,8 @@
 use crate::client_cover::ClientCover;
 use crate::crypto::{decode_b64, encode_b64};
-use crate::transport::{CorePush, CorePull, CoreDeterminate, RawPacket};
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use crate::transport::{CoreDeterminate, CorePull, CorePush, RawPacket};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 pub struct FoodDeliveryClientCover;
@@ -42,14 +42,19 @@ impl FoodDeliveryClientCover {
         while parts.len() < 4 {
             parts.push(Vec::new());
         }
-        [parts[0].clone(), parts[1].clone(), parts[2].clone(), parts[3].clone()]
+        [
+            parts[0].clone(),
+            parts[1].clone(),
+            parts[2].clone(),
+            parts[3].clone(),
+        ]
     }
 }
 
 impl ClientCover for FoodDeliveryClientCover {
     fn wrap_push(&self, core: &CorePush) -> Result<Value> {
         let payload_b64 = encode_b64(&core.payload);
-        let sig_b64     = encode_b64(&core.sig);
+        let sig_b64 = encode_b64(&core.sig);
 
         let core_json = json!({
             "sender":  core.sender,
@@ -61,7 +66,7 @@ impl ClientCover for FoodDeliveryClientCover {
         let core_bytes = serde_json::to_vec(&core_json)?;
 
         let order_id = format!("ORD-{}-{}-{}", core.sender, core.recver, core.seq);
-        let parts    = self.split_bytes(&core_bytes, order_id.as_bytes());
+        let parts = self.split_bytes(&core_bytes, order_id.as_bytes());
 
         let p1 = encode_b64(&parts[0]);
         let p2 = encode_b64(&parts[1]);
@@ -133,7 +138,18 @@ impl ClientCover for FoodDeliveryClientCover {
 
     fn unwrap_push_response(&self, body: &Value) -> Result<()> {
         if !body["ok"].as_bool().unwrap_or(false) {
-            return Err(anyhow!("Push failed: {}", body));
+            let msg = body["message"].as_str().unwrap_or("unknown error");
+            let lower = msg.to_ascii_lowercase();
+            if lower.contains("duplicate seq") || lower.contains("duplicate_seq") {
+                return Err(anyhow!("duplicate_seq"));
+            }
+            if lower.contains("invalid seq")
+                || lower.contains("invalid_seq")
+                || lower.contains("expected seq")
+            {
+                return Err(anyhow!("invalid_seq"));
+            }
+            return Err(anyhow!("Push failed: {msg}"));
         }
         Ok(())
     }
