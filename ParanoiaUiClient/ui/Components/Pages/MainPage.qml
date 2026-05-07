@@ -23,6 +23,29 @@ Rectangle {
         return tabIndex === 0 ? 0 : 2
     }
 
+    // Закрывает верхний открытый попап. Возвращает true, если что-то закрыл.
+    function handleBackButton(): bool {
+        // Перечисляй от самого "верхнего" к нижнему
+        var popups = [
+            exportImportPopup,
+            qrExchangePopup,
+            registerUserPopup,
+            addDialogPopup,
+            updateKeyPopup,
+            clearHistoryPopup,
+            deleteLocalPopup,
+            deleteDialogPopup,
+            noKeyWarning
+        ]
+        for (var i = 0; i < popups.length; i++) {
+            if (popups[i].opened) {
+                popups[i].close()
+                return true
+            }
+        }
+        return false
+    }
+
     onHasAdminAccessChanged: {
         if (!root.hasAdminAccess && tabBar.currentIndex > 1)
             tabBar.currentIndex = 1

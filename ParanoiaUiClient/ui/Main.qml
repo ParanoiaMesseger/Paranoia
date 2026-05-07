@@ -20,10 +20,21 @@ ApplicationWindow {
     }
 
     onClosing: function(close) {
-        if (stackView.depth > 1) {
-            close.accepted = false   // не закрываем приложение
-            stackView.pop()          // вызываем свою логику "назад"
+        close.accepted = false
+        if (stackView.depth >= 1) {
+            var current = stackView.currentItem
+            if (current && typeof current.handleBackButton === "function") {
+                if (current.handleBackButton()) {
+                    return
+                }
+            }
         }
+
+        if (stackView.depth > 1) {
+            stackView.pop()          // вызываем свою логику "назад"
+            return
+        }
+        close.accepted = true
         // если depth == 1, close.accepted = true по умолчанию → выход
     }
 
