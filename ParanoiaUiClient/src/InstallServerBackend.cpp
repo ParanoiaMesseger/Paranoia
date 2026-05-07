@@ -107,6 +107,7 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
         } break;
         case StepStartServer: ssh->runScriptByPath(":/StartServer.sh"); break;
         case StepVerifyServer: {
+            usleep(1000);
             QString url = m_domain;
             if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
             admin::Admin{url, private_admin_key}.regUser("admin", public_admin_key).then(this, [this, url](bool res) {

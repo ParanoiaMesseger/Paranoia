@@ -93,6 +93,7 @@ Rectangle {
                     Layout.fillWidth: true
                     label:       "SSH-пользователь"
                     placeholder: "root"
+                    text:        "root"
                 }
 
                 ParaInput {

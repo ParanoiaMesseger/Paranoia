@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import QtQuick.Dialogs
 import ParanoiaUiClient
+import QtQuick.VectorImage
 
 Rectangle {
     id: root
@@ -118,18 +119,16 @@ Rectangle {
                 color: Theme.accent
             }
 
-            Image {
+            VectorImage {
                 anchors.left: parent.left
                 anchors.leftMargin: 14
                 anchors.verticalCenter: parent.verticalCenter
                 width: 32; height: 32
                 source: "qrc:/logo_symbol_animated.svg"
-                sourceSize.width: 320
-                sourceSize.height: 320
-                fillMode: Image.PreserveAspectFit
-                asynchronous: false
-                cache: false
-                smooth: true
+                fillMode: VectorImage.PreserveAspectFit
+                preferredRendererType: VectorImage.CurveRenderer
+                animations.loops: Animation.Infinite
+                assumeTrustedSource: true
             }
 
             Text {

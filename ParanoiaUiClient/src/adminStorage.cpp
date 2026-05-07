@@ -19,12 +19,12 @@ QFuture<bool> admin::Admin::regUser(const QString &username, const QString &pubk
 void admin::Admin::initAdmins()
 {
     for (const auto &i : QString::fromUtf8(Utils::readAll("admins.crypt")).split("\n"))
-        if (auto tmp = i.split(":"); tmp.size() == 2) admins.push_back({tmp[0], tmp[1]});
+        if (auto tmp = i.split(";"); tmp.size() == 2) admins.push_back({tmp[0], tmp[1]});
 }
 
 void admin::Admin::saveAdmins()
 {
     QFile file("admins.crypt");
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-    for (const auto &[domain, private_key] : admins) file.write((domain + ":" + private_key + "\n").toUtf8());
+    for (const auto &[domain, private_key] : admins) file.write((domain + ";" + private_key + "\n").toUtf8());
 }
