@@ -1,7 +1,9 @@
 use crate::{crypto, AppState};
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::sync::Arc;
+use tracing::warn;
 
 #[derive(Deserialize)]
 pub struct DeterminateRequest {
@@ -17,14 +19,27 @@ pub struct ApiResponse {
     pub message: String,
 }
 
-pub async fn handle(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<DeterminateRequest>,
-) -> Json<ApiResponse> {
-    Json(do_determinate(state, req).await)
+pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
+    // Cover → Core
+    let req = match state.cover.unwrap_determinate(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            state.metrics.inc_determinate_fail();
+            warn!("Bad cover in determinate: {e}");
+            return Json(json!({
+                "ok": false,
+                "status": "error",
+                "message": format!("Bad cover: {e}"),
+            }));
+        }
+    };
+
+    let core_resp = do_determinate(&state, req).await;
+    let wrapped = state.cover.wrap_determinate_response(&core_resp);
+    Json(wrapped)
 }
 
-async fn do_determinate(state: Arc<AppState>, req: DeterminateRequest) -> ApiResponse {
+async fn do_determinate(state: &Arc<AppState>, req: DeterminateRequest) -> ApiResponse {
     let m = &state.metrics;
 
     let sig = match crypto::decode_b64(&req.sig) {

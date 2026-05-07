@@ -1,8 +1,9 @@
 use crate::{crypto, AppState};
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
+use tracing::warn;
 
 #[derive(Deserialize)]
 pub struct PullRequest {
@@ -18,14 +19,27 @@ pub struct ApiResponse {
     pub message: Value,
 }
 
-pub async fn handle(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<PullRequest>,
-) -> Json<ApiResponse> {
-    Json(do_pull(state, req).await)
+pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
+    // Cover → Core
+    let req = match state.cover.unwrap_pull(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            state.metrics.inc_pull_fail();
+            warn!("Bad cover in pull: {e}");
+            return Json(json!({
+                "ok": false,
+                "status": "error",
+                "message": format!("Bad cover: {e}"),
+            }));
+        }
+    };
+
+    let core_resp = do_pull(&state, req).await;
+    let wrapped = state.cover.wrap_pull_response(&core_resp);
+    Json(wrapped)
 }
 
-async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
+async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
     let m = &state.metrics;
 
     let sig = match crypto::decode_b64(&req.sig) {
