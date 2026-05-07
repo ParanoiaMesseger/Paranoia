@@ -115,7 +115,7 @@ Rectangle {
                         font.weight: Font.Medium
                     }
                     Text {
-                        text: "E2E // MEMORY OFF"
+                        text: "E2E"
                         color: Theme.success
                         font.pixelSize: Theme.fontXs
                         font.family: Theme.fontFamily

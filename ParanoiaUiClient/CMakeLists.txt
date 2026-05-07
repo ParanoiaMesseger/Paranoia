@@ -80,6 +80,8 @@ set_target_properties(Paranoia PROPERTIES
 if(ANDROID)
     set_target_properties(Paranoia PROPERTIES
         QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android"
+        QT_ANDROID_PACKAGE_NAME "app.paranoia.client"
+        QT_ANDROID_APP_NAME "Paranoia"
         QT_ANDROID_PERMISSIONS "android.permission.INTERNET;android.permission.ACCESS_NETWORK_STATE"
         QT_ANDROID_APP_ICON "@drawable/icon"
     )
