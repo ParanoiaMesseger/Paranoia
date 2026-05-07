@@ -134,73 +134,15 @@ Popup {
         }
 
         // ── Device public key ─────────────────────────────
-        Rectangle {
+        CopyablePublicKeyBlock {
             Layout.fillWidth: true
             Layout.bottomMargin: 12
-            implicitHeight: deviceKeyLayout.implicitHeight + 12
-            color:  Theme.bgPrimary
-            radius: Theme.radiusSm
-            border.color: Theme.border
-
-            ColumnLayout {
-                id: deviceKeyLayout
-                anchors.fill:        parent
-                anchors.leftMargin:  12
-                anchors.rightMargin: 8
-                anchors.topMargin:   6
-                anchors.bottomMargin: 6
-                spacing: 2
-
-                    Text {
-                        Layout.fillWidth: true
-                        text:  "Ваш публичный ключ (для получателя экспорта):"
-                    color: Theme.textSecondary
-                    font.pixelSize: Theme.fontXs
-                    font.family:    Theme.fontFamily
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 6
-
-                    Text {
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 0
-                        text:  Backend.devicePubkey || "—"
-                        color: Theme.textPrimary
-                        font.pixelSize: 10
-                        font.family:    "monospace"
-                        elide:          Text.ElideMiddle
-                    }
-
-                    Rectangle {
-                        width: 28; height: 20
-                        radius: Theme.radiusSm
-                        color: copyPubArea.containsMouse ? Theme.bgButton : "transparent"
-                        Text {
-                            anchors.centerIn: parent
-                            text:  "CP"
-                            color: Theme.accentHover
-                            font.pixelSize: 10
-                            font.family: Theme.monoFamily
-                            font.weight: Font.DemiBold
-                        }
-                        MouseArea {
-                            id: copyPubArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: {
-                                devicePubkeyHelper.text = Backend.devicePubkey
-                                devicePubkeyHelper.selectAll()
-                                devicePubkeyHelper.copy()
-                            }
-                        }
-                        TextEdit {
-                            id: devicePubkeyHelper
-                            visible: false
-                        }
-                    }
-                }
-            }
+            title: "Ваш публичный ключ (для получателя экспорта):"
+            keyText: Backend.devicePubkey
+            backgroundColor: Theme.bgPrimary
+            topPadding: 6
+            bottomPadding: 6
+            contentSpacing: 2
         }
 
         // ── Вкладки ───────────────────────────────────────
@@ -570,32 +512,14 @@ Popup {
                         wrapMode: Text.WordWrap
                     }
 
-                    Text {
+                    CopyablePublicKeyBlock {
                         Layout.fillWidth: true
-                        text: "Ваш публичный ключ (сообщите экспортирующему устройству):"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSm
-                        font.family:    Theme.fontFamily
-                    }
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        implicitHeight: 42
-                        color:  Theme.bgPrimary
-                        radius: Theme.radiusSm
-                        border.color: Theme.border
-
-                        Text {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            verticalAlignment: Text.AlignVCenter
-                            text:  Backend.devicePubkey || "—"
-                            color: Theme.textPrimary
-                            font.pixelSize: 10
-                            font.family:    "monospace"
-                            elide:          Text.ElideRight
-                        }
+                        title: "Ваш публичный ключ (сообщите экспортирующему устройству):"
+                        keyText: Backend.devicePubkey
+                        backgroundColor: Theme.bgPrimary
+                        titleColor: Theme.textPrimary
+                        titleFontSize: Theme.fontSm
+                        keyElide: Text.ElideRight
                     }
 
                     // Путь к файлу

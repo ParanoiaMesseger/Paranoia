@@ -36,23 +36,7 @@ Rectangle {
             mipmap: false
             visible: root.qrSource.length > 0
 
-            Rectangle {
-                anchors.fill: parent
-                color: "transparent"
-                border.width: 1
-                border.color: Theme.border
-            }
         }
 
-        Text {
-            Layout.fillWidth: true
-            text: root.qrSource.length > 0 ? root.caption : "QR недоступен"
-            color: root.qrSource.length > 0 ? Theme.textSecondary : Theme.error
-            font.pixelSize: Theme.fontXs
-            font.family: Theme.fontFamily
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideRight
-            visible: text.length > 0
-        }
     }
 }

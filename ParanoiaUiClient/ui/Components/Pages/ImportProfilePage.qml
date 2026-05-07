@@ -61,80 +61,12 @@ Rectangle {
                     wrapMode: Text.WordWrap
                 }
 
-                Rectangle {
+                CopyablePublicKeyBlock {
                     Layout.fillWidth: true
                     Layout.leftMargin: 24
                     Layout.rightMargin: 24
-                    implicitHeight: deviceKeyLayout.implicitHeight + 16
-                    color: Theme.bgSecondary
-                    radius: Theme.radiusSm
-                    border.color: Theme.border
-
-                    ColumnLayout {
-                        id: deviceKeyLayout
-                        anchors.fill: parent
-                        anchors.leftMargin: 12
-                        anchors.rightMargin: 8
-                        anchors.topMargin: 8
-                        anchors.bottomMargin: 8
-                        spacing: 4
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: "Ваш публичный ключ (сообщите экспортирующему устройству):"
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontXs
-                            font.family: Theme.fontFamily
-                            wrapMode: Text.WordWrap
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 6
-
-                            Text {
-                                Layout.fillWidth: true
-                                Layout.minimumWidth: 0
-                                text: Backend.devicePubkey || "—"
-                                color: Theme.textPrimary
-                                font.pixelSize: 10
-                                font.family: Theme.monoFamily
-                                elide: Text.ElideMiddle
-                            }
-
-                            Rectangle {
-                                width: 28
-                                height: 20
-                                radius: Theme.radiusSm
-                                color: copyPubArea.containsMouse ? Theme.bgButton : "transparent"
-
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: "CP"
-                                    color: Theme.accentHover
-                                    font.pixelSize: 10
-                                    font.family: Theme.monoFamily
-                                    font.weight: Font.DemiBold
-                                }
-
-                                MouseArea {
-                                    id: copyPubArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    onClicked: {
-                                        devicePubkeyHelper.text = Backend.devicePubkey
-                                        devicePubkeyHelper.selectAll()
-                                        devicePubkeyHelper.copy()
-                                    }
-                                }
-
-                                TextEdit {
-                                    id: devicePubkeyHelper
-                                    visible: false
-                                }
-                            }
-                        }
-                    }
+                    title: "Ваш публичный ключ (сообщите экспортирующему устройству):"
+                    keyText: Backend.devicePubkey
                 }
 
                 ColumnLayout {

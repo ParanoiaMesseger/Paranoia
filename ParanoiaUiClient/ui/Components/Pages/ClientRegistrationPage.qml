@@ -90,56 +90,14 @@ Rectangle {
                     }
                 }
 
-                Text {
-                    Layout.fillWidth: true
-                    visible: !root.generating
-                    text:   "Ваш публичный ключ сгенерирован. Передайте его администратору сервера, затем укажите сервер и имя пользователя для входа."
-                    color:  Theme.textSecondary
-                    font.pixelSize: Theme.fontSm
-                    font.family:    Theme.fontFamily
-                    wrapMode:       Text.WordWrap
-                    lineHeight:     1.4
-                }
-
                 // ── Публичный ключ ─────────────────────────────
-                Rectangle {
+                CopyablePublicKeyBlock {
                     Layout.fillWidth: true
-                    height:     80
-                    radius:     Theme.radiusMd
-                    color:      Theme.bgInput
-                    border.color: Theme.border
+                    Layout.leftMargin: 24
+                    Layout.rightMargin: 24
                     visible: !root.generating
-
-                    ScrollView {
-                        anchors.fill:    parent
-                        anchors.margins: 12
-
-                        TextArea {
-                            text:            root.publicKey
-                            color:           Theme.accent
-                            font.pixelSize:  Theme.fontSm
-                            font.family:     "Courier New"
-                            readOnly:        true
-                            wrapMode:        Text.WrapAnywhere
-                            background:      null
-                            selectedTextColor: Theme.textPrimary
-                            selectionColor:  Theme.accentDark
-                        }
-                    }
-                }
-
-                // ── Кнопка копирования ─────────────────────────
-                ParaButton {
-                    Layout.fillWidth: true
-                    text:             "Скопировать публичный ключ"
-                    secondary:        true
-                    visible:          !root.generating
-                    onClicked: {
-                        copyClipboard.text = root.publicKey
-                        copyClipboard.selectAll()
-                        copyClipboard.copy()
-                        text = "Скопировано ✓"
-                    }
+                    title: "Передайте ваш публичный ключ администратору сервера"
+                    keyText: root.publicKey
                 }
 
                 // Clipboard helper (invisible)
@@ -160,7 +118,7 @@ Rectangle {
 
                 Text {
                     Layout.alignment:   Qt.AlignHCenter
-                    text:               "Публичный ключ для администратора"
+                    text:               "Или дайте администратору отсканировать этот QR-код"
                     color:              Theme.textSecondary
                     font.pixelSize:     Theme.fontXs
                     font.family:        Theme.fontFamily

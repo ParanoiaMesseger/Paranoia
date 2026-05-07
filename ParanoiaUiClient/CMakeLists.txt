@@ -47,6 +47,7 @@ qt_add_qml_module(Paranoia
     ui/Main.qml
     ui/Theme.qml
     ui/Components/ParaButton.qml
+    ui/Components/CopyablePublicKeyBlock.qml
     ui/Components/ParaHeader.qml
     ui/Components/ParaInput.qml
     ui/Components/QrCodeBox.qml
