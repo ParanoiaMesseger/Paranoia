@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320">
+  <rect width="320" height="320" rx="54" fill="#08070A"/>
+
+  <g transform="translate(32 32)">
+    <path fill="#8F0B16" d="M36 86L110 38L128 84L91 113L37 110Z"/>
+    <path fill="#C91122" d="M37 110L91 113L121 138L82 181L29 153L56 132Z"/>
+    <path fill="#650710" d="M29 153L82 181L121 190L99 219Z"/>
+    <path fill="#C91122" d="M110 38L153 26L202 66L128 84Z"/>
+    <path fill="#8F0B16" d="M128 84L202 66L224 121L174 142L136 119Z"/>
+    <path fill="#C91122" d="M121 138L174 142L211 187L141 226L121 190Z"/>
+    <rect fill="#FF2738" x="18" y="95" width="28" height="10"/>
+    <rect fill="#FF2738" x="205" y="147" width="33" height="9"/>
+    <rect fill="#8F0B16" x="53" y="203" width="32" height="7"/>
+    <rect fill="#4A060C" x="189" y="38" width="21" height="7"/>
+    <rect fill="#4A060C" x="12" y="129" width="23" height="7"/>
+    <rect fill="#4A060C" x="153" y="220" width="30" height="7"/>
+    <path fill="#050406" d="M71 132H118V141H65Z"/>
+    <path fill="#050406" d="M148 84H198L190 93H151Z"/>
+  </g>
+</svg>

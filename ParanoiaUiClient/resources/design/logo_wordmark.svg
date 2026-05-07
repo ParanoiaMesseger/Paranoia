@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 190" role="img" aria-labelledby="title desc" shape-rendering="geometricPrecision">
+  <title id="title">Paranoia wordmark logo</title>
+  <desc id="desc">Wordmark-only logo for the private messenger Paranoia, built from angular vector strokes and organized for future signal tear, jitter, corruption burst, pulse, and digital collapse animation.</desc>
+
+  <defs>
+    <style><![CDATA[
+      .bg { fill: #050406; }
+      .word-stroke { fill: none; stroke: #e3172a; stroke-width: 10; stroke-linecap: square; stroke-linejoin: miter; }
+      .word-shadow { fill: none; stroke: #5d0710; stroke-width: 10; stroke-linecap: square; stroke-linejoin: miter; }
+      .word-hot { fill: #ff2738; }
+      .word-dark { fill: #610710; }
+    ]]></style>
+
+    <g id="paranoia-wordmark-master">
+      <g id="wordmark-base" transform="translate(0 0)">
+        <g id="word-P" transform="translate(0 0)">
+          <path class="word-shadow" d="M3 103V3H44L60 19V46L44 62H3"/>
+          <path class="word-stroke" d="M0 100V0H41L57 16V43L41 59H0"/>
+        </g>
+        <g id="word-A-1" transform="translate(76 0)">
+          <path class="word-shadow" d="M3 103L31 3L59 103M15 63H47"/>
+          <path class="word-stroke" d="M0 100L28 0L56 100M12 60H44"/>
+        </g>
+        <g id="word-R" transform="translate(152 0)">
+          <path class="word-shadow" d="M3 103V3H44L60 19V46L44 62H3M31 62L63 103"/>
+          <path class="word-stroke" d="M0 100V0H41L57 16V43L41 59H0M28 59L60 100"/>
+        </g>
+        <g id="word-A-2" transform="translate(228 0)">
+          <path class="word-shadow" d="M3 103L31 3L59 103M15 63H47"/>
+          <path class="word-stroke" d="M0 100L28 0L56 100M12 60H44"/>
+        </g>
+        <g id="word-N" transform="translate(304 0)">
+          <path class="word-shadow" d="M3 103V3L61 103V3"/>
+          <path class="word-stroke" d="M0 100V0L58 100V0"/>
+        </g>
+        <g id="word-O" transform="translate(386 0)">
+          <path class="word-shadow" d="M17 3H47L61 17V89L47 103H17L3 89V17Z"/>
+          <path class="word-stroke" d="M14 0H44L58 14V86L44 100H14L0 86V14Z"/>
+        </g>
+        <g id="word-I" transform="translate(466 0)">
+          <path class="word-shadow" d="M3 3H47M25 3V103M3 103H47"/>
+          <path class="word-stroke" d="M0 0H44M22 0V100M0 100H44"/>
+        </g>
+        <g id="word-A-3" transform="translate(526 0)">
+          <path class="word-shadow" d="M3 103L31 3L59 103M15 63H47"/>
+          <path class="word-stroke" d="M0 100L28 0L56 100M12 60H44"/>
+        </g>
+      </g>
+      <g id="wordmark-motion-signal-tear">
+        <rect id="wordmark-tear-a" class="word-hot" x="165" y="20" width="35" height="7"/>
+        <rect id="wordmark-tear-b" class="word-hot" x="420" y="66" width="38" height="7"/>
+        <rect id="wordmark-tear-c" class="word-dark" x="532" y="88" width="44" height="7"/>
+      </g>
+      <g id="wordmark-motion-jitter-fragments">
+        <rect id="wordmark-jitter-a" class="word-dark" x="69" y="11" width="18" height="7"/>
+        <rect id="wordmark-jitter-b" class="word-dark" x="284" y="105" width="30" height="7"/>
+        <rect id="wordmark-jitter-c" class="word-dark" x="491" y="27" width="26" height="7"/>
+      </g>
+    </g>
+  </defs>
+
+  <rect id="dark-background" class="bg" width="860" height="190"/>
+  <g id="wordmark-only-art" transform="translate(28 22) scale(1.38)">
+    <use href="#paranoia-wordmark-master"/>
+  </g>
+</svg>

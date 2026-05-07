@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 260">
+  <rect width="1220" height="260" rx="42" fill="#08070A" stroke="#251015" stroke-width="2"/>
+
+  <g transform="translate(46 14) scale(.86)">
+    <path fill="#8F0B16" d="M36 86L110 38L128 84L91 113L37 110Z"/>
+    <path fill="#C91122" d="M37 110L91 113L121 138L82 181L29 153L56 132Z"/>
+    <path fill="#650710" d="M29 153L82 181L121 190L99 219Z"/>
+    <path fill="#C91122" d="M110 38L153 26L202 66L128 84Z"/>
+    <path fill="#8F0B16" d="M128 84L202 66L224 121L174 142L136 119Z"/>
+    <path fill="#C91122" d="M121 138L174 142L211 187L141 226L121 190Z"/>
+    <!-- <path fill="#050406" d="M129 62L137 59L129 101L147 118L128 132L136 196L128 201L124 136L111 124L126 105Z"/> -->
+    <rect fill="#FF2738" x="18" y="95" width="28" height="10"/>
+    <rect fill="#FF2738" x="205" y="147" width="33" height="9"/>
+    <rect fill="#8F0B16" x="53" y="203" width="32" height="7"/>
+    <rect fill="#4A060C" x="189" y="38" width="21" height="7"/>
+    <rect fill="#4A060C" x="12" y="129" width="23" height="7"/>
+    <rect fill="#4A060C" x="153" y="220" width="30" height="7"/>
+    <path fill="#050406" d="M71 132H118V141H65Z"/>
+    <path fill="#050406" d="M148 84H198L190 93H151Z"/>
+  </g>
+
+  <g transform="translate(340 71) scale(1.26)" fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <g transform="translate(0 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M3 103V3H44L60 19V46L44 62H3"/>
+      <path stroke="#E3172A" stroke-width="10" d="M0 100V0H41L57 16V43L41 59H0"/>
+    </g>
+    <g transform="translate(76 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M3 103L31 3L59 103M15 63H47"/>
+      <path stroke="#E3172A" stroke-width="10" d="M0 100L28 0L56 100M12 60H44"/>
+    </g>
+    <g transform="translate(152 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M3 103V3H44L60 19V46L44 62H3M31 62L63 103"/>
+      <path stroke="#E3172A" stroke-width="10" d="M0 100V0H41L57 16V43L41 59H0M28 59L60 100"/>
+    </g>
+    <g transform="translate(228 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M3 103L31 3L59 103M15 63H47"/>
+      <path stroke="#E3172A" stroke-width="10" d="M0 100L28 0L56 100M12 60H44"/>
+    </g>
+    <g transform="translate(304 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M3 103V3L61 103V3"/>
+      <path stroke="#E3172A" stroke-width="10" d="M0 100V0L58 100V0"/>
+    </g>
+    <g transform="translate(386 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M17 3H47L61 17V89L47 103H17L3 89V17Z"/>
+      <path stroke="#E3172A" stroke-width="10" d="M14 0H44L58 14V86L44 100H14L0 86V14Z"/>
+    </g>
+    <g transform="translate(466 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M3 3H47M25 3V103M3 103H47"/>
+      <path stroke="#E3172A" stroke-width="10" d="M0 0H44M22 0V100M0 100H44"/>
+    </g>
+    <g transform="translate(526 0)">
+      <path stroke="#5D0710" stroke-width="10" d="M3 103L31 3L59 103M15 63H47"/>
+      <path stroke="#E3172A" stroke-width="10" d="M0 100L28 0L56 100M12 60H44"/>
+    </g>
+  </g>
+
+  <rect fill="#FF2738" x="1118" y="42" width="42" height="8"/>
+  <rect fill="#8F0B16" x="1163" y="199" width="29" height="8"/>
+  <rect fill="#4A060C" x="276" y="227" width="37" height="7"/>
+</svg>

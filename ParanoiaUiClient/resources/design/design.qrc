@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/">
+        <file>logo_lockup.svg</file>
+        <file>logo_lockup_animated.svg</file>
+        <file>logo_symbol.svg</file>
+        <file>logo_symbol_animated.svg</file>
+        <file>logo_wordmark.svg</file>
+    </qresource>
+</RCC>
