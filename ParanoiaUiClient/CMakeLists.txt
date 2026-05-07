@@ -53,6 +53,7 @@ qt_add_qml_module(Paranoia
     ui/Components/ProgressStep.qml
     ui/Components/Pages/ClientRegistrationPage.qml
     ui/Components/Pages/HelloPage.qml
+    ui/Components/Pages/ImportProfilePage.qml
     ui/Components/Pages/InstallServerPage.qml
     ui/Components/Pages/MainPage.qml
     ui/Components/Pages/ChatPage.qml

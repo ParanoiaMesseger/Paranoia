@@ -730,7 +730,7 @@ QVariantMap ClientBackend::importProfile(const QString &filePath)
     if (!plaintextPtr) {
         const QString err = Utils::lastRustError();
         if (err == "ecies_decrypt_error")
-            return Utils::errorResult("Не удалось расшифровать файл. Файл зашифрован на другой ключ или повреждён.");
+            return Utils::errorResult("Не удалось расшифровать файл. Файл зашифрован другим ключом или повреждён.");
         if (err == "ecies_unsupported_version") return Utils::errorResult("Неподдерживаемая версия формата экспорта.");
         return Utils::errorResult("Ошибка расшифровки.");
     }

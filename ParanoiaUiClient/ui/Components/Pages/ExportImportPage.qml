@@ -4,8 +4,8 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import ParanoiaUiClient
 
-// Диалог экспорта/импорта keyring
-// Открывается как Popup из стартового экрана и MainPage.
+// Диалог экспорта/импорта keyring.
+// Открывается как Popup из MainPage; стартовый импорт вынесен в ImportProfilePage.
 Popup {
     id: root
     anchors.centerIn: Overlay.overlay

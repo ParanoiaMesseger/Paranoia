@@ -10,11 +10,11 @@ ApplicationWindow {
     height:  780
     title:   "Paranoia"
     color:   Theme.bgPrimary
+    property bool importNavigationPending: false
 
     function openMainPageIfReady() {
-        if ((Backend.loggedIn || Backend.hasAdminAccess) && stackView.depth === 1) {
-            if (startupImportPopup.opened)
-                startupImportPopup.close()
+        if ((Backend.loggedIn || Backend.hasAdminAccess) && (stackView.depth === 1 || appWindow.importNavigationPending)) {
+            appWindow.importNavigationPending = false
             stackView.replace(mainPage)
         }
     }
@@ -48,16 +48,10 @@ ApplicationWindow {
         anchors.fill: parent
 
         initialItem: HelloPage {
-            onImportProfile:  startupImportPopup.openImport()
+            onImportProfile:  stackView.push(importProfilePage)
             onRegisterClient: stackView.push(clientRegistrationPage)
             onInstallServer:   stackView.push(installServerPage)
         }
-    }
-
-    ExportImportPage {
-        id: startupImportPopup
-        importOnly: true
-        onProfileImported: appWindow.openMainPageIfReady()
     }
 
     Component {
@@ -73,6 +67,20 @@ ApplicationWindow {
         ClientRegistrationPage {
             onBack:     stackView.pop()
             onLoggedIn: stackView.replace(mainPage)
+        }
+    }
+
+    Component {
+        id: importProfilePage
+        ImportProfilePage {
+            onBack: {
+                appWindow.importNavigationPending = false
+                stackView.pop()
+            }
+            onProfileImported: {
+                appWindow.importNavigationPending = true
+                appWindow.openMainPageIfReady()
+            }
         }
     }
 
