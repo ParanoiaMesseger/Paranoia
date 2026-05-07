@@ -1,0 +1,48 @@
+@startuml
+title Cover Layer
+left to right direction
+
+package "Client" {
+    component "CorePush / CorePull / CoreDeterminate" as CorePush
+    component "FoodDeliveryClientCover" as ClientCover
+}
+
+package "HTTP JSON wire" {
+    component "updateOrder JSON" as PushJson
+    component "syncOrders JSON" as PullJson
+    component "cleanupHistory JSON" as DetJson
+    component "Masked response JSON" as ResponseCover
+}
+
+package "Server" {
+    component "FoodDeliveryCover" as ServerCover
+    component "Core route handler" as Route
+    component "Signature and participant checks" as Verify
+    database "RocksDB dialogue_id:seq" as Rocks
+}
+
+component "Core-level result" as CoreResult
+
+CorePush --> ClientCover
+ClientCover --> PushJson
+ClientCover --> PullJson
+ClientCover --> DetJson
+PushJson --> ServerCover
+PullJson --> ServerCover
+DetJson --> ServerCover
+ServerCover --> Route
+Route --> Verify
+Verify --> Rocks
+Rocks --> Route
+Route --> ServerCover
+ServerCover --> ResponseCover
+ResponseCover --> ClientCover
+ClientCover --> CoreResult
+
+note bottom of ClientCover
+Cover changes JSON shape only.
+It does not change signatures, E2E encryption,
+dialogue_id, seq or storage keys.
+end note
+
+@enduml

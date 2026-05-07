@@ -1,0 +1,20 @@
+@startuml
+title Registration Protocol
+autonumber
+
+actor Admin
+actor Client
+participant "Paranoia Server\n/reg" as Server
+database "Server user config" as Config
+
+Admin -> Admin: Generate Ed25519 admin signature\nover username || user_pubkey_b64
+Admin --> Client: Send admin_sig_b64 out-of-band
+Client -> Server: POST /reg\n{username, pub_key, admin_sig}
+Server -> Server: Decode user pubkey and admin signature
+Server -> Config: Load configured admin public key
+Server -> Server: Verify admin signature
+Server -> Config: Check username is not registered
+Server -> Config: Save username -> user public key
+Server --> Client: {success: true, message: "OK"}
+
+@enduml

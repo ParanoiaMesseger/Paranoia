@@ -1,0 +1,30 @@
+@startuml
+title Export/Import Keyring
+autonumber
+
+actor "Target device user" as TargetUser
+participant "Target device" as Target
+collections "Out-of-band transfer" as OOB
+participant "Source device" as Source
+actor "Source device user" as SourceUser
+
+Target -> Target: Generate or load X25519 device keypair
+Target --> TargetUser: Show device public key
+TargetUser --> SourceUser: Send public key out-of-band
+SourceUser -> Source: Select profile type and dialogues
+Source -> Source: Build ExportPayload JSON
+Source -> Source: Include selected keyrings and requested client/admin roles
+Source -> Source: Generate ephemeral X25519 keypair
+Source -> Source: ECDH(ephemeral private, target public)
+Source -> Source: HKDF-SHA256 -> ChaCha20-Poly1305 key
+Source -> Source: Encrypt payload into JSON envelope {v, eph_pub, nonce, ct}
+Source --> OOB: Transfer export file without server involvement
+OOB --> Target: Import encrypted export file
+Target -> Target: ECDH(device private, eph_pub)
+Target -> Target: HKDF-SHA256 -> ChaCha20-Poly1305 key
+Target -> Target: Decrypt and validate payload version/profile type
+Target -> Target: Merge by server + username + peer + start_seq
+Target -> Target: Skip identical entries and reject conflicting keys
+Target --> TargetUser: Show import counts and offer to delete export file
+
+@enduml
