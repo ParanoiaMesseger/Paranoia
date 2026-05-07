@@ -150,8 +150,12 @@ Rectangle {
                     anchors.leftMargin:  isMe ? 0  : 12
                     anchors.verticalCenter: parent.verticalCenter
 
-                    width: Math.min(msgText.implicitWidth + 24, listView.width * 0.72)
-                    implicitHeight: msgText.implicitHeight + tsText.implicitHeight + 16
+                    width: Math.min(Math.max(msgText.implicitWidth,
+                                             tsText.implicitWidth,
+                                             isMe ? 0 : senderLabel.implicitWidth) + 24,
+                                    listView.width * 0.72)
+                    implicitHeight: (isMe ? 0 : senderLabel.implicitHeight + 2)
+                                  + msgText.implicitHeight + tsText.implicitHeight + 16
                     radius: Theme.radiusMd
                     color: isMe ? Theme.bgButton : Theme.bgSecondary
                     border.width: 1
