@@ -1,8 +1,8 @@
 use crate::types::{DialogueKey, Message, MessageStatus};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
-use std::sync::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
+use std::sync::{Mutex, MutexGuard};
 
 pub struct LocalStore {
     pub(crate) conn: Mutex<Connection>,
@@ -19,8 +19,14 @@ impl LocalStore {
         Ok(store)
     }
 
+    fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local store mutex poisoned"))
+    }
+
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS messages (
@@ -81,11 +87,10 @@ impl LocalStore {
 
     // ── seq management ────────────────────────────────────────────────────
 
-    /// Атомарно получить следующий seq и инкрементировать счётчик.
-    /// Безопасно при нескольких устройствах: каждое устройство
-    /// имеет свою SQLite, seq уникален локально.
+    /// Атомарно получить следующий локально известный seq и инкрементировать счётчик.
+    /// Перед отправкой Dialogue синхронизирует last_pulled_seq через серверный pull.
     pub fn next_send_seq(&self, dialogue: &DialogueKey) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         // Upsert — создаём запись если нет, иначе инкрементируем
         conn.execute(
             "INSERT INTO dialogue_state (dialogue_a, dialogue_b, last_pulled_seq, next_send_seq)
@@ -106,7 +111,7 @@ impl LocalStore {
     }
 
     pub fn get_last_pulled_seq(&self, dialogue: &DialogueKey) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let seq: Option<i64> = conn
             .query_row(
                 "SELECT last_pulled_seq FROM dialogue_state
@@ -119,12 +124,14 @@ impl LocalStore {
     }
 
     pub fn set_last_pulled_seq(&self, dialogue: &DialogueKey, seq: u64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO dialogue_state (dialogue_a, dialogue_b, last_pulled_seq, next_send_seq)
-             VALUES (?1, ?2, ?3, 1)
+             VALUES (?1, ?2, ?3, ?3 + 1)
              ON CONFLICT(dialogue_a, dialogue_b)
-             DO UPDATE SET last_pulled_seq = excluded.last_pulled_seq",
+             DO UPDATE SET
+                last_pulled_seq = MAX(dialogue_state.last_pulled_seq, excluded.last_pulled_seq),
+                next_send_seq = MAX(dialogue_state.next_send_seq, excluded.last_pulled_seq + 1)",
             params![dialogue.a, dialogue.b, seq as i64],
         )?;
         Ok(())
@@ -133,7 +140,7 @@ impl LocalStore {
     // ── messages ──────────────────────────────────────────────────────────
 
     pub fn save_message(&self, msg: &Message) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let content_json = serde_json::to_string(&msg.content)?;
         conn.execute(
             "INSERT OR REPLACE INTO messages
@@ -162,7 +169,7 @@ impl LocalStore {
     }
 
     pub fn update_status(&self, message_id: &str, status: MessageStatus) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE messages SET status = ?1 WHERE id = ?2",
             params![serde_json::to_string(&status)?, message_id],
@@ -172,7 +179,7 @@ impl LocalStore {
 
     /// Батч READ RECEIPT: помечаем все сообщения с server_seq <= up_to_seq как Read.
     pub fn mark_read_until(&self, dialogue: &DialogueKey, up_to_seq: u64) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let read_json = serde_json::to_string(&MessageStatus::Read)?;
         let sent_json = serde_json::to_string(&MessageStatus::Sent)?;
         let delivered_json = serde_json::to_string(&MessageStatus::Delivered)?;
@@ -196,35 +203,28 @@ impl LocalStore {
     }
 
     pub fn get_message_by_seq(&self, dialogue: &DialogueKey, seq: u64) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id
-             FROM messages
-             WHERE dialogue_a = ?1
-               AND dialogue_b = ?2
-               AND server_seq = ?3
-             LIMIT 1",
-        )?;
-        let mut rows = stmt.query(params![
-            dialogue.a, dialogue.b,
-            seq as i64, // в БД server_seq уже как INTEGER/i64
-        ])?;
-
-        if let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            Ok(Some(id))
-        } else {
-            Ok(None)
-        }
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT id
+              FROM messages
+              WHERE dialogue_a = ?1
+                AND dialogue_b = ?2
+                AND server_seq = ?3
+              LIMIT 1",
+                params![dialogue.a, dialogue.b, seq as i64],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
-    
+
     pub fn get_messages(
         &self,
         dialogue: &DialogueKey,
         limit: usize,
         before: Option<DateTime<Utc>>,
     ) -> Result<Vec<Message>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let before_str = before.unwrap_or_else(Utc::now).to_rfc3339();
         let mut stmt = conn.prepare(
             "SELECT id, sender, content, timestamp, status, server_seq
@@ -265,6 +265,20 @@ impl LocalStore {
         Ok(messages)
     }
 
+    // ── dialogue deletion ─────────────────────────────────────────────────
+
+    /// Удалить все локальные данные диалога из SQLite.
+    pub fn delete_dialogue(&self, dialogue: &DialogueKey) -> Result<()> {
+        let conn = self.conn()?;
+        for table in ["messages", "seq_map", "dialogue_state", "incoming_chunks"] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE dialogue_a = ?1 AND dialogue_b = ?2"),
+                params![dialogue.a, dialogue.b],
+            )?;
+        }
+        Ok(())
+    }
+
     // ── chunks ────────────────────────────────────────────────────────────
 
     pub fn save_chunk(
@@ -280,7 +294,7 @@ impl LocalStore {
         data: &[u8],
         timestamp: DateTime<Utc>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT OR IGNORE INTO incoming_chunks
              (transfer_id, dialogue_a, dialogue_b, sender, chunk_index,
@@ -309,7 +323,7 @@ impl LocalStore {
         transfer_id: &str,
         dialogue: &DialogueKey,
     ) -> Result<Option<AssembledFile>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
 
         // Считаем сколько чанков уже есть
         let (count, total, filename, mime_type, total_size, sender, timestamp): (
@@ -354,9 +368,7 @@ impl LocalStore {
             .collect::<rusqlite::Result<_>>()?;
 
         let mut assembled = Vec::with_capacity(total_size as usize);
-        for chunk in chunks {
-            assembled.extend_from_slice(&chunk);
-        }
+        chunks.into_iter().for_each(|chunk| assembled.extend(chunk));
 
         // Удаляем чанки из таблицы
         conn.execute(

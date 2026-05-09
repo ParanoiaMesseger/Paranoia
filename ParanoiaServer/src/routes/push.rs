@@ -1,5 +1,5 @@
-use crate::{crypto, AppState};
-use axum::{extract::State, Json};
+use crate::{AppState, crypto};
+use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -25,7 +25,6 @@ pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>)
     let req = match state.cover.unwrap_push(&body) {
         Ok(r) => r,
         Err(e) => {
-            state.metrics.inc_push_fail();
             return Json(json!({
                 "ok": false,
                 "status": "error",
@@ -41,19 +40,15 @@ pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>)
 }
 
 async fn do_push(state: &Arc<AppState>, req: PushRequest) -> ApiResponse {
-    let m = &state.metrics;
-
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
         Err(_) => {
-            m.inc_push_fail();
             return fail("Bad sig encoding".into());
         }
     };
     let payload_bytes = match crypto::decode_b64(&req.payload) {
         Ok(v) => v,
         Err(_) => {
-            m.inc_push_fail();
             return fail("Bad payload encoding".into());
         }
     };
@@ -62,13 +57,11 @@ async fn do_push(state: &Arc<AppState>, req: PushRequest) -> ApiResponse {
     let sender_pubkey = {
         let cfg = state.config.read().await;
         if !cfg.users.contains_key(&req.recver) {
-            m.inc_push_fail();
             return fail("One user in pair not registered".into());
         }
         match cfg.user_pubkey_bytes(&req.sender) {
             Some(k) => k,
             None => {
-                m.inc_push_fail();
                 return fail("One user in pair not registered".into());
             }
         }
@@ -77,21 +70,14 @@ async fn do_push(state: &Arc<AppState>, req: PushRequest) -> ApiResponse {
     // Подписываемое сообщение: sender + recver + seq(decimal string) + payload(base64 string)
     let signed_msg = format!("{}{}{}{}", req.sender, req.recver, req.seq, req.payload);
     if let Err(e) = crypto::verify_signature(&sender_pubkey, signed_msg.as_bytes(), &sig) {
-        m.inc_push_fail();
         warn!("Invalid push signature from '{}': {e}", req.sender);
         return fail("Invalid signature".into());
     }
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
     match state.store.push(&dialogue_id, req.seq, &payload_bytes) {
-        Ok(_) => {
-            m.inc_push_success();
-            ok("OK".into())
-        }
-        Err(e) => {
-            m.inc_push_fail();
-            fail(format!("{e}"))
-        }
+        Ok(_) => ok("OK".into()),
+        Err(e) => fail(format!("{e}")),
     }
 }
 

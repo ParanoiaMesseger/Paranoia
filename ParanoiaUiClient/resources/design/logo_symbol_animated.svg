@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" role="img" aria-labelledby="title desc" shape-rendering="geometricPrecision">
+  <title id="title">Paranoia animated symbol logo</title>
+  <desc id="desc">Animated symbol-only mark for the private messenger Paranoia with pulse, signal tear, jitter, corruption burst, split, and digital collapse motion hooks.</desc>
+
+  <style><![CDATA[
+    .panel { fill: #08070a; }
+    .void { fill: #050406; }
+    .red-deep { fill: #650710; }
+    .red-dark { fill: #8f0b16; }
+    .red-main { fill: #c91122; }
+    .red-hot { fill: #ff2738; }
+    .red-dim { fill: #4a060c; }
+
+  ]]></style>
+
+  <rect id="symbol-only-app-field" class="panel" width="320" height="320" rx="54"/>
+  <g id="symbol-only-art" transform="translate(32 32)">
+    <g id="symbol-motion-shell">
+      <animateTransform attributeName="transform" type="translate"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.67;0.68;0.69;0.70;1"
+        values="0,0;3,-1;-4,2;2,0;0,0;0,0"
+        dur="7.2s" repeatCount="indefinite" additive="replace"/>
+
+      <g id="symbol-memory-wipe">
+        <animate attributeName="opacity"
+          calcMode="discrete" begin="0s"
+          keyTimes="0;0.65;0.66;0.67;0.68;0.71;0.72;0.73;1"
+          values="1;0.9;0.6;0.25;0;0.25;0.6;1;1"
+          dur="7.2s" repeatCount="indefinite"/>
+
+    <g id="motion-split-left">
+      <animateTransform attributeName="transform" type="translate"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.65;0.66;0.67;0.68;0.71;0.72;0.73;1"
+        values="0,0;-10,0;-35,0;-65,0;-90,0;-45,0;-15,0;0,0;0,0"
+        dur="7.2s" repeatCount="indefinite" additive="replace"/>
+      <path id="symbol-left-upper-facet" class="red-dark" d="M36 86L110 38L128 84L91 113L37 110Z"/>
+      <path id="symbol-left-middle-facet" class="red-main" d="M37 110L91 113L121 138L82 181L29 153L56 132Z"/>
+      <path id="symbol-left-lower-facet" class="red-deep" d="M29 153L82 181L121 190L99 219Z"/>
+    </g>
+    <g id="motion-split-right">
+      <animateTransform attributeName="transform" type="translate"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.65;0.66;0.67;0.68;0.71;0.72;0.73;1"
+        values="0,0;12,0;40,0;75,0;105,0;52,0;18,0;0,0;0,0"
+        dur="7.2s" repeatCount="indefinite" additive="replace"/>
+      <path id="symbol-top-right-facet" class="red-main" d="M110 38L153 26L202 66L128 84Z"/>
+      <path id="symbol-right-middle-facet" class="red-dark" d="M128 84L202 66L224 121L174 142L136 119Z"/>
+      <path id="symbol-right-lower-facet" class="red-main" d="M121 138L174 142L211 187L141 226L121 190Z"/>
+    </g>
+    <g id="motion-signal-tear" opacity="0.86">
+      <animate attributeName="opacity"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.60;0.61;0.62;0.63;0.64;1"
+        values="0.86;1;0;1;0.42;0.86;0.86"
+        dur="2.35s" repeatCount="indefinite"/>
+      <rect id="symbol-tear-left" class="red-hot" x="18" y="95" width="28" height="10">
+        <animateTransform attributeName="transform" type="translate"
+          calcMode="discrete" begin="0s"
+          keyTimes="0;0.60;0.61;0.62;1"
+          values="0,0;-16,0;11,0;-5,0;0,0"
+          dur="2.35s" repeatCount="indefinite" additive="replace"/>
+      </rect>
+      <rect id="symbol-tear-right" class="red-hot" x="205" y="147" width="33" height="9">
+        <animateTransform attributeName="transform" type="translate"
+          calcMode="discrete" begin="0s"
+          keyTimes="0;0.60;0.61;0.62;1"
+          values="0,0;20,0;-12,0;7,0;0,0"
+          dur="2.35s" repeatCount="indefinite" additive="replace"/>
+      </rect>
+      <rect id="symbol-tear-lower" class="red-dark" x="53" y="203" width="32" height="7">
+        <animateTransform attributeName="transform" type="translate"
+          calcMode="discrete" begin="0s"
+          keyTimes="0;0.60;0.61;0.62;1"
+          values="0,0;-10,0;15,0;4,0;0,0"
+          dur="2.35s" repeatCount="indefinite" additive="replace"/>
+      </rect>
+    </g>
+    <g id="motion-jitter-fragments" opacity="0.66">
+      <animate attributeName="opacity"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.56;0.57;0.58;0.59;1"
+        values="0.66;1;0;1;0.66;0.66"
+        dur="1.1s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.56;0.57;0.58;0.59;1"
+        values="0,0;12,-3;-9,2;4,1;0,0;0,0"
+        dur="1.1s" repeatCount="indefinite" additive="replace"/>
+      <rect id="symbol-jitter-top" class="red-dim" x="189" y="38" width="21" height="7"/>
+      <rect id="symbol-jitter-left" class="red-dim" x="12" y="129" width="23" height="7"/>
+      <rect id="symbol-jitter-bottom" class="red-dim" x="153" y="220" width="30" height="7"/>
+    </g>
+    <g id="motion-digital-collapse">
+      <animate attributeName="opacity"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.87;0.88;0.89;0.90;1"
+        values="1;0;1;0;1;1"
+        dur="7.2s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate"
+        calcMode="discrete" begin="0s"
+        keyTimes="0;0.87;0.88;0.89;0.90;1"
+        values="0,0;9,0;-7,0;3,0;0,0;0,0"
+        dur="7.2s" repeatCount="indefinite" additive="replace"/>
+      <path id="symbol-collapse-cut-a" class="void" d="M71 132H118V141H65Z"/>
+      <path id="symbol-collapse-cut-b" class="void" d="M148 84H198L190 93H151Z"/>
+    </g>
+      </g>
+      <g id="symbol-memory-shards" opacity="0">
+        <animate attributeName="opacity"
+          calcMode="discrete" begin="0s"
+          keyTimes="0;0.65;0.66;0.67;0.68;0.71;0.72;1"
+          values="0;1;0.85;1;0;1;0;0"
+          dur="7.2s" repeatCount="indefinite"/>
+        <rect id="memory-shard-a" class="red-hot" x="36" y="73" width="156" height="8">
+          <animateTransform attributeName="transform" type="translate"
+            calcMode="discrete" begin="0s"
+            keyTimes="0;0.65;0.66;0.67;0.68;0.71;1"
+            values="0,0;-18,-2;26,0;-42,-1;58,1;-24,0;0,0"
+            dur="7.2s" repeatCount="indefinite" additive="replace"/>
+        </rect>
+        <rect id="memory-shard-b" class="red-dark" x="18" y="116" width="198" height="7">
+          <animateTransform attributeName="transform" type="translate"
+            calcMode="discrete" begin="0s"
+            keyTimes="0;0.65;0.66;0.67;0.68;0.71;1"
+            values="0,0;22,1;-31,-1;46,0;-54,2;18,-1;0,0"
+            dur="7.2s" repeatCount="indefinite" additive="replace"/>
+        </rect>
+        <rect id="memory-shard-c" class="red-main" x="54" y="154" width="168" height="8">
+          <animateTransform attributeName="transform" type="translate"
+            calcMode="discrete" begin="0s"
+            keyTimes="0;0.65;0.66;0.67;0.68;0.71;1"
+            values="0,0;-12,2;38,-2;-34,1;62,0;-28,1;0,0"
+            dur="7.2s" repeatCount="indefinite" additive="replace"/>
+        </rect>
+        <rect id="memory-shard-d" class="red-dim" x="74" y="197" width="112" height="7">
+          <animateTransform attributeName="transform" type="translate"
+            calcMode="discrete" begin="0s"
+            keyTimes="0;0.65;0.66;0.67;0.68;0.71;1"
+            values="0,0;30,-1;-26,1;52,-2;-60,0;22,1;0,0"
+            dur="7.2s" repeatCount="indefinite" additive="replace"/>
+        </rect>
+      </g>
+    </g>
+  </g>
+</svg>

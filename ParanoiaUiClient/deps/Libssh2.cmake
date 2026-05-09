@@ -20,6 +20,13 @@ function(setup_libssh2 TARGET)
         set(_crypto_backend "mbedTLS")
         message(STATUS "[libssh2] Crypto backend: mbedTLS (fetched)")
         _fetch_mbedtls()
+        # libssh2 uses its own FindMbedTLS.cmake (find_library style), not cmake targets.
+        # Point it at the FetchContent build tree so find_package(MbedTLS) succeeds.
+        FetchContent_GetProperties(mbedtls)
+        set(MBEDTLS_INCLUDE_DIR "${mbedtls_SOURCE_DIR}/include"                 CACHE PATH     "" FORCE)
+        set(MBEDCRYPTO_LIBRARY  "${mbedtls_BINARY_DIR}/library/libmbedcrypto.a" CACHE FILEPATH "" FORCE)
+        set(MBEDX509_LIBRARY    "${mbedtls_BINARY_DIR}/library/libmbedx509.a"   CACHE FILEPATH "" FORCE)
+        set(MBEDTLS_LIBRARY     "${mbedtls_BINARY_DIR}/library/libmbedtls.a"    CACHE FILEPATH "" FORCE)
     else()
         # Linux / macOS
         set(_crypto_backend "OpenSSL")
@@ -42,6 +49,7 @@ function(setup_libssh2 TARGET)
         GIT_SHALLOW    TRUE
     )
     set(BUILD_SHARED_LIBS          OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING              OFF CACHE BOOL "" FORCE)
     set(LIBSSH2_BUILD_TESTS        OFF CACHE BOOL "" FORCE)
     set(LIBSSH2_BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
     set(LIBSSH2_BUILD_DOCUMENTATION OFF CACHE BOOL "" FORCE)
@@ -49,6 +57,11 @@ function(setup_libssh2 TARGET)
     set(CRYPTO_BACKEND "${_crypto_backend}" CACHE STRING "" FORCE)
     message(STATUS "[libssh2] Will FetchContent_MakeAvailable")
     FetchContent_MakeAvailable(libssh2)
+    if(IOS OR ANDROID)
+        # libssh2_static links against IMPORTED MbedTLS targets (paths only, not cmake targets),
+        # so we must explicitly order the build.
+        add_dependencies(libssh2_static mbedcrypto mbedx509 mbedtls)
+    endif()
     # -- Линковка к переданному таргету ----------------------------------------
     target_link_libraries(${TARGET} PRIVATE libssh2_static)
     if(IOS OR ANDROID)

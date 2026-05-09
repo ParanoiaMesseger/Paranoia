@@ -93,6 +93,7 @@ Rectangle {
                     Layout.fillWidth: true
                     label:       "SSH-пользователь"
                     placeholder: "root"
+                    text:        "root"
                 }
 
                 ParaInput {
@@ -156,7 +157,7 @@ Rectangle {
                     Layout.fillWidth: true
                     visible:          root.errorText.length > 0
                     text:             root.errorText
-                    color:            Theme.error          // или Theme.accent / "#e05c5c"
+                    color:            Theme.error
                     font.pixelSize:   13
                     wrapMode:         Text.WordWrap
                 }

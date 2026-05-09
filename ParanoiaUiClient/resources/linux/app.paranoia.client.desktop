@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Paranoia
+Exec=Paranoia
+Icon=app.paranoia.client
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupNotify=true
+StartupWMClass=ParanoiaUiClient

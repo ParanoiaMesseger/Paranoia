@@ -1,8 +1,8 @@
-use anyhow::{bail, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use anyhow::{Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, KeyInit},
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -46,7 +46,8 @@ pub fn verify(verifying_key: &VerifyingKey, message: &[u8], sig_bytes: &[u8]) ->
     if sig_bytes.len() != 64 {
         bail!("Signature must be 64 bytes");
     }
-    let sig_arr: [u8; 64] = sig_bytes.try_into().unwrap();
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(sig_bytes);
     let sig = Signature::from_bytes(&sig_arr);
     verifying_key
         .verify(message, &sig)

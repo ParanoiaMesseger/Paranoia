@@ -1,12 +1,12 @@
+use crate::Cover;
 use crate::crypto::decode_b64;
 use crate::routes::{
     determinate::{ApiResponse as DetResp, DeterminateRequest},
     pull::{ApiResponse as PullResp, PullRequest},
     push::{ApiResponse as PushResp, PushRequest},
 };
-use crate::Cover;
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 
 /// Базовый маскарад: API "склад/заказы".
 pub struct FoodDeliveryCover;

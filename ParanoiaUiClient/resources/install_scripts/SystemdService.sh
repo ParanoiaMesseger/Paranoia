@@ -19,6 +19,7 @@ EOF
 sudo cat > /opt/Paranoia/unistall.sh << 'EOF'
 #!/usr/bin/env bash
 sudo systemctl stop paranoia
+sudo systemctl disable paranoia
 sudo rm /etc/nginx/conf.d/paranoia.conf 
 sudo rm /etc/systemd/system/paranoia.service
 sudo rm -rf /opt/Paranoia
@@ -26,6 +27,7 @@ sudo systemctl restart nginx
 sudo certbot revoke --cert-name {DOMAIN} --non-interactive
 sudo certbot delete --cert-name {DOMAIN} --non-interactive
 sudo systemctl daemon-reload
+pkill -9 paranoia
 EOF
 
 sudo chmod +x /opt/Paranoia/start.sh

@@ -18,10 +18,11 @@ Column {
 
     Text {
         text:           root.label
-        color:          Theme.textSecondary
+        color:          field.activeFocus ? Theme.accentHover : Theme.textSecondary
         font.pixelSize: Theme.fontSm
         font.family:    Theme.fontFamily
         visible:        root.label !== ""
+        Behavior on color { ColorAnimation { duration: 100 } }
     }
 
     Rectangle {
@@ -32,9 +33,20 @@ Column {
         border.color: root.hasError
                       ? Theme.error
                       : field.activeFocus ? Theme.accent : Theme.border
-        border.width: root.hasError || field.activeFocus ? 1 : 0
+        border.width: 1
 
         Behavior on border.color { ColorAnimation { duration: 100 } }
+
+        Rectangle {
+            anchors.left: parent.left
+            anchors.top: parent.top
+            width: field.activeFocus ? parent.width * .42 : 24
+            height: 2
+            color: root.hasError ? Theme.error : Theme.accent
+            opacity: root.hasError || field.activeFocus ? 1 : .35
+            Behavior on width { NumberAnimation { duration: 120 } }
+            Behavior on opacity { NumberAnimation { duration: 120 } }
+        }
 
         TextField {
             id:                  field
@@ -49,7 +61,13 @@ Column {
 
             // ── Убираем системное выделение ──
             selectionColor:      Theme.accentDark
-            selectedTextColor:   "#FFFFFF"
+            selectedTextColor:   Theme.textPrimary
+
+            // ── Фикс Android Material: сбрасываем паддинги под floating label ──
+            topPadding: 0
+            bottomPadding: 0
+            leftPadding: 0
+            rightPadding: 0
         }
     }
 
