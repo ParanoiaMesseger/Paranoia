@@ -8,10 +8,10 @@ use crate::{
     crypto,
     packet::PacketInner,
     store::LocalStore,
-    transport::{Transport, CorePush, CorePull, CoreDeterminate, RawPacket},
+    transport::{CoreDeterminate, CorePull, CorePush, RawPacket, Transport},
     types::{
-        ClientConfig, DialogueConfig, DialogueKey, FileAttachment, Message, MessageContent,
-        MessageStatus, CHUNK_SIZE_MAX, CHUNK_SIZE_MIN,
+        CHUNK_SIZE_MAX, CHUNK_SIZE_MIN, ClientConfig, DialogueConfig, DialogueKey, FileAttachment,
+        Message, MessageContent, MessageStatus,
     },
 };
 
@@ -31,6 +31,10 @@ impl Dialogue {
         store: Arc<LocalStore>,
     ) -> Self {
         let key = config.key.clone();
+        let mut config = config;
+        if let Err(e) = config.normalize() {
+            warn!("Invalid dialogue keyring: {e}");
+        }
         Self {
             key,
             config,
@@ -52,7 +56,8 @@ impl Dialogue {
         mime_type: impl Into<String>,
         data: Vec<u8>,
     ) -> Result<Vec<Message>> {
-        self.send_chunked(filename.into(), mime_type.into(), data).await
+        self.send_chunked(filename.into(), mime_type.into(), data)
+            .await
     }
 
     pub async fn send_image(
@@ -60,11 +65,13 @@ impl Dialogue {
         filename: impl Into<String>,
         data: Vec<u8>,
     ) -> Result<Vec<Message>> {
-        self.send_chunked(filename.into(), "image/jpeg".into(), data).await
+        self.send_chunked(filename.into(), "image/jpeg".into(), data)
+            .await
     }
 
     pub async fn send_voice(&self, data: Vec<u8>) -> Result<Vec<Message>> {
-        self.send_chunked("voice.ogg".into(), "audio/ogg".into(), data).await
+        self.send_chunked("voice.ogg".into(), "audio/ogg".into(), data)
+            .await
     }
 
     pub async fn send_read_receipt(&self, up_to_seq: u64) -> Result<()> {
@@ -81,8 +88,9 @@ impl Dialogue {
     }
 
     /// Получить новые сообщения с сервера.
-    /// Возвращает только полностью собранные сообщения.
-    pub async fn receive(&self) -> Result<Vec<Message>> {
+    /// Возвращает (сообщения, кол-во ошибок расшифровки).
+    /// Ошибки расшифровки означают несовпадение ключа диалога.
+    pub async fn receive(&self) -> Result<(Vec<Message>, usize)> {
         let username = &self.client_cfg.username;
         let partner = self.partner();
         let after_seq = self.store.get_last_pulled_seq(&self.key)?;
@@ -100,30 +108,34 @@ impl Dialogue {
         let raw_packets: Vec<RawPacket> = self.transport.pull(&core_pull).await?;
 
         if raw_packets.is_empty() {
-            return Ok(vec![]);
+            self.store.set_last_pulled_seq(&self.key, after_seq)?;
+            return Ok((vec![], 0));
         }
 
         let mut messages = Vec::new();
         let mut max_seq = after_seq;
+        let mut decrypt_errors: usize = 0;
 
         for pkt in raw_packets {
             max_seq = max_seq.max(pkt.seq);
 
-            let inner = match self.decrypt_packet(&pkt.payload) {
+            let inner = match self.decrypt_packet(pkt.seq, &pkt.payload) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("Cannot decrypt seq={}: {e}", pkt.seq);
+                    decrypt_errors += 1;
                     continue;
                 }
             };
 
-            // Собственные пакеты — обновляем статус до Delivered
+            // Собственные пакеты из локальной БД — обновляем статус до Delivered.
+            // Если seq неизвестен локально, это история другого устройства того же пользователя.
             if inner.sender == *username {
                 if let Some(msg_id) = self.store.get_message_by_seq(&self.key, pkt.seq)? {
                     self.store
                         .update_status(&msg_id, MessageStatus::Delivered)?;
+                    continue;
                 }
-                continue;
             }
 
             // Обрабатываем входящий пакет
@@ -133,7 +145,7 @@ impl Dialogue {
         }
 
         self.store.set_last_pulled_seq(&self.key, max_seq)?;
-        Ok(messages)
+        Ok((messages, decrypt_errors))
     }
 
     pub async fn history(
@@ -164,6 +176,8 @@ impl Dialogue {
 
     /// Отправить одиночный пакет любого типа.
     async fn send(&self, content: MessageContent) -> Result<Message> {
+        self.receive().await?;
+
         let username = &self.client_cfg.username;
         let partner = self.partner();
         let id = Uuid::new_v4().to_string();
@@ -176,10 +190,10 @@ impl Dialogue {
             content: content.clone(),
         };
 
-        let ciphertext = crypto::encrypt(&self.config.session_key, &inner.serialize()?)?;
-
         // Атомарный seq из локального счётчика
         let seq = self.store.next_send_seq(&self.key)?;
+        let session_key = self.config.key_for_seq(seq)?;
+        let ciphertext = crypto::encrypt(session_key, &inner.serialize()?)?;
 
         // Подпись: sender + recver + seq + payload(base64)
         let payload_b64 = crypto::encode_b64(&ciphertext);
@@ -246,8 +260,9 @@ impl Dialogue {
         Ok(sent)
     }
 
-    fn decrypt_packet(&self, data: &[u8]) -> Result<PacketInner> {
-        let plaintext = crypto::decrypt(&self.config.session_key, data)?;
+    fn decrypt_packet(&self, seq: u64, data: &[u8]) -> Result<PacketInner> {
+        let session_key = self.config.key_for_seq(seq)?;
+        let plaintext = crypto::decrypt(session_key, data)?;
         PacketInner::deserialize(&plaintext)
     }
 
@@ -260,8 +275,7 @@ impl Dialogue {
                 Ok(None)
             }
             MessageContent::Delete { target_id } => {
-                self.store
-                    .update_status(target_id, MessageStatus::Failed)?;
+                self.store.update_status(target_id, MessageStatus::Failed)?;
                 debug!("Delete receipt for message id={target_id}");
                 Ok(None)
             }
@@ -296,9 +310,7 @@ impl Dialogue {
                     transfer_id
                 );
 
-                if let Some(assembled) =
-                    self.store.try_assemble_chunks(transfer_id, &self.key)?
-                {
+                if let Some(assembled) = self.store.try_assemble_chunks(transfer_id, &self.key)? {
                     let msg = Message {
                         id: Uuid::new_v4().to_string(),
                         dialogue: self.key.clone(),

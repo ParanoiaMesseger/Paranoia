@@ -27,7 +27,9 @@ impl AdminKeyPair {
                 bytes.len()
             ));
         }
-        let sk = SigningKey::from_bytes(&bytes.try_into().unwrap());
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes.copy_from_slice(&bytes);
+        let sk = SigningKey::from_bytes(&sk_bytes);
         let pk = sk.verifying_key();
         Ok(Self { sk, pk })
     }

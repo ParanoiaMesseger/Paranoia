@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -82,10 +83,64 @@ impl DialogueKey {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DialogueKeyEntry {
+    pub start_seq: u64,
+    pub key: [u8; 32],
+}
+
 #[derive(Debug, Clone)]
 pub struct DialogueConfig {
     pub key: DialogueKey,
-    pub session_key: [u8; 32],
+    pub keyring: Vec<DialogueKeyEntry>,
+}
+
+impl DialogueConfig {
+    pub fn single_key(key: DialogueKey, session_key: [u8; 32]) -> Self {
+        Self {
+            key,
+            keyring: vec![DialogueKeyEntry {
+                start_seq: 1,
+                key: session_key,
+            }],
+        }
+    }
+
+    pub fn with_keyring(key: DialogueKey, mut keyring: Vec<DialogueKeyEntry>) -> Result<Self> {
+        normalize_keyring(&mut keyring)?;
+        Ok(Self { key, keyring })
+    }
+
+    pub fn normalize(&mut self) -> Result<()> {
+        normalize_keyring(&mut self.keyring)
+    }
+
+    pub fn key_for_seq(&self, seq: u64) -> Result<&[u8; 32]> {
+        self.keyring
+            .iter()
+            .rev()
+            .find(|entry| entry.start_seq <= seq)
+            .map(|entry| &entry.key)
+            .ok_or_else(|| anyhow::anyhow!("no dialogue key for seq {seq}"))
+    }
+}
+
+fn normalize_keyring(keyring: &mut Vec<DialogueKeyEntry>) -> Result<()> {
+    if keyring.is_empty() {
+        bail!("empty dialogue keyring");
+    }
+    keyring.sort_by_key(|entry| entry.start_seq);
+    let mut previous = None;
+    for entry in keyring.iter() {
+        if entry.start_seq == 0 {
+            bail!("invalid keyring start_seq");
+        }
+        if previous == Some(entry.start_seq) {
+            bail!("duplicate keyring start_seq");
+        }
+        previous = Some(entry.start_seq);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

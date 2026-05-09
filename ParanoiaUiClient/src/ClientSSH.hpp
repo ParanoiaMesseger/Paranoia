@@ -1,8 +1,16 @@
 #pragma once
-#include <QObject>
-#include <QString>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+using SshSocket = SOCKET;
+#else
+using SshSocket = int;
+#endif
+
 #include <QThread>
-#include <qstringview.h>
 
 struct SshConnectionParams {
     QString host;
@@ -22,15 +30,13 @@ public:
 
 public slots:
     void connectToHost(const SshConnectionParams &params);
-    void runScript(QByteArray scriptContent, const QString &localScriptPath);
+    void runScript(QByteArray scriptContent);
     void disconnectFromHost();
 
 signals:
     void connected();
     void disconnected();
     void connectionError(const QString &reason);
-    void scriptStarted(const QString &scriptPath);
-    void scriptOutput(const QString &text);
     void scriptFinished(int exitCode);
     void scriptError(const QString &reason);
 
@@ -39,9 +45,11 @@ private:
     void cleanup();
 
     void *session_  = nullptr; // LIBSSH2_SESSION*
-    int sock_       = -1;
+    SshSocket sock_ = static_cast<SshSocket>(-1);
     bool connected_ = false;
-    SshConnectionParams params_;
+#if defined(_WIN32)
+    bool winsockReady_ = false;
+#endif
 };
 
 class ClientSSH : public QObject
@@ -57,22 +65,20 @@ public:
     QByteArray getScriptContent(const QString &localScriptPath);
 public slots:
     void connectToHost(const SshConnectionParams &params);
-    void runScript(const QString &localScriptPath);
-    void runScript(QByteArray scriptContent, const QString &localScriptPath);
+    void runScriptByPath(const QString &localScriptPath);
+    void runScript(QByteArray scriptContent);
     void disconnectFromHost();
 
 signals:
     void connected();
     void disconnected();
     void connectionError(const QString &reason);
-    void scriptStarted(const QString &scriptPath);
-    void scriptOutput(const QString &text);
     void scriptFinished(int exitCode);
     void scriptError(const QString &reason);
 
     // Внутренние сигналы → Worker (QueuedConnection)
     void _connectRequested(const SshConnectionParams &params);
-    void _runScriptRequested(QByteArray scriptContent, const QString &path);
+    void _runScriptRequested(QByteArray scriptContent);
     void _disconnectRequested();
 
 private:

@@ -2,31 +2,34 @@ import QtQuick
 import ParanoiaUiClient
 
 Row {
-    spacing: 10
+    spacing: 12
     property string stepText: ""
     property int    status:   0   // 0=pending, 1=running, 2=done, 3=error
 
     Rectangle {
         width:  20; height: 20
-        radius: 10
+        radius: Theme.radiusSm
         color: {
             if (status === 2) return Theme.success
             if (status === 3) return Theme.error
             if (status === 1) return Theme.accent
-            return Theme.border
+            return Theme.bgInput
         }
+        border.width: 1
+        border.color: status === 0 ? Theme.border : Theme.accentHover
         Behavior on color { ColorAnimation { duration: 200 } }
 
         Text {
             anchors.centerIn: parent
             text: {
-                if (status === 2) return "✓"
-                if (status === 3) return "✕"
-                if (status === 1) return "…"
+                if (status === 2) return "OK"
+                if (status === 3) return "X"
+                if (status === 1) return ".."
                 return ""
             }
-            color:          "#FFFFFF"
-            font.pixelSize: Theme.fontXs
+            color:          Theme.textPrimary
+            font.pixelSize: 8
+            font.family:    Theme.monoFamily
         }
     }
 

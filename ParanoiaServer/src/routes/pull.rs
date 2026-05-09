@@ -1,8 +1,9 @@
-use crate::{crypto, AppState};
-use axum::{extract::State, Json};
+use crate::{AppState, crypto};
+use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
+use tracing::warn;
 
 #[derive(Deserialize)]
 pub struct PullRequest {
@@ -18,20 +19,29 @@ pub struct ApiResponse {
     pub message: Value,
 }
 
-pub async fn handle(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<PullRequest>,
-) -> Json<ApiResponse> {
-    Json(do_pull(state, req).await)
+pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
+    // Cover → Core
+    let req = match state.cover.unwrap_pull(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Bad cover in pull: {e}");
+            return Json(json!({
+                "ok": false,
+                "status": "error",
+                "message": format!("Bad cover: {e}"),
+            }));
+        }
+    };
+
+    let core_resp = do_pull(&state, req).await;
+    let wrapped = state.cover.wrap_pull_response(&core_resp);
+    Json(wrapped)
 }
 
-async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
-    let m = &state.metrics;
-
+async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
         Err(_) => {
-            m.inc_pull_fail();
             return fail("Bad sig encoding".into());
         }
     };
@@ -44,7 +54,6 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
         match (s, r) {
             (Some(s), Some(r)) => (s, r),
             _ => {
-                m.inc_pull_fail();
                 return fail("One user in pair not registered".into());
             }
         }
@@ -55,7 +64,6 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
         || crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok();
 
     if !valid {
-        m.inc_pull_fail();
         dbg!(
             "Invalid pull signature for dialogue {}<->{}",
             req.sender,
@@ -76,16 +84,12 @@ async fn do_pull(state: Arc<AppState>, req: PullRequest) -> ApiResponse {
                     })
                 })
                 .collect();
-            m.inc_pull_success();
             ApiResponse {
                 success: true,
                 message: Value::Array(arr),
             }
         }
-        Err(e) => {
-            m.inc_pull_fail();
-            fail(format!("{e}"))
-        }
+        Err(e) => fail(format!("{e}")),
     }
 }
 

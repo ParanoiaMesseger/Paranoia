@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rocksdb::{IteratorMode, Options, WriteBatch, DB};
+use rocksdb::{DB, IteratorMode, Options, WriteBatch};
 
 pub struct PacketStore {
     db: DB,
