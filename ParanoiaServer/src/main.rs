@@ -43,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/reg", post(routes::reg::handle))
         .route("/push", post(routes::push::handle))
         .route("/pull", post(routes::pull::handle))
+        .route("/notify", post(routes::notify::handle))
         .route("/determinate", post(routes::determinate::handle))
         .with_state(state);
 

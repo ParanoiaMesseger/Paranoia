@@ -39,6 +39,9 @@ int paranoia_register_user(const char *server_url, const char *username, const c
 char *paranoia_send_text_json_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json,
                                       const char *text);
 
+char *paranoia_send_file_json_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json,
+                                      const char *file_path, const char *mime_type);
+
 // Получить новые сообщения с сервера.
 // Возвращает JSON-массив или NULL при сетевой ошибке.
 // Пустой массив [] — нет новых сообщений.
@@ -46,16 +49,34 @@ char *paranoia_send_text_json_keyring(RS_QS *handle, const char *user_a, const c
 // paranoia_last_error() в "decryption_failed:<N>".
 char *paranoia_receive_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json);
 
+// Проверить количество новых сообщений без загрузки payload.
+// Возвращает 0 при успехе и пишет результат в out_count.
+int paranoia_notify_count_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json,
+                                  uint64_t *out_count);
+
 // Локальная история из SQLite.
 char *paranoia_history_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json,
                                uintptr_t limit);
+
+// Сохранить вложение. Если тело файла ещё не загружено, скачивает нужный
+// диапазон body-пакетов через bounded pull и затем пишет target_path.
+int paranoia_save_attachment_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json,
+                                       const char *message_id, const char *target_path);
+
+// Сохранить вложение во внутренний cache приложения и вернуть локальный путь.
+char *paranoia_cache_attachment_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json,
+                                        const char *message_id);
 
 // ── Управление историей
 // ─────────────────────────────────────────────────────── Удалить серверную
 // историю диалога до cut_seq включительно (determinate). Возвращает 0 при
 // успехе, -1 при ошибке.
 int paranoia_determinate_keyring(RS_QS *handle, const char *user_a, const char *user_b, const char *keyring_json,
-                                 uint64_t cut_seq);
+                                  uint64_t cut_seq);
+
+// Удалить локальные сообщения диалога до cut_seq включительно.
+int paranoia_delete_local_until_keyring(RS_QS *handle, const char *user_a, const char *user_b,
+                                        const char *keyring_json, uint64_t cut_seq);
 
 // Последний локально синхронизированный server seq для выбора start_seq нового
 // ключа.
@@ -183,14 +204,29 @@ public:
     QString send_text_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR text)
     { return RS_QS(::paranoia_send_text_json_keyring(ptr, QS_RS4(user_a, user_b, keyring_json, text))); }
 
+    QString send_file_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path, QSTR mime_type)
+    { return RS_QS(::paranoia_send_file_json_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type))); }
+
     QString receive_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json)
     { return RS_QS(::paranoia_receive_keyring(ptr, QS_RS3(user_a, user_b, keyring_json))); }
+
+    int notify_count_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_count)
+    { return ::paranoia_notify_count_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_count); }
 
     QString history_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uintptr_t limit)
     { return RS_QS(::paranoia_history_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), limit)); }
 
+    int save_attachment_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR message_id, QSTR target_path)
+    { return ::paranoia_save_attachment_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(message_id), QS_RS(target_path)); }
+
+    QString cache_attachment_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR message_id)
+    { return RS_QS(::paranoia_cache_attachment_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(message_id))); }
+
     int determinate_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t cut_seq)
     { return ::paranoia_determinate_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), cut_seq); }
+
+    int delete_local_until_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t cut_seq)
+    { return ::paranoia_delete_local_until_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), cut_seq); }
 
     int last_pulled_seq(QSTR user_a, QSTR user_b, uint64_t &out_seq)
     { return ::paranoia_last_pulled_seq(ptr, QS_RS(user_a), QS_RS(user_b), &out_seq); }

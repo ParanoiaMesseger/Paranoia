@@ -110,6 +110,40 @@ impl LocalStore {
         Ok(seq as u64)
     }
 
+    /// Зарезервировать непрерывный диапазон исходящих seq.
+    /// Возвращает первый seq диапазона.
+    pub fn reserve_send_seq_range(&self, dialogue: &DialogueKey, count: u64) -> Result<u64> {
+        if count == 0 {
+            anyhow::bail!("empty seq range");
+        }
+
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO dialogue_state (dialogue_a, dialogue_b, last_pulled_seq, next_send_seq)
+             VALUES (?1, ?2, 0, 1)
+             ON CONFLICT(dialogue_a, dialogue_b) DO NOTHING",
+            params![dialogue.a, dialogue.b],
+        )?;
+
+        let start_seq: i64 = conn.query_row(
+            "SELECT next_send_seq FROM dialogue_state
+             WHERE dialogue_a = ?1 AND dialogue_b = ?2",
+            params![dialogue.a, dialogue.b],
+            |r| r.get(0),
+        )?;
+        let end_next = (start_seq as u64)
+            .checked_add(count)
+            .ok_or_else(|| anyhow::anyhow!("seq range overflow"))?;
+
+        conn.execute(
+            "UPDATE dialogue_state
+             SET next_send_seq = ?3
+             WHERE dialogue_a = ?1 AND dialogue_b = ?2",
+            params![dialogue.a, dialogue.b, end_next as i64],
+        )?;
+        Ok(start_seq as u64)
+    }
+
     pub fn get_last_pulled_seq(&self, dialogue: &DialogueKey) -> Result<u64> {
         let conn = self.conn()?;
         let seq: Option<i64> = conn
@@ -173,6 +207,26 @@ impl LocalStore {
         conn.execute(
             "UPDATE messages SET status = ?1 WHERE id = ?2",
             params![serde_json::to_string(&status)?, message_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_messages_until(&self, dialogue: &DialogueKey, cut_seq: u64) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM messages
+             WHERE dialogue_a = ?1
+               AND dialogue_b = ?2
+               AND server_seq IS NOT NULL
+               AND server_seq <= ?3",
+            params![dialogue.a, dialogue.b, cut_seq as i64],
+        )?;
+        conn.execute(
+            "DELETE FROM seq_map
+             WHERE dialogue_a = ?1
+               AND dialogue_b = ?2
+               AND server_seq <= ?3",
+            params![dialogue.a, dialogue.b, cut_seq as i64],
         )?;
         Ok(())
     }
@@ -263,6 +317,48 @@ impl LocalStore {
         }
         messages.reverse();
         Ok(messages)
+    }
+
+    pub fn get_message_by_id(
+        &self,
+        dialogue: &DialogueKey,
+        message_id: &str,
+    ) -> Result<Option<Message>> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT id, sender, content, timestamp, status, server_seq
+                 FROM messages
+                 WHERE dialogue_a = ?1
+                   AND dialogue_b = ?2
+                   AND id = ?3
+                 LIMIT 1",
+                params![dialogue.a, dialogue.b, message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        row.map(|(id, sender, content_json, ts_str, status_json, seq)| {
+            Ok(Message {
+                id,
+                dialogue: dialogue.clone(),
+                sender,
+                content: serde_json::from_str(&content_json)?,
+                timestamp: ts_str.parse::<DateTime<Utc>>()?,
+                status: serde_json::from_str(&status_json)?,
+                server_seq: seq.map(|s| s as u64),
+            })
+        })
+        .transpose()
     }
 
     // ── dialogue deletion ─────────────────────────────────────────────────

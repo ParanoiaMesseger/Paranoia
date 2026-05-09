@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 pub type MessageId = String;
 
@@ -18,7 +19,28 @@ pub struct FileAttachment {
     pub filename: String,
     pub mime_type: String,
     pub size: usize,
+    #[serde(default)]
     pub data: Vec<u8>,
+    #[serde(default)]
+    pub transfer_id: Option<String>,
+    #[serde(default)]
+    pub cache_path: Option<String>,
+    #[serde(default)]
+    pub chunk_count: u32,
+    #[serde(default)]
+    pub body_from_seq: u64,
+    #[serde(default)]
+    pub body_to_seq: u64,
+    #[serde(default)]
+    pub downloaded: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    File,
+    Image,
+    Voice,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +49,15 @@ pub enum MessageContent {
     File(FileAttachment),
     Image(FileAttachment),
     Voice(FileAttachment),
+    /// Заголовок файла. За ним сразу идут `chunks` body-пакетов FileChunk.
+    FileHeader {
+        transfer_id: String,
+        kind: AttachmentKind,
+        filename: String,
+        mime_type: String,
+        total_size: usize,
+        chunks: u32,
+    },
     /// Один чанк файла — сервер не знает что это
     FileChunk {
         transfer_id: String, // UUID одной передачи файла
@@ -35,6 +66,7 @@ pub enum MessageContent {
         filename: String,
         mime_type: String,
         total_size: usize,
+        #[serde(with = "base64_vec")]
         data: Vec<u8>, // данные чанка (до CHUNK_SIZE байт)
     },
     /// Служебный: прочитано до seq включительно
@@ -152,4 +184,101 @@ pub struct ClientConfig {
 }
 
 pub const CHUNK_SIZE_MIN: usize = 1024; // 1 KB
-pub const CHUNK_SIZE_MAX: usize = 768 * 1024; // 768 KB
+pub const CHUNK_SIZE_MAX: usize = 192 * 1024; // 192 KB raw, safe after JSON/base64 cover expansion
+
+mod base64_vec {
+    use super::*;
+
+    pub fn serialize<S>(data: &[u8], serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&B64.encode(data))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct BytesVisitor;
+
+        impl<'de> de::Visitor<'de> for BytesVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("base64 string or legacy byte array")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                B64.decode(value).map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
+        }
+
+        deserializer.deserialize_any(BytesVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn file_chunk_data_serializes_as_base64_string() {
+        let content = MessageContent::FileChunk {
+            transfer_id: "transfer".to_string(),
+            index: 0,
+            total: 1,
+            filename: "payload.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            total_size: 4,
+            data: vec![1, 2, 3, 4],
+        };
+
+        let value = serde_json::to_value(&content).expect("serialize chunk");
+        assert_eq!(value["FileChunk"]["data"], json!("AQIDBA=="));
+    }
+
+    #[test]
+    fn file_chunk_data_accepts_legacy_byte_array() {
+        let value = json!({
+            "FileChunk": {
+                "transfer_id": "transfer",
+                "index": 0,
+                "total": 1,
+                "filename": "payload.bin",
+                "mime_type": "application/octet-stream",
+                "total_size": 4,
+                "data": [1, 2, 3, 4]
+            }
+        });
+
+        let content: MessageContent =
+            serde_json::from_value(value).expect("deserialize legacy chunk");
+        match content {
+            MessageContent::FileChunk { data, .. } => assert_eq!(data, vec![1, 2, 3, 4]),
+            other => panic!("expected file chunk, got {other:?}"),
+        }
+    }
+}

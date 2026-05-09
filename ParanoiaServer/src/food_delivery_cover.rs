@@ -2,6 +2,7 @@ use crate::Cover;
 use crate::crypto::decode_b64;
 use crate::routes::{
     determinate::{ApiResponse as DetResp, DeterminateRequest},
+    notify::{ApiResponse as NotifyResp, NotifyRequest},
     pull::{ApiResponse as PullResp, PullRequest},
     push::{ApiResponse as PushResp, PushRequest},
 };
@@ -107,6 +108,7 @@ impl Cover for FoodDeliveryCover {
     ///   "clientId": "alice",
     ///   "partnerId": "bob",
     ///   "cursor": 10,
+    ///   "toSeq": 0,
     ///   "auth": "<sig base64>"
     /// }
     fn unwrap_pull(&self, body: &Value) -> Result<PullRequest> {
@@ -128,6 +130,7 @@ impl Cover for FoodDeliveryCover {
         let after_seq = body["cursor"]
             .as_u64()
             .ok_or_else(|| anyhow!("no cursor"))?;
+        let to_seq = body["toSeq"].as_u64().ok_or_else(|| anyhow!("no toSeq"))?;
         let sig = body["auth"]
             .as_str()
             .ok_or_else(|| anyhow!("no auth"))?
@@ -137,6 +140,7 @@ impl Cover for FoodDeliveryCover {
             sender,
             recver,
             after_seq,
+            to_seq,
             sig,
         })
     }
@@ -171,6 +175,68 @@ impl Cover for FoodDeliveryCover {
         json!({
             "ok": true,
             "orders": orders,
+        })
+    }
+
+    // ===================== NOTIFY =====================
+
+    /// Внешний формат /notify:
+    /// {
+    ///   "operation": "checkOrders",
+    ///   "clientId": "alice",
+    ///   "partnerId": "bob",
+    ///   "cursor": 42,
+    ///   "auth": "<sig base64>"
+    /// }
+    fn unwrap_notify(&self, body: &Value) -> Result<NotifyRequest> {
+        let op = body["operation"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no operation"))?;
+        if op != "checkOrders" {
+            return Err(anyhow!("unsupported operation"));
+        }
+
+        let sender = body["clientId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no clientId"))?
+            .to_string();
+        let partner = body["partnerId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no partnerId"))?
+            .to_string();
+        let seq = body["cursor"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("no cursor"))?;
+        let sig = body["auth"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no auth"))?
+            .to_string();
+
+        Ok(NotifyRequest {
+            sender,
+            partner,
+            seq,
+            sig,
+        })
+    }
+
+    /// Внешний формат ответа /notify:
+    /// {
+    ///   "ok": true,
+    ///   "n": 3
+    /// }
+    fn wrap_notify_response(&self, resp: &NotifyResp) -> Value {
+        if !resp.success {
+            return json!({
+                "ok": false,
+                "status": "error",
+                "message": resp.message,
+            });
+        }
+
+        json!({
+            "ok": true,
+            "n": resp.n,
         })
     }
 

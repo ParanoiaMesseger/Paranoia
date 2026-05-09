@@ -10,7 +10,8 @@ pub struct PullRequest {
     pub sender: String,
     pub recver: String,
     pub after_seq: u64,
-    pub sig: String, // подпись от sender+recver+after_seq
+    pub to_seq: u64, // 0 = как раньше; иначе ограниченный диапазон
+    pub sig: String, // подпись от sender+recver+after_seq+to_seq
 }
 
 #[derive(Serialize)]
@@ -46,6 +47,10 @@ async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
         }
     };
 
+    if req.to_seq != 0 && req.to_seq < req.after_seq {
+        return fail("Invalid pull range".into());
+    }
+
     // Подписать может любой из участников диалога — проверяем обоих
     let (sender_pub, recver_pub) = {
         let cfg = state.config.read().await;
@@ -59,7 +64,10 @@ async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
         }
     };
 
-    let signed_msg = format!("{}{}{}", req.sender, req.recver, req.after_seq);
+    let signed_msg = format!(
+        "{}{}{}{}",
+        req.sender, req.recver, req.after_seq, req.to_seq
+    );
     let valid = crypto::verify_signature(&sender_pub, signed_msg.as_bytes(), &sig).is_ok()
         || crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok();
 
@@ -73,7 +81,7 @@ async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
     }
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
-    match state.store.pull(&dialogue_id, req.after_seq) {
+    match state.store.pull(&dialogue_id, req.after_seq, req.to_seq) {
         Ok(packets) => {
             let arr: Vec<Value> = packets
                 .into_iter()

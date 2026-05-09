@@ -99,6 +99,239 @@ async fn two_clients_exchange_and_restore_history_from_sqlite() {
     server.wait().ok();
 }
 
+#[tokio::test]
+async fn notify_counts_messages_without_pulling_payloads() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    let alice_key = signing_key();
+    let bob_key = signing_key();
+    let alice_pub = B64.encode(alice_key.verifying_key().to_bytes());
+    let bob_pub = B64.encode(bob_key.verifying_key().to_bytes());
+
+    let alice = build_client(temp.path(), &server_url, "alice", alice_key.clone());
+    let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
+    alice
+        .transport()
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
+        .await
+        .expect("register alice");
+    bob.transport()
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
+        .await
+        .expect("register bob");
+
+    let session_key = [7u8; 32];
+    let alice_dialogue = alice.open_dialogue(dialogue_config("alice", "bob", session_key));
+    let bob_dialogue = bob.open_dialogue(dialogue_config("bob", "alice", session_key));
+
+    alice_dialogue.send_text("one").await.expect("send one");
+    alice_dialogue.send_text("two").await.expect("send two");
+    alice_dialogue.send_text("three").await.expect("send three");
+
+    let pending = bob_dialogue.notify_count().await.expect("bob notify count");
+    assert_eq!(pending, 3);
+
+    let local_history = bob_dialogue
+        .history(10, None)
+        .await
+        .expect("bob local history");
+    assert!(
+        local_history.is_empty(),
+        "notify must not pull or decrypt payloads"
+    );
+
+    let (received, decrypt_errors) = bob_dialogue.receive().await.expect("bob receives");
+    assert_eq!(decrypt_errors, 0);
+    assert_eq!(received.len(), 3);
+
+    let pending_after_receive = bob_dialogue
+        .notify_count()
+        .await
+        .expect("bob notify after receive");
+    assert_eq!(pending_after_receive, 0);
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
+#[tokio::test]
+async fn file_header_skips_body_until_explicit_download() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    let alice_key = signing_key();
+    let bob_key = signing_key();
+    let alice_pub = B64.encode(alice_key.verifying_key().to_bytes());
+    let bob_pub = B64.encode(bob_key.verifying_key().to_bytes());
+
+    let alice = build_client(temp.path(), &server_url, "alice", alice_key.clone());
+    let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
+    alice
+        .transport()
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
+        .await
+        .expect("register alice");
+    bob.transport()
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
+        .await
+        .expect("register bob");
+
+    let session_key = [7u8; 32];
+    let alice_dialogue = alice.open_dialogue(dialogue_config("alice", "bob", session_key));
+    let bob_dialogue = bob.open_dialogue(dialogue_config("bob", "alice", session_key));
+
+    let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+    alice_dialogue
+        .send_file("payload.bin", "application/octet-stream", data.clone())
+        .await
+        .expect("alice sends file");
+    alice_dialogue
+        .send_text("after file")
+        .await
+        .expect("alice sends text after file");
+
+    let (received, decrypt_errors) = bob_dialogue.receive().await.expect("bob receives");
+    assert_eq!(decrypt_errors, 0);
+    assert_eq!(received.len(), 2);
+
+    let file_msg = &received[0];
+    let file = match &file_msg.content {
+        MessageContent::File(file) => file,
+        other => panic!("expected file header message, got {other:?}"),
+    };
+    assert_eq!(file.filename, "payload.bin");
+    assert_eq!(file.size, data.len());
+    assert!(file.data.is_empty(), "receive must not download file body");
+    assert!(!file.downloaded);
+    assert!(file.body_to_seq > file_msg.server_seq.unwrap());
+    assert!(matches!(&received[1].content, MessageContent::Text(text) if text == "after file"));
+
+    let target_path = temp.path().join("downloaded.bin");
+    bob_dialogue
+        .download_attachment(file_msg.id.as_str(), target_path.to_str().unwrap())
+        .await
+        .expect("download attachment");
+    assert_eq!(fs::read(&target_path).expect("read downloaded file"), data);
+
+    let history = bob_dialogue.history(10, None).await.expect("history");
+    let downloaded = history
+        .iter()
+        .find(|msg| msg.id == file_msg.id)
+        .expect("file in history");
+    let file = match &downloaded.content {
+        MessageContent::File(file) => file,
+        other => panic!("expected file in history, got {other:?}"),
+    };
+    assert!(file.downloaded);
+    assert_eq!(file.data.len(), data.len());
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
+#[tokio::test]
+async fn multi_megabyte_file_sends_and_downloads_in_small_requests() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    let alice_key = signing_key();
+    let bob_key = signing_key();
+    let alice_pub = B64.encode(alice_key.verifying_key().to_bytes());
+    let bob_pub = B64.encode(bob_key.verifying_key().to_bytes());
+
+    let alice = build_client(temp.path(), &server_url, "alice", alice_key.clone());
+    let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
+    alice
+        .transport()
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
+        .await
+        .expect("register alice");
+    bob.transport()
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
+        .await
+        .expect("register bob");
+
+    let session_key = [7u8; 32];
+    let alice_dialogue = alice.open_dialogue(dialogue_config("alice", "bob", session_key));
+    let bob_dialogue = bob.open_dialogue(dialogue_config("bob", "alice", session_key));
+
+    let data: Vec<u8> = (0..(3 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
+    alice_dialogue
+        .send_file("large.bin", "application/octet-stream", data.clone())
+        .await
+        .expect("alice sends large file");
+
+    let (received, decrypt_errors) = bob_dialogue.receive().await.expect("bob receives");
+    assert_eq!(decrypt_errors, 0);
+    assert_eq!(received.len(), 1);
+    let file_msg = &received[0];
+    let file = match &file_msg.content {
+        MessageContent::File(file) => file,
+        other => panic!("expected file header message, got {other:?}"),
+    };
+    assert_eq!(file.size, data.len());
+    assert!(
+        file.chunk_count > 1,
+        "large file must be sent in multiple chunks"
+    );
+
+    let target_path = temp.path().join("downloaded-large.bin");
+    bob_dialogue
+        .download_attachment(file_msg.id.as_str(), target_path.to_str().unwrap())
+        .await
+        .expect("download large attachment");
+    assert_eq!(fs::read(&target_path).expect("read downloaded file"), data);
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
 fn signing_key() -> SigningKey {
     let mut secret = [0u8; 32];
     rand::fill(&mut secret);

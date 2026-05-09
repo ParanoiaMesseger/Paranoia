@@ -8,7 +8,6 @@ Rectangle {
     property string title: ""
     property string keyText: ""
     property string emptyText: "—"
-    property string copyButtonText: "CP"
     property color backgroundColor: Theme.bgSecondary
     property color borderColor: Theme.border
     property color titleColor: Theme.textSecondary
@@ -75,13 +74,59 @@ Rectangle {
                 color: copyArea.containsMouse && root.keyText.length > 0 ? Theme.bgButton : "transparent"
                 opacity: root.keyText.length > 0 ? 1 : 0.5
 
-                Text {
+                Canvas {
                     anchors.centerIn: parent
-                    text: root.copyButtonText
-                    color: Theme.accentHover
-                    font.pixelSize: 10
-                    font.family: Theme.monoFamily
-                    font.weight: Font.DemiBold
+                    width: 20
+                    height: 20
+                    antialiasing: true
+
+                    property bool hovered: copyArea.containsMouse
+                    onHoveredChanged: requestPaint()
+
+                    onPaint: {
+                        const ctx = getContext("2d");
+                        ctx.clearRect(0, 0, width, height);
+                        ctx.lineWidth = 1.5;
+                        ctx.lineJoin = "round";
+
+                        // --- Задний лист (смещён вправо-вниз) ---
+                        ctx.strokeStyle = Theme.accentHover;
+                        ctx.fillStyle = hovered ? Theme.bgButton : "transparent";
+                        ctx.beginPath();
+                        ctx.moveTo(width * 0.36, height * 0.28);
+                        ctx.lineTo(width * 0.72, height * 0.28);
+                        ctx.lineTo(width * 0.86, height * 0.44);
+                        ctx.lineTo(width * 0.86, height * 0.92);
+                        ctx.lineTo(width * 0.36, height * 0.92);
+                        ctx.closePath();
+                        ctx.fill();
+                        ctx.stroke();
+                        // загнутый уголок заднего листа
+                        ctx.beginPath();
+                        ctx.moveTo(width * 0.72, height * 0.28);
+                        ctx.lineTo(width * 0.72, height * 0.44);
+                        ctx.lineTo(width * 0.86, height * 0.44);
+                        ctx.stroke();
+
+                        // --- Передний лист (смещён влево-вверх) ---
+                        ctx.strokeStyle = Theme.accentHover;
+                        ctx.fillStyle = Theme.bgBase;   // фон мессенджера — перекрывает задний лист
+                        ctx.beginPath();
+                        ctx.moveTo(width * 0.14, height * 0.08);
+                        ctx.lineTo(width * 0.58, height * 0.08);
+                        ctx.lineTo(width * 0.72, height * 0.24);
+                        ctx.lineTo(width * 0.72, height * 0.72);
+                        ctx.lineTo(width * 0.14, height * 0.72);
+                        ctx.closePath();
+                        ctx.fill();
+                        ctx.stroke();
+                        // загнутый уголок переднего листа
+                        ctx.beginPath();
+                        ctx.moveTo(width * 0.58, height * 0.08);
+                        ctx.lineTo(width * 0.58, height * 0.24);
+                        ctx.lineTo(width * 0.72, height * 0.24);
+                        ctx.stroke();
+                    }
                 }
 
                 MouseArea {
@@ -91,10 +136,10 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        copyHelper.text = root.keyText
-                        copyHelper.selectAll()
-                        copyHelper.copy()
-                        root.copied(root.keyText)
+                        copyHelper.text = root.keyText;
+                        copyHelper.selectAll();
+                        copyHelper.copy();
+                        root.copied(root.keyText);
                     }
                 }
             }

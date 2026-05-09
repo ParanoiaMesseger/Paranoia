@@ -1,5 +1,6 @@
 #include "ClientBackend.hpp"
 
+#include "PlatformNotifications.hpp"
 #include "Utils.hpp"
 #include "paranoia_lib.h"
 
@@ -7,18 +8,196 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QCryptographicHash>
+#include <QDateTime>
+#include <QFile>
+#include <QGuiApplication>
+#include <QInputMethod>
+#include <QMimeDatabase>
+#include <QNetworkInformation>
+#include <QRandomGenerator>
+#include <QStandardPaths>
 #include <QThreadPool>
+#include <QUrl>
 #include <QPointer>
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QUuid>
 #include <algorithm>
+
+#if defined(Q_OS_ANDROID)
+#include <QCoreApplication>
+#include <QJniEnvironment>
+#include <QJniObject>
+#endif
+
+namespace
+{
+    QString localPathFromUrlOrPath(const QString &urlOrPath)
+    {
+        const QUrl url(urlOrPath);
+        if (url.isValid() && url.isLocalFile()) return url.toLocalFile();
+        if (urlOrPath.startsWith(QStringLiteral("file://"))) return QUrl(urlOrPath).toLocalFile();
+        return urlOrPath;
+    }
+
+    bool isContentUri(const QString &urlOrPath)
+    {
+        return urlOrPath.startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
+    }
+
+    QString temporaryAttachmentPath()
+    {
+        QString cacheRoot = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        if (cacheRoot.isEmpty()) cacheRoot = QDir::tempPath();
+        QDir dir(cacheRoot);
+        if (!dir.mkpath(QStringLiteral("attachments"))) return {};
+        dir.cd(QStringLiteral("attachments"));
+        return dir.filePath(
+            QStringLiteral("attachment-%1.bin").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    }
+
+    QString safeAttachmentName(const QString &name)
+    {
+        QString value = name.trimmed();
+        if (value.isEmpty()) value = QStringLiteral("attachment.bin");
+        for (const QChar ch : QStringLiteral("\\/:*?\"<>|")) value.replace(ch, QLatin1Char('_'));
+        while (value.endsWith(QLatin1Char('.')) || value.endsWith(QLatin1Char(' '))) value.chop(1);
+        return value.isEmpty() ? QStringLiteral("attachment.bin") : value;
+    }
+
+    QString uniqueFilePath(const QString &directoryPath, const QString &filename)
+    {
+        QDir dir(directoryPath);
+        if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) return {};
+
+        const QString safeName = safeAttachmentName(filename);
+        QFileInfo info(safeName);
+        const QString suffix = info.completeSuffix();
+        const QString base = suffix.isEmpty()
+                                 ? safeName
+                                 : safeName.left(safeName.size() - suffix.size() - 1);
+        QString candidate = safeName;
+        for (int i = 1; dir.exists(candidate); ++i) {
+            candidate = suffix.isEmpty()
+                            ? QStringLiteral("%1 (%2)").arg(base).arg(i)
+                            : QStringLiteral("%1 (%2).%3").arg(base).arg(i).arg(suffix);
+        }
+        return dir.filePath(candidate);
+    }
+
+    bool isImageAttachment(const QString &kind, const QString &mimeType)
+    {
+        return kind == QStringLiteral("image") || mimeType.startsWith(QStringLiteral("image/"), Qt::CaseInsensitive);
+    }
+
+    QString localFileUrlIfReadable(const QString &path)
+    {
+        if (path.trimmed().isEmpty()) return {};
+        const QFileInfo info(path);
+        if (!info.exists() || !info.isFile() || !info.isReadable()) return {};
+        return QUrl::fromLocalFile(info.absoluteFilePath()).toString();
+    }
+
+    QString userFacingAttachmentError(const QString &error)
+    {
+        if (error.contains(QStringLiteral("attachment_incomplete"), Qt::CaseInsensitive))
+            return QStringLiteral("Вложение загружено на сервер не полностью. Попросите отправить файл повторно.");
+        if (error.contains(QStringLiteral("attachment_bad_size"), Qt::CaseInsensitive)
+            || error.contains(QStringLiteral("attachment_bad_chunk"), Qt::CaseInsensitive))
+            return QStringLiteral("Вложение повреждено. Попросите отправить файл повторно.");
+        return error;
+    }
+
+#if defined(Q_OS_ANDROID)
+    QJniObject androidContext() { return QNativeInterface::QAndroidApplication::context(); }
+
+    void clearPendingAndroidException()
+    {
+        QJniEnvironment env;
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+    }
+
+    void requestAndroidFileAccessIfNeeded()
+    {
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return;
+        QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaAndroidUtils", "requestFileAccessIfNeeded",
+                                           "(Landroid/content/Context;)V", context.object<jobject>());
+        clearPendingAndroidException();
+    }
+
+    QString copyAndroidContentUriToCache(const QString &uri)
+    {
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return {};
+        const QJniObject javaUri = QJniObject::fromString(uri);
+        const QJniObject result =
+            QJniObject::callStaticObjectMethod("app/paranoia/client/ParanoiaAndroidUtils", "copyUriToCache",
+                                               "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                                               context.object<jobject>(), javaUri.object<jstring>());
+        clearPendingAndroidException();
+        return result.isValid() ? result.toString() : QString();
+    }
+
+    bool copyAndroidFileToContentUri(const QString &sourcePath, const QString &uri)
+    {
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return false;
+        const QJniObject javaPath = QJniObject::fromString(sourcePath);
+        const QJniObject javaUri  = QJniObject::fromString(uri);
+        const bool ok             = QJniObject::callStaticMethod<jboolean>(
+            "app/paranoia/client/ParanoiaAndroidUtils", "copyFileToUri",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z", context.object<jobject>(),
+            javaPath.object<jstring>(), javaUri.object<jstring>());
+        clearPendingAndroidException();
+        return ok;
+    }
+
+    bool copyAndroidFileToDirectoryUri(const QString &sourcePath, const QString &uri, const QString &filename)
+    {
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return false;
+        const QJniObject javaPath = QJniObject::fromString(sourcePath);
+        const QJniObject javaUri  = QJniObject::fromString(uri);
+        const QJniObject javaName = QJniObject::fromString(safeAttachmentName(filename));
+        const bool ok             = QJniObject::callStaticMethod<jboolean>(
+            "app/paranoia/client/ParanoiaAndroidUtils", "copyFileToDirectoryUri",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z",
+            context.object<jobject>(), javaPath.object<jstring>(), javaUri.object<jstring>(), javaName.object<jstring>());
+        clearPendingAndroidException();
+        return ok;
+    }
+#else
+    void requestAndroidFileAccessIfNeeded() {}
+#endif
+}
 
 ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 {
     m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(2500);
+    m_pollTimer->setSingleShot(true);
     connect(m_pollTimer, &QTimer::timeout, this, &ClientBackend::onPollTimer);
+    m_activePollTimer = new QTimer(this);
+    m_activePollTimer->setSingleShot(true);
+    connect(m_activePollTimer, &QTimer::timeout, this, &ClientBackend::onActivePollTimer);
+    if (QNetworkInformation::loadDefaultBackend()) {
+        if (auto *networkInfo = QNetworkInformation::instance()) {
+            connect(networkInfo, &QNetworkInformation::reachabilityChanged, this, &ClientBackend::onNetworkChanged);
+            connect(networkInfo, &QNetworkInformation::transportMediumChanged, this, &ClientBackend::onNetworkChanged);
+        }
+    }
+    QPointer self(this);
+    PlatformNotifications::setBackgroundPollCallback([self]() {
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self]() {
+            if (!self) return;
+            self->onNetworkChanged();
+        });
+    });
     loadDeviceKey();
     loadClientConfig();
 }
@@ -26,6 +205,9 @@ ClientBackend::ClientBackend(QObject *parent) : QObject(parent)
 ClientBackend::~ClientBackend()
 {
     m_pollTimer->stop();
+    m_activePollTimer->stop();
+    PlatformNotifications::setBackgroundPollCallback({});
+    PlatformNotifications::stopBackgroundPollingService();
     QMutexLocker locker(&m_ffiMutex);
     m_ffi.reset();
 }
@@ -43,6 +225,10 @@ QString ClientBackend::server() const { return m_server; }
 bool ClientBackend::hasAdminAccess() const { return !admin::Admin::admins.empty(); }
 
 QString ClientBackend::devicePubkey() const { return ParanoiaFFI::ecies_pubkey(m_devicePrivkey); }
+
+bool ClientBackend::messagesLoading() const { return m_messageLoadingJobs > 0; }
+
+QString ClientBackend::notificationHintPeer() const { return m_notificationHintPeer; }
 
 // ── Key Generation ────────────────────────────────────────────────────────────
 
@@ -86,10 +272,13 @@ void ClientBackend::loginClient(const QString &server, const QString &username, 
             self->m_activePeer.clear();
             self->m_messageCache.clear();
             self->m_seenIds.clear();
+            self->m_notifiedPendingByPeer.clear();
+            self->setNotificationHintPeer({});
             self->loadDialogs();
             emit self->loginStateChanged();
             emit self->dialogsChanged();
             self->saveClientConfig();
+            self->scheduleNotifyPoll(0);
         });
     });
 }
@@ -207,15 +396,22 @@ void ClientBackend::removeDialog(const QString &peer)
     m_dialogs.removeIf([&peer](const Dialog &d) { return d.peer == peer; });
     m_messageCache.remove(peer);
     m_seenIds.remove(peer);
+    m_notifiedPendingByPeer.remove(peer);
+    if (m_notificationHintPeer == peer) setNotificationHintPeer({});
     emit dialogsChanged();
     saveDialogs();
+    scheduleNotifyPoll();
 }
 
 QVariantList ClientBackend::getDialogs() const
 {
     QVariantList result;
     for (const auto &[peer, keyring, lastMsg] : m_dialogs)
-        result.append(QVariantMap{{"peer", peer}, {"lastMsg", lastMsg}, {"hasKey", !keyring.isEmpty()}});
+        result.append(QVariantMap{{"peer", peer},
+                                  {"lastMsg", lastMsg},
+                                  {"hasKey", !keyring.isEmpty()},
+                                  {"unreadCount", m_notifiedPendingByPeer.value(peer, 0)},
+                                  {"notificationHint", peer == m_notificationHintPeer}});
     return result;
 }
 
@@ -228,6 +424,20 @@ QVariantList ClientBackend::getAdminServers() const
         result.append(m);
     }
     return result;
+}
+
+void ClientBackend::requestFileAccessPermissions() { requestAndroidFileAccessIfNeeded(); }
+
+void ClientBackend::commitInputMethod()
+{
+    if (auto *inputMethod = QGuiApplication::inputMethod()) inputMethod->commit();
+}
+
+QString ClientBackend::takeNotificationPeer()
+{
+    const QString peer = PlatformNotifications::takeOpenPeerFromNotification();
+    if (!peer.isEmpty()) setNotificationHintPeer(peer);
+    return m_notificationHintPeer;
 }
 
 // ── History Management ────────────────────────────────────────────────────────
@@ -248,8 +458,10 @@ void ClientBackend::deleteDialogLocal(const QString &peer)
             if (rc == 0) {
                 self->m_messageCache.remove(peerCopy);
                 self->m_seenIds.remove(peerCopy);
+                self->m_notifiedPendingByPeer.remove(peerCopy);
+                if (self->m_notificationHintPeer == peerCopy) self->setNotificationHintPeer({});
                 emit self->dialogDeleted(peerCopy);
-                emit self->messagesReceived({});
+                emit self->messagesReceived(peerCopy, QVariantList{});
             } else
                 emit self->serverHistoryError("Ошибка удаления локальной истории: " + err);
         });
@@ -291,18 +503,21 @@ void ClientBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
 
 void ClientBackend::openChat(const QString &peer)
 {
-    m_activePeer = peer;
+    m_activePeer          = peer;
+    const bool hadPending = m_notifiedPendingByPeer.remove(peer) > 0;
+    if (m_notificationHintPeer == peer) setNotificationHintPeer({});
+    if (hadPending) emit dialogsChanged();
     if (isLoggedIn() && findDialog(peer)) {
         loadHistory(peer);
-        m_pollTimer->start();
         fetchMessages();
+        scheduleActiveChatPoll(0);
     }
 }
 
 void ClientBackend::stopChat()
 {
-    m_pollTimer->stop();
     m_activePeer.clear();
+    m_activePollTimer->stop();
 }
 
 void ClientBackend::sendText(const QString &text)
@@ -316,20 +531,41 @@ void ClientBackend::sendText(const QString &text)
         emit sendError("Диалог не найден.");
         return;
     }
-    QString peer        = m_activePeer;
-    QString username    = m_username;
-    QString keyringJson = dialogKeyringJson(*dlg);
+    QString peer          = m_activePeer;
+    QString username      = m_username;
+    QString keyringJson   = dialogKeyringJson(*dlg);
+    const QString sendKey = peer + QChar('\n') + text;
+    const qint64 nowMs    = QDateTime::currentMSecsSinceEpoch();
+    for (auto it = m_recentSendAtMs.begin(); it != m_recentSendAtMs.end();) {
+        if (nowMs - it.value() > 10'000)
+            it = m_recentSendAtMs.erase(it);
+        else
+            ++it;
+    }
+    if (nowMs - m_recentSendAtMs.value(sendKey, 0) < 1'500) return;
+    if (m_sendInFlightKeys.contains(sendKey)) return;
+    m_sendInFlightKeys.insert(sendKey);
+    m_recentSendAtMs[sendKey] = nowMs;
 
     QPointer self(this);
-    QThreadPool::globalInstance()->start([self, peer, username, text, keyringJson]() {
+    QThreadPool::globalInstance()->start([self, peer, username, text, keyringJson, sendKey]() {
         if (!self) return;
-        QMutexLocker locker(&self->m_ffiMutex);
-        if (!self->m_ffi) return;
-        auto json = self->m_ffi->send_text_json_keyring(username, peer, keyringJson, text);
+        QString json;
+        QString err;
+        {
+            QMutexLocker locker(&self->m_ffiMutex);
+            if (!self->m_ffi) {
+                err = "client_not_ready";
+            } else {
+                json = self->m_ffi->send_text_json_keyring(username, peer, keyringJson, text);
+                if (json.isEmpty()) err = ParanoiaFFI::last_error();
+            }
+        }
         if (json.isEmpty()) {
-            QString err = ParanoiaFFI::last_error();
-            QMetaObject::invokeMethod(self, [self, err]() {
+            QMetaObject::invokeMethod(self, [self, err, sendKey]() {
                 if (!self) return;
+                self->m_sendInFlightKeys.remove(sendKey);
+                self->m_recentSendAtMs.remove(sendKey);
                 if (err == "duplicate_seq" || err == "invalid_seq")
                     emit self->sendError("Ошибка синхронизации seq. Повторите отправку после обновления диалога.");
                 else if (err == "server_unavailable")
@@ -339,10 +575,283 @@ void ClientBackend::sendText(const QString &text)
             });
             return;
         }
-        QMetaObject::invokeMethod(self, [self, peer, json]() {
+        QMetaObject::invokeMethod(self, [self, peer, json, sendKey]() {
             if (!self) return;
+            self->m_sendInFlightKeys.remove(sendKey);
             self->appendMessages(peer, self->parseMessages(json));
-            self->fetchMessages();
+            if (peer == self->m_activePeer) self->loadHistory(peer);
+        });
+    });
+}
+
+void ClientBackend::sendFile(const QString &fileUrlOrPath)
+{
+    if (m_activePeer.isEmpty()) {
+        emit sendError("Нет активного диалога.");
+        return;
+    }
+    auto *dlg = findDialog(m_activePeer);
+    if (!dlg) {
+        emit sendError("Диалог не найден.");
+        return;
+    }
+    requestAndroidFileAccessIfNeeded();
+
+    const QString source       = fileUrlOrPath.trimmed();
+    const bool sourceIsContent = isContentUri(source);
+    const QString originalPath = sourceIsContent ? QString() : localPathFromUrlOrPath(source);
+    qint64 originalSize        = -1;
+    QString originalMimeType;
+    if (!sourceIsContent) {
+        const QFileInfo info(originalPath);
+        if (!info.exists() || !info.isFile() || !info.isReadable()) {
+            emit sendError("Файл недоступен для чтения.");
+            return;
+        }
+        originalSize     = info.size();
+        originalMimeType = QMimeDatabase().mimeTypeForFile(info).name();
+    }
+
+    const QString peer        = m_activePeer;
+    const QString username    = m_username;
+    const QString keyringJson = dialogKeyringJson(*dlg);
+    const QString sendKey =
+        peer + QChar('\n') + (sourceIsContent ? source : originalPath) + QChar('\n') + QString::number(originalSize);
+    if (m_sendInFlightKeys.contains(sendKey)) return;
+    m_sendInFlightKeys.insert(sendKey);
+
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, peer, username, keyringJson, source, sourceIsContent, originalPath, originalMimeType, sendKey]() {
+            if (!self) return;
+            QString json;
+            QString err;
+            QString path = originalPath;
+#if defined(Q_OS_ANDROID)
+            if (sourceIsContent) path = copyAndroidContentUriToCache(source);
+#endif
+            if (path.isEmpty()) err = "file_read_error";
+            const QFileInfo info(path);
+            if (err.isEmpty() && (!info.exists() || !info.isFile() || !info.isReadable())) err = "file_read_error";
+            const QString mimeType =
+                originalMimeType.isEmpty() ? QMimeDatabase().mimeTypeForFile(info).name() : originalMimeType;
+            {
+                QMutexLocker locker(&self->m_ffiMutex);
+                if (!err.isEmpty()) {
+                    // keep the classified file error from the Android/content resolver path
+                } else if (!self->m_ffi) {
+                    err = "client_not_ready";
+                } else {
+                    json = self->m_ffi->send_file_json_keyring(username, peer, keyringJson, path, mimeType);
+                    if (json.isEmpty()) err = ParanoiaFFI::last_error();
+                }
+            }
+            if (json.isEmpty()) {
+                QMetaObject::invokeMethod(self, [self, err, sendKey]() {
+                    if (!self) return;
+                    self->m_sendInFlightKeys.remove(sendKey);
+                    if (err == "file_read_error")
+                        emit self->sendError("Не удалось прочитать файл.");
+                    else if (err == "server_unavailable")
+                        emit self->sendError("Сервер недоступен. Проверьте соединение.");
+                    else
+                        emit self->sendError("Ошибка отправки файла: " + err);
+                });
+                return;
+            }
+            QMetaObject::invokeMethod(self, [self, peer, json, sendKey]() {
+                if (!self) return;
+                self->m_sendInFlightKeys.remove(sendKey);
+                self->appendMessages(peer, self->parseMessages(json));
+                if (peer == self->m_activePeer) self->loadHistory(peer);
+            });
+        });
+}
+
+void ClientBackend::saveAttachment(const QString &messageId, const QString &targetUrlOrPath)
+{
+    if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
+    const auto *dlg = findDialog(m_activePeer);
+    if (!dlg) return;
+    requestAndroidFileAccessIfNeeded();
+    const QString target       = targetUrlOrPath.trimmed();
+    const bool targetIsContent = isContentUri(target);
+
+    QString filename = QStringLiteral("attachment.bin");
+    for (const auto &cached : m_messageCache.value(m_activePeer)) {
+        const QVariantMap msg = cached.toMap();
+        if (msg.value("id").toString() == messageId) {
+            const QString fn = msg.value("filename").toString();
+            const QString txt = msg.value("text").toString();
+            filename = !fn.isEmpty() ? fn : (!txt.isEmpty() ? txt : filename);
+            break;
+        }
+    }
+    filename = safeAttachmentName(filename);
+
+    QString path;
+    if (targetIsContent) {
+        path = temporaryAttachmentPath();
+    } else {
+        const QString localTarget = localPathFromUrlOrPath(target);
+        const QFileInfo targetInfo(localTarget);
+        path = targetInfo.exists() && targetInfo.isDir()
+                   ? uniqueFilePath(localTarget, filename)
+                   : localTarget;
+    }
+    if (path.isEmpty()) return;
+    const QString peer        = m_activePeer;
+    const QString username    = m_username;
+    const QString keyringJson = dialogKeyringJson(*dlg);
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, peer, username, keyringJson, messageId, path, target, targetIsContent, filename]() {
+            if (!self) return;
+            int rc = -1;
+            QString err;
+            {
+                QMutexLocker locker(&self->m_ffiMutex);
+                if (!self->m_ffi) {
+                    err = "client_not_ready";
+                } else {
+                    rc = self->m_ffi->save_attachment_keyring(username, peer, keyringJson, messageId, path);
+                    if (rc != 0) err = ParanoiaFFI::last_error();
+                }
+            }
+#if defined(Q_OS_ANDROID)
+            if (rc == 0 && targetIsContent) {
+                if (!copyAndroidFileToDirectoryUri(path, target, filename) && !copyAndroidFileToContentUri(path, target)) {
+                    rc  = -1;
+                    err = "file_write_error";
+                }
+            }
+            if (targetIsContent) QFile::remove(path);
+#endif
+            const QString savedPath = targetIsContent ? target + QStringLiteral("/") + filename : path;
+            QMetaObject::invokeMethod(self, [self, peer, savedPath, rc, err]() {
+                if (!self) return;
+                if (rc == 0) {
+                    emit self->attachmentSaved(savedPath);
+                    if (peer == self->m_activePeer) self->loadHistory(peer);
+                } else {
+                    emit self->receiveError("Не удалось сохранить файл: " + userFacingAttachmentError(err));
+                }
+            });
+        });
+}
+
+void ClientBackend::ensureImagePreview(const QString &messageId)
+{
+    if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
+    const auto *dlg = findDialog(m_activePeer);
+    if (!dlg) return;
+
+    bool imageMessage = false;
+    bool hasPreview   = false;
+    for (const auto &cached : m_messageCache.value(m_activePeer)) {
+        const QVariantMap msg = cached.toMap();
+        if (msg.value("id").toString() != messageId) continue;
+        imageMessage = isImageAttachment(msg.value("kind").toString(), msg.value("mime_type").toString());
+        hasPreview   = !msg.value("preview_source").toString().isEmpty();
+        break;
+    }
+    if (!imageMessage || hasPreview) return;
+
+    const QString requestKey = m_activePeer + QChar('\n') + messageId;
+    if (m_previewInFlightIds.contains(requestKey)) return;
+    m_previewInFlightIds.insert(requestKey);
+
+    const QString peer        = m_activePeer;
+    const QString username    = m_username;
+    const QString keyringJson = dialogKeyringJson(*dlg);
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, peer, username, keyringJson, messageId, requestKey]() {
+        if (!self) return;
+        QString path;
+        QString err;
+        {
+            QMutexLocker locker(&self->m_ffiMutex);
+            if (!self->m_ffi) {
+                err = QStringLiteral("client_not_ready");
+            } else {
+                path = self->m_ffi->cache_attachment_keyring(username, peer, keyringJson, messageId);
+                if (path.isEmpty()) err = ParanoiaFFI::last_error();
+            }
+        }
+
+        QMetaObject::invokeMethod(self, [self, peer, requestKey, path, err]() {
+            if (!self) return;
+            self->m_previewInFlightIds.remove(requestKey);
+            if (!path.isEmpty()) {
+                if (peer == self->m_activePeer) self->loadHistory(peer);
+                return;
+            }
+            if (!err.isEmpty()) qWarning().noquote() << "Image preview cache failed:" << err;
+        });
+    });
+}
+
+void ClientBackend::deleteMessagesUntil(quint64 cutSeq)
+{
+    if (m_activePeer.isEmpty() || cutSeq == 0) return;
+    const auto *dlg = findDialog(m_activePeer);
+    if (!dlg) return;
+
+    const QString peer        = m_activePeer;
+    const QString username    = m_username;
+    const QString keyringJson = dialogKeyringJson(*dlg);
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, peer, username, keyringJson, cutSeq]() {
+        if (!self) return;
+        int localRc = -1;
+        int serverRc = -1;
+        QString err;
+        {
+            QMutexLocker locker(&self->m_ffiMutex);
+            if (!self->m_ffi) {
+                err = "client_not_ready";
+            } else {
+                localRc = self->m_ffi->delete_local_until_keyring(username, peer, keyringJson, cutSeq);
+                if (localRc != 0) {
+                    err = ParanoiaFFI::last_error();
+                } else {
+                    serverRc = self->m_ffi->determinate_keyring(username, peer, keyringJson, cutSeq);
+                    if (serverRc != 0) err = ParanoiaFFI::last_error();
+                }
+            }
+        }
+
+        QMetaObject::invokeMethod(self, [self, peer, cutSeq, localRc, serverRc, err]() {
+            if (!self) return;
+            if (localRc == 0) {
+                auto &cache = self->m_messageCache[peer];
+                QVariantList kept;
+                QSet<QString> keptIds;
+                for (const auto &msg : cache) {
+                    const QVariantMap map = msg.toMap();
+                    bool ok               = false;
+                    const quint64 seq      = map.value("seq").toULongLong(&ok);
+                    if (ok && seq <= cutSeq) continue;
+                    kept.append(msg);
+                    const QString id = map.value("id").toString();
+                    if (!id.isEmpty()) keptIds.insert(id);
+                }
+                cache = kept;
+                self->m_seenIds[peer] = keptIds;
+                emit self->messagesReceived(peer, cache);
+                emit self->dialogsChanged();
+            }
+
+            if (localRc != 0) {
+                emit self->receiveError("Не удалось удалить локальные сообщения: " + err);
+            } else if (serverRc != 0) {
+                if (err == "server_unavailable")
+                    emit self->serverHistoryError("Сообщения удалены локально, но сервер недоступен.");
+                else
+                    emit self->serverHistoryError("Сообщения удалены локально, ошибка сервера: " + err);
+            } else {
+                emit self->serverHistoryCleared(peer);
+            }
         });
     });
 }
@@ -350,34 +859,64 @@ void ClientBackend::sendText(const QString &text)
 void ClientBackend::fetchMessages()
 {
     if (m_activePeer.isEmpty()) return;
+    if (m_receiveInFlight) {
+        m_receiveAgainAfterCurrent = true;
+        return;
+    }
     const auto *dlg = findDialog(m_activePeer);
     if (!dlg) return;
     QString peer        = m_activePeer;
     QString username    = m_username;
     QString keyringJson = dialogKeyringJson(*dlg);
     QPointer self(this);
+    m_receiveInFlight = true;
+    beginMessagesLoading();
     QThreadPool::globalInstance()->start([self, peer, username, keyringJson]() {
         if (!self) return;
-        QMutexLocker locker(&self->m_ffiMutex);
-        if (!self->m_ffi) return;
-        auto json = self->m_ffi->receive_keyring(username, peer, keyringJson);
-        // Проверяем на ошибки расшифровки даже при успешном получении
-        QString lastErr = ParanoiaFFI::last_error();
+        QString json;
+        QString lastErr;
+        {
+            QMutexLocker locker(&self->m_ffiMutex);
+            if (!self->m_ffi) {
+                lastErr = "client_not_ready";
+            } else {
+                json = self->m_ffi->receive_keyring(username, peer, keyringJson);
+                // Проверяем на ошибки расшифровки даже при успешном получении
+                lastErr = ParanoiaFFI::last_error();
+            }
+        }
         if (json.isEmpty()) {
             QMetaObject::invokeMethod(self, [self, lastErr]() {
                 if (!self) return;
+                self->m_receiveInFlight = false;
+                self->endMessagesLoading();
                 if (lastErr == "server_unavailable")
                     emit self->receiveError("Сервер недоступен.");
                 else if (!lastErr.isEmpty())
                     emit self->receiveError("Ошибка получения: " + lastErr);
+                if (self->m_receiveAgainAfterCurrent) {
+                    self->m_receiveAgainAfterCurrent = false;
+                    self->fetchMessages();
+                }
             });
             return;
         }
         QMetaObject::invokeMethod(self, [self, json, peer, lastErr]() {
             if (!self) return;
+            self->m_receiveInFlight = false;
+            self->endMessagesLoading();
             if (lastErr.startsWith("decryption_failed:"))
                 emit self->receiveError("Ошибка расшифровки: неверный ключ диалога или повреждённые данные.");
-            self->appendMessages(peer, self->parseMessages(json));
+            if (peer == self->m_activePeer) {
+                self->appendMessages(peer, self->parseMessages(json));
+                const bool hadPending = self->m_notifiedPendingByPeer.remove(peer) > 0;
+                if (self->m_notificationHintPeer == peer) self->setNotificationHintPeer({});
+                if (hadPending) emit self->dialogsChanged();
+            }
+            if (self->m_receiveAgainAfterCurrent) {
+                self->m_receiveAgainAfterCurrent = false;
+                self->fetchMessages();
+            }
         });
     });
 }
@@ -389,17 +928,28 @@ void ClientBackend::loadHistory(const QString &peer)
     QString username    = m_username;
     QString keyringJson = dialogKeyringJson(*dlg);
     QPointer self(this);
+    beginMessagesLoading();
     QThreadPool::globalInstance()->start([self, peer, username, keyringJson]() {
         if (!self) return;
-        QMutexLocker locker(&self->m_ffiMutex);
-        if (!self->m_ffi) return;
-        auto json = self->m_ffi->history_keyring(username, peer, keyringJson, 500);
-        if (json.isEmpty()) return;
+        QString json;
+        {
+            QMutexLocker locker(&self->m_ffiMutex);
+            if (self->m_ffi) json = self->m_ffi->history_keyring(username, peer, keyringJson, 500);
+        }
         QMetaObject::invokeMethod(self, [self, peer, json]() {
             if (!self) return;
+            self->endMessagesLoading();
+            if (peer != self->m_activePeer) return;
+            if (json.isEmpty()) return;
+            const QVariantList messages = self->parseMessages(json);
             self->m_messageCache[peer].clear();
             self->m_seenIds[peer].clear();
-            self->appendMessages(peer, self->parseMessages(json));
+            if (messages.isEmpty()) {
+                emit self->messagesReceived(peer, QVariantList{});
+                emit self->dialogsChanged();
+                return;
+            }
+            self->appendMessages(peer, messages);
         });
     });
 }
@@ -410,9 +960,27 @@ void ClientBackend::appendMessages(const QString &peer, const QVariantList &mess
     auto &cache = m_messageCache[peer];
     auto &seen  = m_seenIds[peer];
     for (const auto &msg : messages) {
-        QString id = msg.toMap()["id"].toString();
-        if (!id.isEmpty() && !seen.contains(id)) {
-            seen.insert(id);
+        const QVariantMap map = msg.toMap();
+        const QString id      = map["id"].toString();
+        bool hasSeq           = false;
+        const quint64 seq     = map["seq"].toULongLong(&hasSeq);
+        auto found = cache.end();
+        if (!id.isEmpty()) {
+            found = std::ranges::find_if(cache, [&id](const QVariant &cached) {
+                return cached.toMap().value("id").toString() == id;
+            });
+        }
+        if (found == cache.end() && hasSeq) {
+            found = std::ranges::find_if(cache, [seq](const QVariant &cached) {
+                bool cachedHasSeq       = false;
+                const quint64 cachedSeq = cached.toMap().value("seq").toULongLong(&cachedHasSeq);
+                return cachedHasSeq && cachedSeq == seq;
+            });
+        }
+        if (found != cache.end()) {
+            *found = msg;
+        } else {
+            if (!id.isEmpty()) seen.insert(id);
             cache.append(msg);
         }
     }
@@ -424,8 +992,34 @@ void ClientBackend::appendMessages(const QString &peer, const QVariantList &mess
             found != m_dialogs.end())
             found->lastMsg = cache.last().toMap()["text"].toString();
     saveDialogs();
-    emit messagesReceived(cache);
+    seen.clear();
+    for (const auto &msg : cache) {
+        const QString id = msg.toMap().value("id").toString();
+        if (!id.isEmpty()) seen.insert(id);
+    }
+    emit messagesReceived(peer, cache);
     emit dialogsChanged();
+}
+
+void ClientBackend::beginMessagesLoading()
+{
+    const bool wasLoading = messagesLoading();
+    ++m_messageLoadingJobs;
+    if (!wasLoading) emit messagesLoadingChanged();
+}
+
+void ClientBackend::endMessagesLoading()
+{
+    const bool wasLoading = messagesLoading();
+    m_messageLoadingJobs  = std::max(0, m_messageLoadingJobs - 1);
+    if (wasLoading && !messagesLoading()) emit messagesLoadingChanged();
+}
+
+void ClientBackend::setNotificationHintPeer(const QString &peer)
+{
+    if (m_notificationHintPeer == peer) return;
+    m_notificationHintPeer = peer;
+    emit notificationHintPeerChanged();
 }
 
 void ClientBackend::upsertDialogKeyringEntry(const QString &peer, const QByteArray &sessionKey, quint64 startSeq,
@@ -451,17 +1045,195 @@ void ClientBackend::upsertDialogKeyringEntry(const QString &peer, const QByteArr
             }
             emit dialogsChanged();
             saveDialogs();
+            scheduleNotifyPoll();
             return;
         }
     }
     m_dialogs.append({peer, QList<DialogKeyEntry>{{startSeq, sessionKey}}, QString()});
     emit dialogsChanged();
     saveDialogs();
+    scheduleNotifyPoll();
 }
 
-void ClientBackend::onPollTimer() { fetchMessages(); }
+void ClientBackend::onPollTimer() { pollNotifications(false); }
+
+void ClientBackend::onActivePollTimer() { pollNotifications(true); }
+
+void ClientBackend::pollNotifications(bool activeOnly)
+{
+    if (m_notifyPollInFlight) {
+        if (activeOnly)
+            scheduleActiveChatPoll();
+        else
+            scheduleNotifyPoll();
+        return;
+    }
+    if (!isLoggedIn() || m_dialogs.isEmpty()) {
+        m_pollTimer->stop();
+        m_activePollTimer->stop();
+        m_notifiedPendingByPeer.clear();
+        return;
+    }
+
+    struct NotifyTarget {
+        QString peer;
+        QString keyringJson;
+    };
+
+    QList<NotifyTarget> targets;
+    const QString activePeer = m_activePeer;
+    if (activeOnly) {
+        const auto *dialog = activePeer.isEmpty() ? nullptr : findDialog(activePeer);
+        if (dialog) {
+            const QString keyringJson = dialogKeyringJson(*dialog);
+            if (!keyringJson.isEmpty()) targets.append({dialog->peer, keyringJson});
+        }
+    } else {
+        targets.reserve(m_dialogs.size());
+        for (const auto &dialog : m_dialogs) {
+            if (!activePeer.isEmpty() && dialog.peer == activePeer) continue;
+            const QString keyringJson = dialogKeyringJson(dialog);
+            if (!dialog.peer.isEmpty() && !keyringJson.isEmpty()) targets.append({dialog.peer, keyringJson});
+        }
+    }
+    if (targets.isEmpty()) {
+        if (activeOnly)
+            m_activePollTimer->stop();
+        else
+            scheduleNotifyPoll();
+        return;
+    }
+
+    const QString username = m_username;
+    QPointer self(this);
+    m_notifyPollInFlight = true;
+    QThreadPool::globalInstance()->start([self, username, targets, activeOnly]() {
+        quint64 total = 0;
+        QList<QPair<QString, quint64>> counts;
+        QString error;
+        bool failed = false;
+        if (!self) return;
+        {
+            QMutexLocker locker(&self->m_ffiMutex);
+            if (!self->m_ffi) {
+                failed = true;
+                error  = "client_not_ready";
+            } else {
+                for (const auto &target : targets) {
+                    uint64_t count = 0;
+                    const int rc = self->m_ffi->notify_count_keyring(username, target.peer, target.keyringJson, count);
+                    if (rc != 0) {
+                        failed = true;
+                        error  = ParanoiaFFI::last_error();
+                        break;
+                    }
+                    total += static_cast<quint64>(count);
+                    counts.append({target.peer, static_cast<quint64>(count)});
+                }
+            }
+        }
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, total, counts, failed, error, activeOnly]() {
+            if (!self) return;
+            self->m_notifyPollInFlight = false;
+            if (failed) {
+                qWarning().noquote() << "Notify polling failed:" << error;
+                ++self->m_notifyRetryCount;
+                if (activeOnly)
+                    self->scheduleActiveChatPoll(self->retryNotifyDelayMs());
+                else
+                    self->scheduleNotifyPoll(self->retryNotifyDelayMs());
+                return;
+            }
+            self->m_notifyRetryCount = 0;
+            if (total > 0) {
+                if (activeOnly)
+                    self->fetchMessages();
+                else {
+                    bool hasNewPending  = false;
+                    bool pendingChanged = false;
+                    QString hintPeer;
+                    int pendingPeers = 0;
+                    for (const auto &item : counts) {
+                        const QString &peer = item.first;
+                        const quint64 count = item.second;
+                        if (count == 0) {
+                            pendingChanged = self->m_notifiedPendingByPeer.remove(peer) > 0 || pendingChanged;
+                            continue;
+                        }
+                        ++pendingPeers;
+                        if (pendingPeers == 1)
+                            hintPeer = peer;
+                        else
+                            hintPeer.clear();
+                        const quint64 previous = self->m_notifiedPendingByPeer.value(peer, 0);
+                        if (count != previous) pendingChanged = true;
+                        if (count > previous) hasNewPending = true;
+                        self->m_notifiedPendingByPeer[peer] = count;
+                    }
+                    if (pendingChanged) emit self->dialogsChanged();
+                    if (hasNewPending) {
+                        self->setNotificationHintPeer(hintPeer);
+                        emit self->notificationAvailable(total, hintPeer);
+                    }
+                }
+            } else if (!activeOnly) {
+                for (const auto &item : counts) self->m_notifiedPendingByPeer.remove(item.first);
+                self->setNotificationHintPeer({});
+                emit self->dialogsChanged();
+            }
+            if (activeOnly)
+                self->scheduleActiveChatPoll();
+            else
+                self->scheduleNotifyPoll();
+        });
+    });
+}
+
+void ClientBackend::onNetworkChanged()
+{
+    m_notifyRetryCount = 0;
+    scheduleNotifyPoll(0);
+    if (!m_activePeer.isEmpty()) scheduleActiveChatPoll(0);
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+void ClientBackend::scheduleNotifyPoll(int delayMs)
+{
+    if (!isLoggedIn() || m_dialogs.isEmpty()) {
+        m_pollTimer->stop();
+        m_activePollTimer->stop();
+        PlatformNotifications::stopBackgroundPollingService();
+        return;
+    }
+    PlatformNotifications::startBackgroundPollingService();
+    if (delayMs < 0) delayMs = randomNotifyDelayMs();
+    m_pollTimer->start(delayMs);
+}
+
+void ClientBackend::scheduleActiveChatPoll(int delayMs)
+{
+    if (!isLoggedIn() || m_activePeer.isEmpty() || !findDialog(m_activePeer)) {
+        m_activePollTimer->stop();
+        return;
+    }
+    PlatformNotifications::startBackgroundPollingService();
+    if (delayMs < 0) delayMs = randomActiveNotifyDelayMs();
+    m_activePollTimer->start(delayMs);
+}
+
+int ClientBackend::randomNotifyDelayMs() const { return QRandomGenerator::global()->bounded(2'000, 15'001); }
+
+int ClientBackend::randomActiveNotifyDelayMs() const { return QRandomGenerator::global()->bounded(500, 1'001); }
+
+int ClientBackend::retryNotifyDelayMs() const
+{
+    const int shift  = std::min(m_notifyRetryCount, 6);
+    const int base   = std::min(1000 * (1 << shift), 60'000);
+    const int jitter = QRandomGenerator::global()->bounded((base / 5) + 1);
+    return base + jitter;
+}
 
 QByteArray ClientBackend::deriveKey(const QString &sharedSecret) const
 {
@@ -506,12 +1278,32 @@ QVariantList ClientBackend::parseMessages(const QString &json) const
     for (const auto &val : doc.array()) {
         auto obj = val.toObject();
         QVariantMap msg;
-        msg["id"]     = obj["id"].toString();
-        msg["sender"] = obj["sender"].toString();
-        msg["text"]   = extractText(obj["content"].toString());
-        msg["ts"]     = obj["ts"].toVariant();
-        msg["seq"]    = obj["seq"].toVariant();
-        msg["isMe"]   = (obj["sender"].toString() == m_username);
+        const QString kind  = obj["kind"].toString(QStringLiteral("text"));
+        const QString mimeType = obj["mime_type"].toString();
+        const QString cachePath = obj["cache_path"].toString();
+        const QString previewSource = isImageAttachment(kind, mimeType) ? localFileUrlIfReadable(cachePath) : QString();
+        msg["id"]           = obj["id"].toString();
+        msg["sender"]       = obj["sender"].toString();
+        msg["kind"]         = kind;
+        msg["filename"]     = obj["filename"].toString();
+        msg["mime_type"]    = mimeType;
+        msg["size"]         = obj.value("size").toVariant().toLongLong();
+        msg["downloadable"] = obj["downloadable"].toBool(false);
+        msg["downloaded"]   = obj["downloaded"].toBool(false) || !previewSource.isEmpty();
+        msg["transfer_id"]  = obj.value("transfer_id").toString();
+        msg["body_from_seq"] = obj.value("body_from_seq").toVariant().toULongLong();
+        msg["body_to_seq"]  = obj.value("body_to_seq").toVariant().toULongLong();
+        msg["cache_path"]   = cachePath;
+        msg["preview_source"] = previewSource;
+        if (kind == "text")
+            msg["text"] = obj.contains("text") ? obj["text"].toString() : extractText(obj["content"].toString());
+        else if (kind == "file" || kind == "image" || kind == "voice")
+            msg["text"] = obj["filename"].toString(obj["text"].toString("Файл"));
+        else
+            msg["text"] = QString();
+        msg["ts"]   = obj.value("ts").toVariant().toLongLong();
+        msg["seq"]  = obj.value("seq").toVariant().toULongLong();
+        msg["isMe"] = (obj["sender"].toString() == m_username);
         // Пропускаем служебные сообщения (подтверждения прочтения, удаления)
         if (!msg["text"].toString().isEmpty()) result.append(msg);
     }

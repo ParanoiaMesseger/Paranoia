@@ -1,4 +1,4 @@
-use crate::transport::{CoreDeterminate, CorePull, CorePush, RawPacket};
+use crate::transport::{CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket};
 use anyhow::Result;
 use serde_json::Value;
 
@@ -6,9 +6,11 @@ use serde_json::Value;
 pub trait ClientCover: Send + Sync + 'static {
     fn wrap_push(&self, core: &CorePush) -> Result<Value>;
     fn wrap_pull(&self, core: &CorePull) -> Result<Value>;
+    fn wrap_notify(&self, core: &CoreNotify) -> Result<Value>;
     fn wrap_determinate(&self, core: &CoreDeterminate) -> Result<Value>;
 
     fn unwrap_pull_response(&self, body: &Value) -> Result<Vec<RawPacket>>;
+    fn unwrap_notify_response(&self, body: &Value) -> Result<u64>;
     fn unwrap_push_response(&self, body: &Value) -> Result<()>;
     fn unwrap_determinate_response(&self, body: &Value) -> Result<()>;
 }

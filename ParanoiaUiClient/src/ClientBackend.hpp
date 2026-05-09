@@ -17,6 +17,8 @@ class ClientBackend : public QObject
     Q_PROPERTY(QString server READ server NOTIFY loginStateChanged)
     Q_PROPERTY(bool hasAdminAccess READ hasAdminAccess NOTIFY adminStateChanged)
     Q_PROPERTY(QString devicePubkey READ devicePubkey NOTIFY deviceKeyChanged)
+    Q_PROPERTY(bool messagesLoading READ messagesLoading NOTIFY messagesLoadingChanged)
+    Q_PROPERTY(QString notificationHintPeer READ notificationHintPeer NOTIFY notificationHintPeerChanged)
 
 public:
     explicit ClientBackend(QObject *parent = nullptr);
@@ -27,6 +29,8 @@ public:
     QString server() const;
     bool hasAdminAccess() const;
     QString devicePubkey() const;
+    bool messagesLoading() const;
+    QString notificationHintPeer() const;
 
     Q_INVOKABLE void generateKeyPair();
     Q_INVOKABLE void loginClient(const QString &server, const QString &username, const QString &private_key);
@@ -47,7 +51,14 @@ public:
     Q_INVOKABLE void openChat(const QString &peer);
     Q_INVOKABLE void stopChat();
     Q_INVOKABLE void sendText(const QString &text);
+    Q_INVOKABLE void sendFile(const QString &fileUrlOrPath);
     Q_INVOKABLE void fetchMessages();
+    Q_INVOKABLE void saveAttachment(const QString &messageId, const QString &targetUrlOrPath);
+    Q_INVOKABLE void ensureImagePreview(const QString &messageId);
+    Q_INVOKABLE void deleteMessagesUntil(quint64 cutSeq);
+    Q_INVOKABLE void requestFileAccessPermissions();
+    Q_INVOKABLE void commitInputMethod();
+    Q_INVOKABLE QString takeNotificationPeer();
 
     // Управление историей (план п.5)
     Q_INVOKABLE void deleteDialogLocal(const QString &peer);
@@ -75,15 +86,21 @@ signals:
     void userRegistered();
     void registerUserError(const QString &msg);
     void dialogsChanged();
-    void messagesReceived(const QVariantList &messages);
+    void messagesReceived(const QString &peer, const QVariantList &messages);
     void sendError(const QString &msg);
     void receiveError(const QString &msg);
+    void attachmentSaved(const QString &path);
+    void notificationAvailable(quint64 count, const QString &peer);
+    void notificationHintPeerChanged();
+    void messagesLoadingChanged();
     void dialogDeleted(const QString &peer);
     void serverHistoryCleared(const QString &peer);
     void serverHistoryError(const QString &msg);
 
 private slots:
     void onPollTimer();
+    void onActivePollTimer();
+    void onNetworkChanged();
 
 private:
     struct DialogKeyEntry {
@@ -98,7 +115,7 @@ private:
     };
 
     mutable QMutex m_ffiMutex;
-    
+
     std::unique_ptr<ParanoiaFFI> m_ffi;
     QString m_server;
     QString m_username;
@@ -111,6 +128,17 @@ private:
     QMap<QString, QVariantList> m_messageCache;
     QMap<QString, QSet<QString>> m_seenIds;
     QTimer *m_pollTimer;
+    QTimer *m_activePollTimer;
+    QMap<QString, quint64> m_notifiedPendingByPeer;
+    QSet<QString> m_sendInFlightKeys;
+    QSet<QString> m_previewInFlightIds;
+    QMap<QString, qint64> m_recentSendAtMs;
+    QString m_notificationHintPeer;
+    int m_notifyRetryCount          = 0;
+    bool m_notifyPollInFlight       = false;
+    bool m_receiveInFlight          = false;
+    bool m_receiveAgainAfterCurrent = false;
+    int m_messageLoadingJobs        = 0;
 
     void saveClientConfig() const;
     void loadClientConfig();
@@ -127,6 +155,15 @@ private:
     void loadDeviceKey();
     void loadHistory(const QString &peer);
     void appendMessages(const QString &peer, const QVariantList &messages);
+    void beginMessagesLoading();
+    void endMessagesLoading();
+    void setNotificationHintPeer(const QString &peer);
+    void pollNotifications(bool activeOnly);
+    void scheduleNotifyPoll(int delayMs = -1);
+    void scheduleActiveChatPoll(int delayMs = -1);
+    int randomNotifyDelayMs() const;
+    int randomActiveNotifyDelayMs() const;
+    int retryNotifyDelayMs() const;
     void upsertDialogKeyringEntry(const QString &peer, const QByteArray &sessionKey, quint64 startSeq,
                                   bool resetKeyring, bool clearCache);
 

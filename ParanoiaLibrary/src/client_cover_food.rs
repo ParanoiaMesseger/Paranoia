@@ -1,6 +1,6 @@
 use crate::client_cover::ClientCover;
 use crate::crypto::{decode_b64, encode_b64};
-use crate::transport::{CoreDeterminate, CorePull, CorePush, RawPacket};
+use crate::transport::{CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket};
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -54,7 +54,16 @@ impl ClientCover for FoodDeliveryClientCover {
         Ok(json!({
             "operation": "syncOrders",
             "clientId": core.sender, "partnerId": core.recver,
-            "cursor": core.after_seq, "auth": encode_b64(&core.sig),
+            "cursor": core.after_seq, "toSeq": core.to_seq,
+            "auth": encode_b64(&core.sig),
+        }))
+    }
+
+    fn wrap_notify(&self, core: &CoreNotify) -> Result<Value> {
+        Ok(json!({
+            "operation": "checkOrders",
+            "clientId": core.sender, "partnerId": core.partner,
+            "cursor": core.seq, "auth": encode_b64(&core.sig),
         }))
     }
 
@@ -83,6 +92,13 @@ impl ClientCover for FoodDeliveryClientCover {
                 })
             })
             .collect()
+    }
+
+    fn unwrap_notify_response(&self, body: &Value) -> Result<u64> {
+        check_ok(body, "Notify")?;
+        body["n"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("Notify: missing n"))
     }
 
     fn unwrap_push_response(&self, body: &Value) -> Result<()> {
