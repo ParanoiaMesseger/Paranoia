@@ -18,6 +18,7 @@ Rectangle {
         spacing: 0
 
         VectorImage {
+            id: logoLockup
             Layout.alignment: Qt.AlignHCenter
             Layout.fillWidth: true
             Layout.preferredHeight: 104
@@ -28,6 +29,17 @@ Rectangle {
 
             animations.loops: Animation.Infinite
             assumeTrustedSource: true
+
+            scale: lockupArea.containsPress ? 0.94 : 1.0
+            Behavior on scale {
+                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+            }
+
+            MouseArea {
+                id: lockupArea
+                anchors.fill: parent
+                onClicked: Theme.toggleTheme()
+            }
         }
 
         Item { Layout.preferredHeight: 18 }

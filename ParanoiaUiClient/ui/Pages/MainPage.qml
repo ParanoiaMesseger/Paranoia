@@ -11,6 +11,9 @@ Rectangle {
 
     property bool hasAdminAccess: Backend.hasAdminAccess
     property string highlightPeer: ""
+    property var sessionsData: []
+
+    function refreshSessions() { sessionsData = Backend.getSessionList() }
 
     signal openChat(string peer)
     signal registerClient()
@@ -49,11 +52,19 @@ Rectangle {
             tabBar.currentIndex = 1
     }
 
+    Component.onCompleted: root.refreshSessions()
+
     Connections {
         target: Backend
         function onDialogsChanged()    { dialogsView.model = Backend.getDialogs() }
         function onAdminStateChanged() { adminServersView.model = Backend.getAdminServers() }
         function onDialogDeleted(peer) { dialogsView.model = Backend.getDialogs() }
+        function onSessionsChanged()   { root.refreshSessions() }
+    }
+
+    Connections {
+        target: Chat
+        function onDialogsChanged() { dialogsView.model = Backend.getDialogs() }
     }
 
     ColumnLayout {
@@ -80,6 +91,7 @@ Rectangle {
             }
 
             VectorImage {
+                id: logoSymbol
                 anchors.left: parent.left
                 anchors.leftMargin: 14
                 anchors.verticalCenter: parent.verticalCenter
@@ -89,6 +101,18 @@ Rectangle {
                 preferredRendererType: VectorImage.CurveRenderer
                 animations.loops: Animation.Infinite
                 assumeTrustedSource: true
+
+                scale: symbolArea.containsPress ? 0.82 : 1.0
+                Behavior on scale {
+                    NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                }
+
+                MouseArea {
+                    id: symbolArea
+                    anchors.fill: parent
+                    anchors.margins: -6
+                    onClicked: Theme.toggleTheme()
+                }
             }
 
             Text {
@@ -210,12 +234,17 @@ Rectangle {
                     Rectangle {
                         Layout.fillWidth: true
                         height:           36
-                        color:            Theme.bgSecondary
+                        color:            (root.sessionsData.length > 1 && sessionHdrArea.containsMouse)
+                                          ? Theme.bgDark : Theme.bgSecondary
 
                         Row {
-                            anchors.fill:       parent
-                            anchors.leftMargin: 16
-                            spacing:            8
+                            anchors.left:           parent.left
+                            anchors.right:          sessionBadge.left
+                            anchors.top:            parent.top
+                            anchors.bottom:         parent.bottom
+                            anchors.leftMargin:     16
+                            anchors.rightMargin:    4
+                            spacing:                8
 
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
@@ -224,6 +253,8 @@ Rectangle {
                                 font.pixelSize: Theme.fontSm
                                 font.family:    Theme.fontFamily
                                 font.weight:    Font.Medium
+                                elide: Text.ElideRight
+                                width: Math.min(implicitWidth, parent.width - 80)
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
@@ -232,6 +263,37 @@ Rectangle {
                                 font.pixelSize: Theme.fontXs
                                 font.family:    Theme.fontFamily
                             }
+                        }
+
+                        // Session count badge — visible when >1 session
+                        Rectangle {
+                            id: sessionBadge
+                            anchors.right:          parent.right
+                            anchors.rightMargin:    8
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: root.sessionsData.length > 1
+                            width: sessionBadgeText.implicitWidth + 10
+                            height: 18
+                            radius: 9
+                            color: Theme.accentDim
+
+                            Text {
+                                id: sessionBadgeText
+                                anchors.centerIn: parent
+                                text:  root.sessionsData.length + " серв."
+                                color: Theme.textPrimary
+                                font.pixelSize: 9
+                                font.family:    Theme.monoFamily
+                                font.weight:    Font.Medium
+                            }
+                        }
+
+                        MouseArea {
+                            id: sessionHdrArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled:      root.sessionsData.length > 1
+                            onClicked:    sessionSwitcherPopup.open()
                         }
                     }
 
@@ -844,6 +906,112 @@ Rectangle {
                     text: "Отмена"
                     secondary: true
                     onClicked: deleteLocalPopup.close()
+                }
+            }
+        }
+    }
+
+    // ── Попап: переключение сессий ────────────────────────
+    Popup {
+        id: sessionSwitcherPopup
+        anchors.centerIn: Overlay.overlay
+        width: 320
+        padding: 12
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: Column {
+            spacing: 4
+
+            Text {
+                width: parent.width
+                text:  "Серверы"
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+                leftPadding:    4
+                bottomPadding:  4
+            }
+
+            Repeater {
+                model: root.sessionsData
+
+                delegate: Rectangle {
+                    required property var modelData
+                    width:  296
+                    height: 48
+                    radius: Theme.radiusSm
+                    color:  modelData.isActive
+                             ? Theme.bgCard
+                             : (switchArea.containsMouse ? Theme.bgButton : "transparent")
+                    border.width: modelData.isActive ? 1 : 0
+                    border.color: Theme.accent
+
+                    Row {
+                        anchors.fill:        parent
+                        anchors.leftMargin:  10
+                        anchors.rightMargin: 10
+                        spacing:             8
+
+                        Column {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width - (modelData.totalUnread > 0 ? 48 : 0) - 8
+                            spacing: 2
+
+                            Text {
+                                text:           modelData.server
+                                color:          modelData.isActive ? Theme.accent : Theme.textPrimary
+                                font.pixelSize: Theme.fontSm
+                                font.family:    Theme.fontFamily
+                                font.weight:    modelData.isActive ? Font.DemiBold : Font.Normal
+                                elide:          Text.ElideRight
+                                width:          parent.width
+                            }
+                            Text {
+                                text:           modelData.username
+                                color:          Theme.textSecondary
+                                font.pixelSize: Theme.fontXs
+                                font.family:    Theme.fontFamily
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: modelData.totalUnread > 0
+                            width:   Math.max(24, unreadSessionText.implicitWidth + 10)
+                            height:  20
+                            radius:  10
+                            color:   Theme.accent
+
+                            Text {
+                                id: unreadSessionText
+                                anchors.centerIn: parent
+                                text:  modelData.totalUnread > 99 ? "99+" : modelData.totalUnread.toString()
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontXs
+                                font.family:    Theme.monoFamily
+                                font.weight:    Font.Bold
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: switchArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        enabled: !modelData.isActive
+                        onClicked: {
+                            Backend.switchSession(modelData.profileId)
+                            sessionSwitcherPopup.close()
+                        }
+                    }
                 }
             }
         }

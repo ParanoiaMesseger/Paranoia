@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package>
+    <DisplayName>Paranoia</DisplayName>
+    <Description>Paranoia messaging client</Description>
+    <!-- Sync with Version in installer/config/config.xml -->
+    <Version>0.2.0.0</Version>
+    <ReleaseDate>2026-05-12</ReleaseDate>
+    <Default>true</Default>
+    <Script>installscript.qs</Script>
+</Package>

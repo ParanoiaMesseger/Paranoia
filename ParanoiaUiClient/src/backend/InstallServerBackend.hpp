@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ClientSSH.hpp"
+#include "utils/ClientSSH.hpp"
 #include <QObject>
 #include <QString>
 #include <QQmlEngine>
@@ -47,7 +47,7 @@ signals:
     void stepStatusChanged(int step, int status);
 
     // ── Установка завершена успешно ──────────────────────────────────────────
-    void installFinished(const QString &domain);
+    void installFinished(const QString &domain, const QString &profileId);
 
     // ── Ошибка (шаг + человекочитаемое сообщение) ───────────────────────────
     void installError(int step, const QString &message);
@@ -68,6 +68,8 @@ private:
     QString m_domain;
     QString private_admin_key = "private key";
     QString public_admin_key  = "public key";
-    int m_port                = 1455;
-    bool m_running            = false;
+    QString m_clientPrivKey;
+    QString m_clientPubKey;
+    int m_port     = 1455;
+    bool m_running = false;
 };

@@ -66,13 +66,8 @@ impl CompletedExchange {
     }
 }
 
-pub fn create_invitation(
-    initiator_id: &str,
-    responder_id: &str,
-    now_unix: i64,
-) -> Result<ExchangeBundle> {
+pub fn create_invitation(initiator_id: &str, now_unix: i64) -> Result<ExchangeBundle> {
     validate_id("initiator_id", initiator_id)?;
-    validate_id("responder_id", responder_id)?;
 
     let exchange_id = Uuid::new_v4().to_string();
     let keypair = generate_x25519_keypair();
@@ -80,7 +75,7 @@ pub fn create_invitation(
         ROLE_INITIATOR,
         exchange_id,
         initiator_id.to_string(),
-        responder_id.to_string(),
+        "".to_string(),
         keypair,
         now_unix + EXCHANGE_TTL_SECS,
     ))
@@ -93,7 +88,7 @@ pub fn create_response(
 ) -> Result<ExchangeBundle> {
     validate_payload(invitation, ROLE_INITIATOR, now_unix)?;
     validate_id("responder_id", responder_id)?;
-    if invitation.responder_id != responder_id {
+    if !invitation.responder_id.is_empty() && invitation.responder_id != responder_id {
         bail!("responder_id mismatch");
     }
 
@@ -141,10 +136,17 @@ pub fn complete_exchange(
     } else {
         (&peer_payload.public_key_b64, &local_state.public_key_b64)
     };
+    // For an open invitation the initiator's state has an empty responder_id;
+    // resolve it from the responder's payload so both sides hash the same value.
+    let responder_id = if local_state.role == ROLE_INITIATOR {
+        peer_payload.responder_id.clone()
+    } else {
+        local_state.responder_id.clone()
+    };
     let transcript_hash = transcript_hash_b64(
         &local_state.exchange_id,
         &local_state.initiator_id,
-        &local_state.responder_id,
+        &responder_id,
         initiator_pub,
         responder_pub,
     )?;
@@ -157,7 +159,7 @@ pub fn complete_exchange(
     Ok(CompletedExchange {
         exchange_id: local_state.exchange_id.clone(),
         initiator_id: local_state.initiator_id.clone(),
-        responder_id: local_state.responder_id.clone(),
+        responder_id,
         session_key_b64: B64.encode(session_key),
         fingerprint: fingerprint_from_hash(&transcript_hash),
     })
@@ -203,7 +205,7 @@ pub fn fingerprint_for_payloads(
     let hash = transcript_hash_b64(
         &initiator_payload.exchange_id,
         &initiator_payload.initiator_id,
-        &initiator_payload.responder_id,
+        &responder_payload.responder_id,
         &initiator_payload.public_key_b64,
         &responder_payload.public_key_b64,
     )?;
@@ -292,7 +294,10 @@ fn validate_payload(payload: &ExchangePayload, expected_role: &str, now_unix: i6
     }
     validate_id("exchange_id", &payload.exchange_id)?;
     validate_id("initiator_id", &payload.initiator_id)?;
-    validate_id("responder_id", &payload.responder_id)?;
+    // responder_id may be empty in the initiator's payload (open invitation — responder not yet known)
+    if expected_role != ROLE_INITIATOR {
+        validate_id("responder_id", &payload.responder_id)?;
+    }
     decode_key32(&payload.public_key_b64, "public_key")?;
     validate_not_expired(payload.expires_at_unix, now_unix)
 }
@@ -304,7 +309,10 @@ fn validate_state(state: &ExchangeState, now_unix: i64) -> Result<()> {
     }
     validate_id("exchange_id", &state.exchange_id)?;
     validate_id("initiator_id", &state.initiator_id)?;
-    validate_id("responder_id", &state.responder_id)?;
+    // responder_id may be empty for the initiator (open invitation — responder not yet known)
+    if state.role != ROLE_INITIATOR {
+        validate_id("responder_id", &state.responder_id)?;
+    }
     decode_key32(&state.private_key_b64, "private_key")?;
     decode_key32(&state.public_key_b64, "public_key")?;
     validate_not_expired(state.expires_at_unix, now_unix)
@@ -324,7 +332,10 @@ fn validate_pair(local_state: &ExchangeState, peer_payload: &ExchangePayload) ->
     if local_state.initiator_id != peer_payload.initiator_id {
         bail!("initiator_id mismatch");
     }
-    if local_state.responder_id != peer_payload.responder_id {
+    // One side may have an empty responder_id (open invitation); mismatch only matters when both are set
+    let local = &local_state.responder_id;
+    let peer = &peer_payload.responder_id;
+    if !local.is_empty() && !peer.is_empty() && local != peer {
         bail!("responder_id mismatch");
     }
     Ok(())
@@ -340,7 +351,10 @@ fn validate_payload_pair(
     if initiator_payload.initiator_id != responder_payload.initiator_id {
         bail!("initiator_id mismatch");
     }
-    if initiator_payload.responder_id != responder_payload.responder_id {
+    // initiator_payload.responder_id may be empty for an open invitation
+    if !initiator_payload.responder_id.is_empty()
+        && initiator_payload.responder_id != responder_payload.responder_id
+    {
         bail!("responder_id mismatch");
     }
     Ok(())
@@ -387,7 +401,7 @@ mod tests {
 
     #[test]
     fn successful_exchange_derives_same_key_and_fingerprint() {
-        let invitation = create_invitation("alice", "bob", NOW).expect("invitation");
+        let invitation = create_invitation("alice", NOW).expect("invitation");
         let response = create_response(&invitation.payload, "bob", NOW + 10).expect("response");
 
         let from_alice = complete_exchange(&invitation.state, &response.payload, NOW + 20)
@@ -403,7 +417,7 @@ mod tests {
 
     #[test]
     fn expired_invitation_is_rejected() {
-        let invitation = create_invitation("alice", "bob", NOW).expect("invitation");
+        let invitation = create_invitation("alice", NOW).expect("invitation");
         let err = create_response(&invitation.payload, "bob", NOW + EXCHANGE_TTL_SECS + 1)
             .unwrap_err()
             .to_string();
@@ -411,17 +425,17 @@ mod tests {
     }
 
     #[test]
-    fn participant_mismatch_is_rejected() {
-        let invitation = create_invitation("alice", "bob", NOW).expect("invitation");
-        let err = create_response(&invitation.payload, "mallory", NOW + 1)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("responder_id mismatch"));
+    fn open_invitation_accepts_any_responder() {
+        // create_invitation produces an open invitation (responder_id=""); any peer may respond
+        let invitation = create_invitation("alice", NOW).expect("invitation");
+        let response = create_response(&invitation.payload, "mallory", NOW + 1)
+            .expect("open invitation should accept any responder");
+        assert_eq!(response.state.responder_id, "mallory");
     }
 
     #[test]
     fn known_exchange_id_is_rejected() {
-        let invitation = create_invitation("alice", "bob", NOW).expect("invitation");
+        let invitation = create_invitation("alice", NOW).expect("invitation");
         let known = vec![invitation.payload.exchange_id.clone()];
         let err = reject_known_exchange_id(&invitation.payload.exchange_id, &known)
             .unwrap_err()
@@ -431,7 +445,7 @@ mod tests {
 
     #[test]
     fn canonical_transcript_is_stable() {
-        let invitation = create_invitation("alice", "bob", NOW).expect("invitation");
+        let invitation = create_invitation("alice", NOW).expect("invitation");
         let response = create_response(&invitation.payload, "bob", NOW + 1).expect("response");
 
         let first = fingerprint_for_payloads(&invitation.payload, &response.payload, NOW + 2)
@@ -444,7 +458,7 @@ mod tests {
 
     #[test]
     fn changed_ecdh_parameters_change_fingerprint() {
-        let invitation = create_invitation("alice", "bob", NOW).expect("invitation");
+        let invitation = create_invitation("alice", NOW).expect("invitation");
         let response = create_response(&invitation.payload, "bob", NOW + 1).expect("response");
         let original = fingerprint_for_payloads(&invitation.payload, &response.payload, NOW + 2)
             .expect("fingerprint");
@@ -460,7 +474,7 @@ mod tests {
 
     #[test]
     fn json_roundtrip_preserves_payload_and_state() {
-        let invitation = create_invitation("alice", "bob", NOW).expect("invitation");
+        let invitation = create_invitation("alice", NOW).expect("invitation");
         let payload_json = to_json(&invitation.payload).expect("payload json");
         let state_json = to_json(&invitation.state).expect("state json");
 

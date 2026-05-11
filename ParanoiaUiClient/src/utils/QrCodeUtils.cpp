@@ -6,7 +6,7 @@
 #include <ReadBarcode.h>
 #include <qrcodegen.hpp>
 #include <QPainter>
-#include <paranoia_lib.h>
+#include <ParanoiaFFI>
 
 QString QrCodeUtils::pngDataUrl(const QString &payload, int size)
 {

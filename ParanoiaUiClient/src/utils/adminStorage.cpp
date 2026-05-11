@@ -4,7 +4,7 @@
 
 #include <QtConcurrent>
 
-#include "paranoia_lib.h"
+#include <ParanoiaFFI>
 
 std::vector<admin::Admin> admin::Admin::admins = {};
 

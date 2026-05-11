@@ -1,5 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -217,6 +218,30 @@ pub extern "C" fn paranoia_client_new(
                 std::ptr::null_mut()
             }
         }
+    })
+}
+
+/// Вывести server_id из Ed25519 signing key.
+/// Возвращает hex SHA256("paranoia:server-id:v1\n" || public_key_bytes) или NULL при ошибке.
+/// Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_derive_server_id(signing_key_b64: *const c_char) -> *mut c_char {
+    ffi_catch_ptr("derive_server_id_error", || {
+        clear_last_error();
+        let sk_b64 = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_ptr());
+        let sk_bytes = match decode_b64_32(&sk_b64) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                set_last_error("invalid_signing_key");
+                return std::ptr::null_mut();
+            }
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        let pub_key = signing_key.verifying_key().to_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(b"paranoia:server-id:v1\n");
+        hasher.update(pub_key);
+        string_to_c(hex::encode(hasher.finalize()))
     })
 }
 
@@ -651,16 +676,12 @@ pub extern "C" fn paranoia_delete_local_dialogue(
 /// NULL означает ошибку. Ошибку см. paranoia_last_error().
 /// Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
-pub extern "C" fn paranoia_qr_create_invitation(
-    initiator_id: *const c_char,
-    responder_id: *const c_char,
-) -> *mut c_char {
+pub extern "C" fn paranoia_qr_create_invitation(initiator_id: *const c_char) -> *mut c_char {
     ffi_catch_ptr("qr_exchange_error", || {
         clear_last_error();
         let initiator_id = ffi_try!(cstr_arg(initiator_id), invalid_qr_argument_ptr());
-        let responder_id = ffi_try!(cstr_arg(responder_id), invalid_qr_argument_ptr());
         exchange_string_to_c(
-            qr_exchange::create_invitation(&initiator_id, &responder_id, now_unix())
+            qr_exchange::create_invitation(&initiator_id, now_unix())
                 .and_then(|bundle| qr_exchange::to_json(&bundle)),
         )
     })

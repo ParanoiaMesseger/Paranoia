@@ -22,20 +22,6 @@ namespace Utils
 
     QString profileIdFor(const QString &server, const QString &username);
 
-    QString profilesRootPath();
-
-    QString profilesManifestPath();
-
-    QString profileDirPath(const QString &profileId);
-
-    QString profileClientPath(const QString &profileId);
-
-    QString profileDialogsPath(const QString &profileId);
-
-    QString profileDbPath(const QString &profileId);
-
-    bool ensureProfileDir(const QString &profileId);
-
     QJsonObject readJsonObjectFile(const QString &path);
 
     QJsonArray readJsonArrayFile(const QString &path);

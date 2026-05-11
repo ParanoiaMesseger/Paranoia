@@ -23,6 +23,8 @@ Rectangle {
     property int contentSpacing: 4
     property int copyButtonWidth: 28
     property int copyButtonHeight: 20
+    property int lineCount: 1
+    property string copyText: ""
 
     signal copied(string keyText)
 
@@ -62,7 +64,9 @@ Rectangle {
                 color: root.keyColor
                 font.pixelSize: root.keyFontSize
                 font.family: root.keyFontFamily
-                elide: root.keyElide
+                elide: root.lineCount <= 1 ? root.keyElide : Text.ElideNone
+                wrapMode: root.lineCount > 1 ? Text.WrapAnywhere : Text.NoWrap
+                maximumLineCount: root.lineCount
             }
 
             Rectangle {
@@ -136,10 +140,11 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        copyHelper.text = root.keyText;
+                        const toCopy = root.copyText.length > 0 ? root.copyText : root.keyText;
+                        copyHelper.text = toCopy;
                         copyHelper.selectAll();
                         copyHelper.copy();
-                        root.copied(root.keyText);
+                        root.copied(toCopy);
                     }
                 }
             }

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.1.0 LANGUAGES CXX)
+project(ParanoiaUiClient VERSION 0.2.0 LANGUAGES CXX)
 
-set(PARANOIA_APP_VERSION "${PROJECT_VERSION}")
+set(PARANOIA_APP_VERSION "${PROJECT_VERSION}_beta")
 math(EXPR PARANOIA_ANDROID_VERSION_CODE
     "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}"
 )
@@ -11,8 +11,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(PARANOIA_ENABLE_QT_VIRTUAL_KEYBOARD "Enable Qt Virtual Keyboard when the Qt module is installed" ON)
-option(PARANOIA_BETA_LOGGING "Write all Qt messages to paranoia_debug.log in app data dir" OFF)
-set(PARANOIA_QT_COMPONENTS Quick Concurrent QuickControls2 QuickDialogs2 QuickLayouts Svg Network)
+option(PARANOIA_BETA_LOGGING "Write all Qt messages to paranoia_debug.log in app data dir" ON)
+set(PARANOIA_QT_COMPONENTS Quick Concurrent QuickControls2 QuickDialogs2 QuickLayouts Svg Network LabsSettings)
 if(WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID))
     list(APPEND PARANOIA_QT_COMPONENTS Widgets)
 endif()
@@ -61,6 +61,10 @@ endif()
 target_include_directories(Paranoia
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/backend
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/session
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
 )
 
 set_source_files_properties(ui/Theme.qml
@@ -72,20 +76,30 @@ qt_add_qml_module(Paranoia
     VERSION 1.0
     RESOURCE_PREFIX /qt/qml
     SOURCES
-    src/InstallServerBackend.hpp
-    src/InstallServerBackend.cpp
-    src/ClientSSH.hpp
-    src/ClientSSH.cpp
-    src/adminStorage.hpp
-    src/adminStorage.cpp
-    src/ClientBackend.hpp
-    src/ClientBackend.cpp
-    src/PlatformNotifications.hpp
-    src/PlatformNotifications.cpp
-    src/QrCodeUtils.cpp
-    src/QrCodeUtils.hpp
-    src/Utils.cpp
-    src/Utils.hpp
+    src/backend/InstallServerBackend.hpp
+    src/backend/InstallServerBackend.cpp
+    src/backend/MainBackend.hpp
+    src/backend/MainBackend.cpp
+    src/backend/ChatBackend.hpp
+    src/backend/ChatBackend.cpp
+    src/session/Dialog.hpp
+    src/session/Dialog.cpp
+    src/session/ServerSession.hpp
+    src/session/ServerSession.cpp
+    src/session/SessionStore.hpp
+    src/session/SessionStore.cpp
+    src/platform/PlatformNotifications.hpp
+    src/platform/PlatformNotifications.cpp
+    src/utils/adminStorage.hpp
+    src/utils/adminStorage.cpp
+    src/utils/ClientSSH.hpp
+    src/utils/ClientSSH.cpp
+    src/utils/QrCodeUtils.cpp
+    src/utils/QrCodeUtils.hpp
+    src/utils/Utils.cpp
+    src/utils/Utils.hpp
+    src/utils/Paths.cpp
+    src/utils/Paths.hpp
     QML_FILES
     ui/Main.qml
     ui/Theme.qml
@@ -96,18 +110,18 @@ qt_add_qml_module(Paranoia
     ${PARANOIA_OPTIONAL_QML_FILES}
     ui/Components/QrCodeBox.qml
     ui/Components/ProgressStep.qml
-    ui/Components/Pages/ClientRegistrationPage.qml
-    ui/Components/Pages/HelloPage.qml
-    ui/Components/Pages/ImportProfilePage.qml
-    ui/Components/Pages/InstallServerPage.qml
-    ui/Components/Pages/MainPage.qml
-    ui/Components/Pages/ChatPage.qml
-    ui/Components/Pages/ExportImportPage.qml
-    ui/Components/Pages/QrExchangePage.qml
-    ui/Components/Pages/AddDialogPage.qml
-    ui/Components/Pages/UpdateKeyPage.qml
-    ui/Components/Pages/ClearHistoryPage.qml
-    ui/Components/Pages/RegisterUserPage.qml
+    ui/Pages/ClientRegistrationPage.qml
+    ui/Pages/HelloPage.qml
+    ui/Pages/ImportProfilePage.qml
+    ui/Pages/InstallServerPage.qml
+    ui/Pages/MainPage.qml
+    ui/Pages/ChatPage.qml
+    ui/Pages/ExportImportPage.qml
+    ui/Pages/QrExchangePage.qml
+    ui/Pages/AddDialogPage.qml
+    ui/Pages/UpdateKeyPage.qml
+    ui/Pages/ClearHistoryPage.qml
+    ui/Pages/RegisterUserPage.qml
 )
 
 target_compile_definitions(Paranoia
@@ -134,8 +148,8 @@ set_target_properties(Paranoia PROPERTIES
 )
 
 if(IOS)
-    target_sources(Paranoia PRIVATE src/PlatformNotifications_ios.mm)
-    set_source_files_properties(src/PlatformNotifications_ios.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    target_sources(Paranoia PRIVATE src/platform/PlatformNotifications_ios.mm)
+    set_source_files_properties(src/platform/PlatformNotifications_ios.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     set_target_properties(Paranoia PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
     )
@@ -180,6 +194,7 @@ target_link_libraries(Paranoia
     Qt6::QuickLayouts
     Qt6::Svg
     Qt6::Network
+    Qt6::LabsSettings
 )
 
 if(TARGET Qt6::VirtualKeyboard)

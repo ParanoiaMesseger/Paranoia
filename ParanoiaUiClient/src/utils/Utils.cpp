@@ -1,6 +1,8 @@
 #include "Utils.hpp"
+
+#include "Paths.hpp"
+
 #include <QCryptographicHash>
-#include <QDir>
 #include <QJsonArray>
 
 namespace Utils
@@ -33,28 +35,6 @@ namespace Utils
         return QString::fromLatin1(QCryptographicHash::hash(input, QCryptographicHash::Sha256).toHex());
     }
 
-    QString profilesRootPath() { return QStringLiteral("profiles"); }
-
-    QString profilesManifestPath() { return QStringLiteral("profiles.json"); }
-
-    QString profileDirPath(const QString &profileId) { return QDir(profilesRootPath()).filePath(profileId); }
-
-    QString profileClientPath(const QString &profileId)
-    { return QDir(profileDirPath(profileId)).filePath(QStringLiteral("client.json")); }
-
-    QString profileDialogsPath(const QString &profileId)
-    { return QDir(profileDirPath(profileId)).filePath(QStringLiteral("dialogs.json")); }
-
-    QString profileDbPath(const QString &profileId)
-    { return QDir(profileDirPath(profileId)).filePath(QStringLiteral("paranoia.db")); }
-
-    bool ensureProfileDir(const QString &profileId)
-    {
-        const QDir root;
-        if (!root.exists(profilesRootPath()) && !root.mkpath(profilesRootPath())) return false;
-        return root.mkpath(profileDirPath(profileId));
-    }
-
     QJsonObject readJsonObjectFile(const QString &path)
     {
         const auto doc = QJsonDocument::fromJson(readAll(path));
@@ -75,7 +55,7 @@ namespace Utils
 
     QJsonObject loadProfilesManifest()
     {
-        auto manifest = readJsonObjectFile(profilesManifestPath());
+        auto manifest = readJsonObjectFile(Paths::profilesManifest);
         if (!manifest.value("profiles").isArray()) manifest["profiles"] = QJsonArray{};
         return manifest;
     }
@@ -98,7 +78,7 @@ namespace Utils
             profiles.append(obj);
         manifest["profiles"] = profiles;
         if (makeLast) manifest["last_profile_id"] = profileId;
-        writeJsonObjectFile(profilesManifestPath(), manifest);
+        writeJsonObjectFile(Paths::profilesManifest, manifest);
     }
 
     bool decodeFixedBase64(const QString &value, int expectedSize, QByteArray *out)

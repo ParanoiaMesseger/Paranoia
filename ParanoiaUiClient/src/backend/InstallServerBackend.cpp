@@ -1,10 +1,13 @@
 #include "InstallServerBackend.hpp"
-#include "ClientSSH.hpp"
-#include <QDebug>
+#include "utils/ClientSSH.hpp"
 #include <memory>
 #include <QFileInfo>
-#include "adminStorage.hpp"
-#include "paranoia_lib.h"
+#include "utils/adminStorage.hpp"
+#include "session/ServerSession.hpp"
+#include "Paths.hpp"
+#include "utils/Utils.hpp"
+#include <ParanoiaFFI>
+#include <QCryptographicHash>
 #include <QThread>
 
 InstallServerBackend::InstallServerBackend(QObject *parent) : QObject{parent}, ssh(nullptr) {}
@@ -13,21 +16,17 @@ void InstallServerBackend::install(const QString &domain, const QString &ip, con
                                    const QString &password, int port)
 {
     if (m_running) return;
-
     m_running = true;
     m_domain  = domain;
     m_port    = port;
-
     // Сброс всех шагов в Pending
     for (int i = 0; i < StepCount; ++i) setStep(static_cast<Step>(i), Pending);
-
-    setStep(Step::StepGenerateKeys, Running);
+    setStep(StepGenerateKeys, Running);
     auto [private_, public_] = ParanoiaFFI::generate_keypair();
     private_admin_key        = private_;
     public_admin_key         = public_;
-    setStep(Step::StepGenerateKeys, Done);
-
-    setStep(Step::StepSshConnect, Running);
+    setStep(StepGenerateKeys, Done);
+    setStep(StepSshConnect, Running);
     ssh = std::make_unique<ClientSSH>();
     connect(ssh.get(), &ClientSSH::connected, this, &InstallServerBackend::on_connected);
     connect(ssh.get(), &ClientSSH::disconnected, this, &InstallServerBackend::on_disconnected);
@@ -121,7 +120,29 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
                 }
             });
         } break;
-        case StepRegisterServer: emit installFinished(m_domain); break;
+        case StepRegisterServer: {
+            auto [clientPriv, clientPub] = ParanoiaFFI::generate_keypair();
+            m_clientPrivKey              = clientPriv;
+            m_clientPubKey               = clientPub;
+            QCryptographicHash h(QCryptographicHash::Sha256);
+            h.addData(QByteArrayLiteral("paranoia:server-id:v1\n"));
+            h.addData(QByteArray::fromBase64(m_clientPubKey.toUtf8()));
+            const QString serverId = QString::fromLatin1(h.result().toHex());
+            const QString url      = m_domain.startsWith("http") ? m_domain : "https://" + m_domain;
+            admin::Admin{url, private_admin_key}
+                .regUser(serverId, m_clientPubKey)
+                .then(this, [this, url, serverId](bool ok) {
+                    if (!ok) {
+                        emit installError(StepRegisterServer, "Не удалось зарегистрировать клиентский профиль.");
+                        return;
+                    }
+                    const QString profileId = Utils::profileIdFor(url, serverId);
+                    if (Paths::ensureProfileDir(profileId))
+                        ServerSession::saveClientConfigForProfile(profileId, url, "", serverId, m_clientPrivKey);
+                    setStep(StepRegisterServer, Done);
+                    emit installFinished(m_domain, profileId);
+                });
+        } break;
         case StepCreateConfig:
         case StepSshConnect:
         case StepGenerateKeys:

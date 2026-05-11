@@ -2,7 +2,8 @@
 
 #include <QQmlEngine>
 
-class QrCodeUtils : public QObject {
+class QrCodeUtils : public QObject
+{
     Q_OBJECT
     QML_ELEMENT
     QML_SINGLETON

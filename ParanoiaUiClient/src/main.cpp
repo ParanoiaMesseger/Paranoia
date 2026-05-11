@@ -21,11 +21,12 @@
 #include <QJniEnvironment>
 #include <QJniObject>
 #include <QStandardPaths>
-#include <paranoia_lib.h>
+#include <ParanoiaFFI>
 #endif
-#include "adminStorage.hpp"
-#include "ClientBackend.hpp"
-#include "PlatformNotifications.hpp"
+#include "utils/adminStorage.hpp"
+#include "backend/ChatBackend.hpp"
+#include "backend/MainBackend.hpp"
+#include "platform/PlatformNotifications.hpp"
 
 #ifndef PARANOIA_HAS_QT_VIRTUAL_KEYBOARD
 #define PARANOIA_HAS_QT_VIRTUAL_KEYBOARD 0
@@ -138,9 +139,17 @@ int main(int argc, char *argv[])
 
     admin::Admin::initAdmins();
     PlatformNotifications::registerBackgroundTasks();
-    ClientBackend backend;
+    MainBackend backend;
+    ChatBackend chatBackend;
+    // Cross-backend wiring
+    QObject::connect(&chatBackend, &ChatBackend::activePeerChanged, &backend, &MainBackend::onActivePeerChanged);
+    QObject::connect(&chatBackend, &ChatBackend::peerMessagesRead,  &backend, &MainBackend::onPeerMessagesRead);
+    QObject::connect(&backend, &MainBackend::networkRestored, &chatBackend, &ChatBackend::onNetworkRestored);
+    QObject::connect(&backend, &MainBackend::dialogRemoved,   &chatBackend, &ChatBackend::onDialogRemoved);
+    QObject::connect(&backend, &MainBackend::sessionReset,    &chatBackend, &ChatBackend::onSessionReset);
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("Backend", &backend);
+    engine.rootContext()->setContextProperty("Chat", &chatBackend);
     engine.rootContext()->setContextProperty("VirtualKeyboardAvailable", PARANOIA_HAS_QT_VIRTUAL_KEYBOARD != 0);
 #if PARANOIA_DESKTOP_TRAY
     const bool desktopTrayEnabled = QSystemTrayIcon::isSystemTrayAvailable();
@@ -151,7 +160,7 @@ int main(int argc, char *argv[])
     QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app, [](const QList<QQmlError> &warnings) {
         for (const auto &warning : warnings) qWarning().noquote() << warning.toString();
     });
-    QObject::connect(&backend, &ClientBackend::notificationAvailable, &app,
+    QObject::connect(&backend, &MainBackend::notificationAvailable, &app,
                      [](quint64 count, const QString &peer) { PlatformNotifications::showMessageCount(count, peer); });
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
@@ -189,7 +198,7 @@ int main(int argc, char *argv[])
     QObject::connect(&tray, &QSystemTrayIcon::activated, &app, [&](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) showWindow();
     });
-    QObject::connect(&backend, &ClientBackend::notificationAvailable, &app, [&](quint64 count, const QString &peer) {
+    QObject::connect(&backend, &MainBackend::notificationAvailable, &app, [&](quint64 count, const QString &peer) {
         Q_UNUSED(peer)
         if (!tray.isVisible()) return;
         tray.showMessage(QStringLiteral("Paranoia"), QStringLiteral("Новых сообщений: %1").arg(count),

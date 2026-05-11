@@ -68,7 +68,7 @@ Rectangle {
     function openSaveDialog(messageId, filename) {
         root.pendingDownloadId = messageId
         root.pendingDownloadName = filename && filename.length > 0 ? filename : "attachment.bin"
-        Backend.requestFileAccessPermissions()
+        Chat.requestFileAccessPermissions()
         saveDialog.open()
     }
 
@@ -77,7 +77,7 @@ Rectangle {
             photoViewer.open(source, messageId, filename && filename.length > 0 ? filename : "attachment.bin")
             return
         }
-        Backend.ensureImagePreview(messageId)
+        Chat.ensureImagePreview(messageId)
         errorText.text = "Загрузка превью фото…"
         errorBar.visible = true
         errorTimer.restart()
@@ -117,7 +117,7 @@ Rectangle {
     }
 
     Connections {
-        target: Backend
+        target: Chat
         function onMessagesReceived(peer, messages) {
             if (peer !== root.peer) return
             msgModel.clear()
@@ -158,14 +158,14 @@ Rectangle {
         }
     }
 
-    Component.onCompleted: Backend.openChat(root.peer)
-    Component.onDestruction: Backend.stopChat()
+    Component.onCompleted: Chat.openChat(root.peer)
+    Component.onDestruction: Chat.stopChat()
 
     FileDialog {
         id: attachDialog
         title: "Выберите файл"
         fileMode: FileDialog.OpenFile
-        onAccepted: Backend.sendFile(selectedFile)
+        onAccepted: Chat.sendFile(selectedFile)
     }
 
     FolderDialog {
@@ -173,7 +173,7 @@ Rectangle {
         title: "Выберите папку для сохранения"
         onAccepted: {
             root.downloadingAttachmentId = root.pendingDownloadId
-            Backend.saveAttachment(root.pendingDownloadId, selectedFolder)
+            Chat.saveAttachment(root.pendingDownloadId, selectedFolder)
         }
     }
 
@@ -330,7 +330,7 @@ Rectangle {
                     enabled: messageMenu.messageSeq > 0
                     onClicked: {
                         messageMenu.close()
-                        Backend.deleteMessagesUntil(root.cutSeqForMessage(messageMenu.messageSeq, messageMenu.bodyToSeq))
+                        Chat.deleteMessagesUntil(root.cutSeqForMessage(messageMenu.messageSeq, messageMenu.bodyToSeq))
                     }
                 }
             }
@@ -446,7 +446,7 @@ Rectangle {
 
                 Component.onCompleted: {
                     if (isImage && previewSource.length === 0)
-                        Backend.ensureImagePreview(model.id)
+                        Chat.ensureImagePreview(model.id)
                 }
 
                 Rectangle {
@@ -491,7 +491,7 @@ Rectangle {
                         anchors.top: parent.top
                         anchors.left: parent.left
                         anchors.margins: 10
-                        text: isMe ? "" : model.sender
+                        text: isMe ? "" : root.peer
                         color: Theme.accent
                         font.pixelSize: Theme.fontXs
                         font.family: Theme.fontFamily
@@ -715,7 +715,7 @@ Rectangle {
             BusyIndicator {
                 id: messagesBusy
                 anchors.centerIn: parent
-                running: Backend.messagesLoading && msgModel.count === 0
+                running: Chat.messagesLoading || msgModel.count === 0
                 visible: running
                 z: 2
             }
@@ -795,7 +795,7 @@ Rectangle {
                         anchors.fill: parent
                         hoverEnabled: true
                         onClicked: {
-                            Backend.requestFileAccessPermissions()
+                            Chat.requestFileAccessPermissions()
                             attachDialog.open()
                         }
                     }
@@ -890,11 +890,11 @@ Rectangle {
                     signal clicked()
                     onClicked: {
                         if (root.sendLocked) return
-                        Backend.commitInputMethod()
+                        Chat.commitInputMethod()
                         let txt = msgInput.text.trim()
                         if (txt.length === 0) return
                         root.sendLocked = true
-                        Backend.sendText(txt)
+                        Chat.sendText(txt)
                         msgInput.text = ""
                         sendUnlockTimer.restart()
                     }

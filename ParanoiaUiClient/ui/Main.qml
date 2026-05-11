@@ -63,6 +63,9 @@ ApplicationWindow {
         function onNotificationAvailable(count, peer) {
             appWindow.notificationPeerHint = peer || "";
         }
+        function onSessionSwitched() {
+            while (stackView.depth > 1) stackView.pop(StackView.Immediate);
+        }
     }
 
     Component.onCompleted: {
@@ -117,8 +120,9 @@ ApplicationWindow {
         id: installServerPage
         InstallServerPage {
             onBack: stackView.pop()
-            onServerInstalled: function (domain) {
-                stackView.replace(mainPage);
+            onServerInstalled: function (profileId) {
+                Backend.activateProfile(profileId)
+                stackView.replace(mainPage)
             }
         }
     }

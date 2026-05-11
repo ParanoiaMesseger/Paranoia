@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Installer>
+    <Name>Paranoia</Name>
+    <!-- Sync with project(ParanoiaUiClient VERSION ...) in ParanoiaUiClient/CMakeLists.txt, must have 4 parts -->
+    <Version>0.2.0.0</Version>
+    <Title>Paranoia Setup</Title>
+    <Publisher>Paranoia</Publisher>
+    <StartMenuDir>Paranoia</StartMenuDir>
+    <!-- User-space install: no admin rights required for main installation -->
+    <TargetDir>@HomeDir@/AppData/Local/Programs/Paranoia</TargetDir>
+    <MaintenanceToolName>ParanoiaMaintenance</MaintenanceToolName>
+    <AllowSpaceInPath>true</AllowSpaceInPath>
+    <InstallActionColumnVisible>false</InstallActionColumnVisible>
+    <RunProgram>@TargetDir@/bin/Paranoia.exe</RunProgram>
+    <RunProgramDescription>Launch Paranoia</RunProgramDescription>
+    <!-- Path relative to this file, without extension (.ico/.icns/.png added per platform) -->
+    <Icon>../../ParanoiaUiClient/resources/design/paranoia</Icon>
+</Installer>

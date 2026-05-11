@@ -81,13 +81,6 @@ Rectangle {
                 }
 
                 ParaInput {
-                    id: newUserNameInput
-                    Layout.fillWidth: true
-                    label:       "Имя пользователя"
-                    placeholder: "username"
-                }
-
-                ParaInput {
                     id: newUserPubKeyInput
                     Layout.fillWidth: true
                     label:       "Публичный ключ пользователя"
@@ -116,10 +109,9 @@ Rectangle {
                     Layout.fillWidth: true
                     text: "Зарегистрировать"
                     onClicked: {
-                        let user   = newUserNameInput.text.trim()
                         let pubkey = newUserPubKeyInput.text.trim()
-                        if (user === "" || pubkey === "") {
-                            regFeedback.text = "Заполните все поля."
+                        if (pubkey === "") {
+                            regFeedback.text = "Введите публичный ключ."
                             return
                         }
                         const parsed = QrCodeUtils.registrationPublicKeyFromQr(pubkey)
@@ -129,7 +121,7 @@ Rectangle {
                         }
                         pubkey = parsed.pubkey
                         regFeedback.text = ""
-                        Backend.registerUser(root.targetDomain, user, pubkey)
+                        Backend.registerUser(root.targetDomain, pubkey)
                     }
                 }
 

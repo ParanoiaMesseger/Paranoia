@@ -38,30 +38,8 @@ Rectangle {
                 ParaInput {
                     id: newPeerInput
                     Layout.fillWidth: true
-                    label: "Имя пользователя собеседника"
+                    label: "Имя собеседника (локальная метка)"
                     placeholder: "username"
-                }
-
-                ParaInput {
-                    id: newSecretInput
-                    Layout.fillWidth: true
-                    label: "Общий секрет (оба вводят одинаково)"
-                    placeholder: "секретная фраза…"
-                    echoMode: TextInput.Password
-                }
-
-                ParaButton {
-                    Layout.fillWidth: true
-                    text: "Обменяться ключом через QR/JSON"
-                    secondary: true
-                    onClicked: {
-                        let peer = newPeerInput.text.trim();
-                        if (peer === "") {
-                            addDialogError.text = "Введите имя пользователя.";
-                            return;
-                        }
-                        root.openQrExchange(peer, false);
-                    }
                 }
 
                 Text {
@@ -77,22 +55,18 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Добавить"
+                    text: "Обменяться ключом через QR/JSON"
                     onClicked: {
-                        let peer = newPeerInput.text.trim();
-                        let secret = newSecretInput.text;
+                        let peer = newPeerInput.text.trim()
                         if (peer === "") {
-                            addDialogError.text = "Введите имя пользователя.";
-                            return;
+                            addDialogError.text = "Введите имя собеседника."
+                            return
                         }
-                        if (secret.length < 4) {
-                            addDialogError.text = "Секрет слишком короткий.";
-                            return;
-                        }
-                        Backend.addDialog(peer, secret);
-                        root.back();
+                        addDialogError.text = ""
+                        root.openQrExchange(peer, false)
                     }
                 }
+
                 Item {
                     Layout.preferredHeight: 16
                 }

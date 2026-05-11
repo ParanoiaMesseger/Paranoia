@@ -36,10 +36,7 @@ fn json_object_field_json(value: &Value, field: &str) -> String {
 
 #[test]
 fn ffi_qr_exchange_requires_fingerprint_confirmation() {
-    let invitation_json = take_string(paranoia_qr_create_invitation(
-        cs("alice").as_ptr(),
-        cs("bob").as_ptr(),
-    ));
+    let invitation_json = take_string(paranoia_qr_create_invitation(cs("alice").as_ptr()));
     let invitation: Value = serde_json::from_str(&invitation_json).expect("invitation json");
     let invitation_state_json = json_object_field_json(&invitation, "state");
     let invitation_payload_json = json_object_field_json(&invitation, "payload");

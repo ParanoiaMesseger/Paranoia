@@ -76,7 +76,8 @@ Rectangle {
         id: exportSaveDialog
         title: "Сохранить export-файл"
         fileMode: FileDialog.SaveFile
-        nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
+        defaultSuffix: "json"
+        nameFilters: ["Paranoia export (*.json)", "JSON (*.json)"]
         onAccepted: {
             exportFilePath = root.localFilePath(selectedFile);
             exportFeedback.text = "";
@@ -401,7 +402,10 @@ Rectangle {
                         ParaButton {
                             Layout.fillWidth: true
                             text: "Экспортировать"
-                            onClicked: exportSaveDialog.open()
+                            onClicked: {
+                                exportSaveDialog.currentFile = Qt.resolvedUrl("paranoia-export.json");
+                                exportSaveDialog.open();
+                            }
                         }
 
                         Item {

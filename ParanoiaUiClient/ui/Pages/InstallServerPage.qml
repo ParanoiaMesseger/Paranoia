@@ -8,7 +8,7 @@ Rectangle {
     color: Theme.bgPrimary
 
     signal back()
-    signal serverInstalled(string domain)
+    signal serverInstalled(string profileId)
 
     InstallServerBackend {
         id: backend
@@ -17,9 +17,9 @@ Rectangle {
             root.setStepStatus(step, status)
         }
 
-        onInstallFinished: function(domain) {
+        onInstallFinished: function(domain, profileId) {
             root.isInstalling = false
-            root.serverInstalled(domain)
+            root.serverInstalled(profileId)
         }
 
         onInstallError: function(step, message) {
