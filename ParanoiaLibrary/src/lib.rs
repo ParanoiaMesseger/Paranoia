@@ -18,8 +18,8 @@ use std::sync::Arc;
 pub use admin::AdminKeyPair;
 pub use dialogue::Dialogue;
 pub use types::{
-    ClientConfig, DialogueConfig, DialogueKey, DialogueKeyEntry, FileAttachment, Message,
-    MessageContent, MessageStatus,
+    AttachmentKind, ClientConfig, DialogueConfig, DialogueKey, DialogueKeyEntry, FileAttachment,
+    Message, MessageContent, MessageStatus,
 };
 
 use client_cover_food::FoodDeliveryClientCover;

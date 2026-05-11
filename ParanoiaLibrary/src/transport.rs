@@ -7,48 +7,57 @@ use std::sync::Arc;
 
 /// Внутренний пакет на отправку (push).
 pub struct CorePush {
-    pub sender:  String,
-    pub recver:  String,
-    pub seq:     u64,
+    pub sender: String,
+    pub recver: String,
+    pub seq: u64,
     pub payload: Vec<u8>, // зашифрованный бинарь (ciphertext)
-    pub sig:     Vec<u8>, // подпись Ed25519 (64 байта)
+    pub sig: Vec<u8>,     // подпись Ed25519 (64 байта)
 }
 
 /// Внутренний запрос pull.
 pub struct CorePull {
-    pub sender:    String,
-    pub recver:    String,
+    pub sender: String,
+    pub recver: String,
     pub after_seq: u64,
-    pub sig:       Vec<u8>,
+    pub to_seq: u64,
+    pub sig: Vec<u8>,
+}
+
+/// Внутренний запрос notify: посчитать сообщения после seq без загрузки payload.
+pub struct CoreNotify {
+    pub sender: String,
+    pub partner: String,
+    pub seq: u64,
+    pub sig: Vec<u8>,
 }
 
 /// Внутренний запрос determinate.
 pub struct CoreDeterminate {
-    pub sender:  String,
-    pub recver:  String,
+    pub sender: String,
+    pub recver: String,
     pub cut_seq: u64,
-    pub sig:     Vec<u8>,
+    pub sig: Vec<u8>,
 }
 
 /// Ответ одного пакета с сервера (после pull).
 #[derive(Debug, Clone)]
 pub struct RawPacket {
-    pub seq:     u64,
+    pub seq: u64,
     pub payload: Vec<u8>, // уже декодированный из base64
 }
 
 // Для /reg оставляем простой формат без cover.
 #[derive(Serialize)]
 struct RegRequest<'a> {
-    username:  &'a str,
-    pub_key:   &'a str,
+    username: &'a str,
+    pub_key: &'a str,
     admin_sig: &'a str,
 }
 
 pub struct Transport {
-    client:     Client,
+    client: Client,
     server_url: String,
-    cover:      Arc<dyn ClientCover>,
+    cover: Arc<dyn ClientCover>,
 }
 
 impl Transport {
@@ -74,7 +83,10 @@ impl Transport {
             admin_sig: admin_sig_b64,
         };
         let resp = self.post_json("/reg", &serde_json::to_value(&req)?).await?;
-        let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = resp
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !success {
             anyhow::bail!("Reg failed: {}", resp);
         }
@@ -93,6 +105,12 @@ impl Transport {
         let body = self.cover.wrap_pull(core)?;
         let resp = self.post_json("/pull", &body).await?;
         self.cover.unwrap_pull_response(&resp)
+    }
+
+    pub async fn notify(&self, core: &CoreNotify) -> Result<u64> {
+        let body = self.cover.wrap_notify(core)?;
+        let resp = self.post_json("/notify", &body).await?;
+        self.cover.unwrap_notify_response(&resp)
     }
 
     pub async fn determinate(&self, core: &CoreDeterminate) -> Result<()> {

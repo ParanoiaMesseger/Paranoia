@@ -34,7 +34,7 @@ QtObject {
 
     // ── Radius ───────────────────────────────────────────
     readonly property int radiusSm: 3
-    readonly property int radiusMd: 6
+    readonly property int radiusMd: 10
     readonly property int radiusLg: 10
 
     // ── Typography ───────────────────────────────────────

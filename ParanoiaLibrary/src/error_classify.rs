@@ -18,6 +18,8 @@ pub(crate) fn classify_send_error(err: &str) -> String {
             &["invalid seq", "invalid_seq", "expected seq"],
             "invalid_seq",
         ),
+        (&["file_read_error"], "file_read_error"),
+        (&["file_too_large"], "file_too_large"),
     ];
 
     let classified = classify_by_table(err, SEND_PATTERNS, "");

@@ -74,7 +74,9 @@ where
 fn panic_error_code(fallback_error: &str) -> &str {
     match fallback_error {
         "send_error" => "send_panic",
+        "attachment_error" => "attachment_panic",
         "receive_error" => "receive_panic",
+        "notify_error" => "notify_panic",
         "history_error" => "history_panic",
         "determinate_error" => "determinate_panic",
         "client_init_error" => "client_init_panic",
@@ -278,7 +280,10 @@ pub extern "C" fn paranoia_register_user(
         match rt.block_on(transport.reg(&username, &pubkey, sig.as_str())) {
             Ok(_) => 0,
             Err(e) => {
-                set_last_error(&classify_network_error(&anyhow_error_chain(&e), "register_error"));
+                set_last_error(&classify_network_error(
+                    &anyhow_error_chain(&e),
+                    "register_error",
+                ));
                 -1
             }
         }
@@ -317,6 +322,53 @@ pub extern "C" fn paranoia_send_text_json_keyring(
     })
 }
 
+/// Отправить файл, прочитав его с локального пути, через keyring-конфигурацию.
+/// Возвращает JSON-массив сообщений или NULL при ошибке.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_file_json_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    file_path: *const c_char,
+    mime_type: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("send_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(file_path), invalid_argument_ptr());
+        let mime_type = cstr_arg(mime_type).unwrap_or_default();
+        let filename = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        let mime_type = if mime_type.trim().is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            mime_type
+        };
+
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.send_file_path(
+                filename,
+                mime_type,
+                std::path::Path::new(&path),
+            )) {
+                Ok(msgs) => messages_to_c_string(&msgs),
+                Err(e) => {
+                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
 /// Получить новые сообщения с сервера, выбирая ключ по start_seq из keyring JSON.
 /// Возвращает JSON-массив или NULL при ошибке. Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
@@ -342,8 +394,49 @@ pub extern "C" fn paranoia_receive_keyring(
                     messages_to_c_string(&msgs)
                 }
                 Err(e) => {
-                    set_last_error(&classify_network_error(&anyhow_error_chain(&e), "receive_error"));
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "receive_error",
+                    ));
                     std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
+/// Проверить количество новых серверных сообщений без загрузки payload.
+/// Возвращает 0 при успехе и пишет результат в out_count.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_notify_count_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    out_count: *mut u64,
+) -> i32 {
+    ffi_catch_i32("notify_error", || {
+        clear_last_error();
+        if out_count.is_null() {
+            return invalid_argument_i32();
+        }
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| match h.rt.block_on(dialogue.notify_count()) {
+                Ok(count) => {
+                    unsafe { *out_count = count };
+                    0
+                }
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "notify_error",
+                    ));
+                    -1
                 }
             },
         )
@@ -378,6 +471,69 @@ pub extern "C" fn paranoia_history_keyring(
     })
 }
 
+/// Сохранить вложение в файл, скачав body-пакеты через bounded pull при необходимости.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_save_attachment_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    message_id: *const c_char,
+    target_path: *const c_char,
+) -> i32 {
+    ffi_catch_i32("attachment_error", || {
+        clear_last_error();
+        let message_id = ffi_try!(cstr_arg(message_id), invalid_argument_i32());
+        let target_path = ffi_try!(cstr_arg(target_path), invalid_argument_i32());
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| match h
+                .rt
+                .block_on(dialogue.download_attachment(&message_id, &target_path))
+            {
+                Ok(()) => 0,
+                Err(e) => {
+                    set_last_error(&anyhow_error_chain(&e));
+                    -1
+                }
+            },
+        )
+    })
+}
+
+/// Сохранить вложение во внутренний cache приложения и вернуть локальный путь.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_cache_attachment_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    message_id: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("attachment_error", || {
+        clear_last_error();
+        let message_id = ffi_try!(cstr_arg(message_id), invalid_argument_ptr());
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.cache_attachment(&message_id)) {
+                Ok(path) => string_to_c(path),
+                Err(e) => {
+                    set_last_error(&anyhow_error_chain(&e));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
 /// Удалить серверную историю диалога до cut_seq включительно при keyring-конфигурации.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_determinate_keyring(
@@ -398,11 +554,37 @@ pub extern "C" fn paranoia_determinate_keyring(
             |h, dialogue| match h.rt.block_on(dialogue.clear_server_history(cut_seq)) {
                 Ok(_) => 0,
                 Err(e) => {
-                    set_last_error(&classify_network_error(&anyhow_error_chain(&e), "determinate_error"));
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "determinate_error",
+                    ));
                     -1
                 }
             },
         )
+    })
+}
+
+/// Удалить локальные сообщения диалога до cut_seq включительно при keyring-конфигурации.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_delete_local_until_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    cut_seq: u64,
+) -> i32 {
+    ffi_catch_i32("delete_local_error", || {
+        clear_last_error();
+        with_keyring_dialogue(handle, user_a, user_b, keyring_json, -1, |_h, dialogue| {
+            match dialogue.delete_local_until(cut_seq) {
+                Ok(_) => 0,
+                Err(e) => {
+                    set_last_error(&anyhow_error_chain(&e));
+                    -1
+                }
+            }
+        })
     })
 }
 
@@ -826,23 +1008,83 @@ fn json_value_to_c_string(value: serde_json::Value) -> *mut c_char {
 }
 
 fn message_to_json(m: &Message) -> serde_json::Value {
-    serde_json::json!({
-        "id":     m.id,
-        "sender": m.sender,
-        "content": message_content_for_ui(&m.content),
-        "ts":     m.timestamp.timestamp_millis(),
-        "seq":    m.server_seq,
-    })
-}
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), serde_json::json!(m.id));
+    obj.insert("sender".into(), serde_json::json!(m.sender));
+    obj.insert(
+        "ts".into(),
+        serde_json::json!(m.timestamp.timestamp_millis()),
+    );
+    obj.insert("seq".into(), serde_json::json!(m.server_seq));
 
-fn message_content_for_ui(content: &MessageContent) -> String {
-    match content {
-        MessageContent::Text(text) => format!("Text({text:?})"),
-        MessageContent::File(_) => "File(...)".to_string(),
-        MessageContent::Image(_) => "Image(...)".to_string(),
-        MessageContent::Voice(_) => "Voice(...)".to_string(),
-        MessageContent::FileChunk { .. } => "FileChunk(...)".to_string(),
-        MessageContent::ReadReceipt { .. } => "ReadReceipt(...)".to_string(),
-        MessageContent::Delete { .. } => "Delete(...)".to_string(),
+    match &m.content {
+        MessageContent::Text(text) => {
+            obj.insert("kind".into(), serde_json::json!("text"));
+            obj.insert("text".into(), serde_json::json!(text));
+            obj.insert(
+                "content".into(),
+                serde_json::json!(format!("Text({text:?})")),
+            );
+        }
+        MessageContent::File(file) | MessageContent::Image(file) | MessageContent::Voice(file) => {
+            let kind = match &m.content {
+                MessageContent::Image(_) => "image",
+                MessageContent::Voice(_) => "voice",
+                _ => "file",
+            };
+            obj.insert("kind".into(), serde_json::json!(kind));
+            obj.insert("text".into(), serde_json::json!(file.filename));
+            obj.insert("filename".into(), serde_json::json!(file.filename));
+            obj.insert("mime_type".into(), serde_json::json!(file.mime_type));
+            obj.insert("size".into(), serde_json::json!(file.size));
+            obj.insert("downloadable".into(), serde_json::json!(true));
+            obj.insert(
+                "downloaded".into(),
+                serde_json::json!(
+                    file.downloaded
+                        || !file.data.is_empty()
+                        || file.cache_path.is_some()
+                        || file.size == 0
+                ),
+            );
+            obj.insert("transfer_id".into(), serde_json::json!(file.transfer_id));
+            obj.insert("cache_path".into(), serde_json::json!(file.cache_path));
+            obj.insert(
+                "body_from_seq".into(),
+                serde_json::json!(file.body_from_seq),
+            );
+            obj.insert("body_to_seq".into(), serde_json::json!(file.body_to_seq));
+            obj.insert("content".into(), serde_json::json!("File(...)"));
+        }
+        MessageContent::FileHeader {
+            filename,
+            total_size,
+            ..
+        } => {
+            obj.insert("kind".into(), serde_json::json!("file_header"));
+            obj.insert("filename".into(), serde_json::json!(filename));
+            obj.insert("size".into(), serde_json::json!(total_size));
+            obj.insert("content".into(), serde_json::json!("FileHeader(...)"));
+        }
+        MessageContent::FileChunk {
+            filename,
+            total_size,
+            ..
+        } => {
+            obj.insert("kind".into(), serde_json::json!("file_chunk"));
+            obj.insert("filename".into(), serde_json::json!(filename));
+            obj.insert("size".into(), serde_json::json!(total_size));
+            obj.insert("content".into(), serde_json::json!("FileChunk(...)"));
+        }
+        MessageContent::ReadReceipt { .. } => {
+            obj.insert("kind".into(), serde_json::json!("read_receipt"));
+            obj.insert("content".into(), serde_json::json!("ReadReceipt(...)"));
+        }
+        MessageContent::Delete { .. } => {
+            obj.insert("kind".into(), serde_json::json!("delete"));
+            obj.insert("content".into(), serde_json::json!("Delete(...)"));
+        }
     }
+
+    serde_json::Value::Object(obj)
 }
