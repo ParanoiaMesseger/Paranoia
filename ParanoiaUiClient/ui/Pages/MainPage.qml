@@ -10,12 +10,22 @@ Rectangle {
     color: Theme.bgPrimary
 
     property bool hasAdminAccess: Backend.hasAdminAccess
+    property string highlightProfileId: ""
     property string highlightPeer: ""
     property var sessionsData: []
 
     function refreshSessions() { sessionsData = Backend.getSessionList() }
+    function currentProfileId() {
+        for (let i = 0; i < sessionsData.length; ++i) {
+            if (sessionsData[i].isActive)
+                return sessionsData[i].profileId || ""
+        }
+        return ""
+    }
 
-    signal openChat(string peer)
+    readonly property string activeProfileId: currentProfileId()
+
+    signal openChat(string profileId, string peer)
     signal registerClient()
     signal installNewServer()
     signal openExportImport()
@@ -24,6 +34,13 @@ Rectangle {
     signal openUpdateKey(string peer)
     signal openClearHistory(string peer)
     signal openRegisterUser(string domain)
+    signal openAddReserveDomain(string targetType, string targetId, string primaryDomain)
+
+    function reserveDomainsText(domains) {
+        if (!domains || domains.length === 0)
+            return "Администратор"
+        return "Резерв: " + domains.join(", ")
+    }
 
     function contentIndexForTab(tabIndex) {
         if (root.hasAdminAccess)
@@ -56,7 +73,7 @@ Rectangle {
 
     Connections {
         target: Backend
-        function onDialogsChanged()    { dialogsView.model = Backend.getDialogs() }
+        function onDialogsChanged()    { dialogsView.model = Backend.getDialogs(); root.refreshSessions() }
         function onAdminStateChanged() { adminServersView.model = Backend.getAdminServers() }
         function onDialogDeleted(peer) { dialogsView.model = Backend.getDialogs() }
         function onSessionsChanged()   { root.refreshSessions() }
@@ -239,7 +256,7 @@ Rectangle {
 
                         Row {
                             anchors.left:           parent.left
-                            anchors.right:          sessionBadge.left
+                            anchors.right:          reserveClientButton.left
                             anchors.top:            parent.top
                             anchors.bottom:         parent.bottom
                             anchors.leftMargin:     16
@@ -288,8 +305,41 @@ Rectangle {
                             }
                         }
 
+                        Rectangle {
+                            id: reserveClientButton
+                            z: 2
+                            anchors.right: sessionBadge.visible ? sessionBadge.left : parent.right
+                            anchors.rightMargin: sessionBadge.visible ? 6 : 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 72
+                            height: 26
+                            radius: Theme.radiusSm
+                            color: reserveClientArea.containsMouse ? Theme.bgButton : Theme.bgCard
+                            border.width: 1
+                            border.color: Theme.border
+                            visible: Backend.loggedIn
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Резерв"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontXs
+                                font.family: Theme.fontFamily
+                                font.weight: Font.Medium
+                            }
+
+                            MouseArea {
+                                id: reserveClientArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openAddReserveDomain("client", root.activeProfileId, Backend.server)
+                            }
+                        }
+
                         MouseArea {
                             id: sessionHdrArea
+                            z: 0
                             anchors.fill: parent
                             hoverEnabled: true
                             enabled:      root.sessionsData.length > 1
@@ -312,7 +362,10 @@ Rectangle {
                             width:  ListView.view.width
                             height: 60
                             readonly property int unreadCount: modelData.unreadCount || 0
-                            readonly property bool highlighted: unreadCount > 0 || modelData.notificationHint === true || modelData.peer === root.highlightPeer
+                            readonly property bool highlighted: unreadCount > 0 || modelData.notificationHint === true ||
+                                                               (modelData.peer === root.highlightPeer &&
+                                                                (root.highlightProfileId.length === 0 ||
+                                                                 root.highlightProfileId === root.activeProfileId))
                             color:  highlighted ? Theme.bgSecondary : (dlgArea.containsMouse ? Theme.bgDark : "transparent")
 
                             Rectangle {
@@ -421,7 +474,7 @@ Rectangle {
                                 hoverEnabled: true
                                 onClicked: {
                                     if (modelData.hasKey)
-                                        root.openChat(modelData.peer);
+                                        root.openChat(root.activeProfileId, modelData.peer);
                                     else
                                         noKeyWarning.open();
                                 }
@@ -564,7 +617,7 @@ Rectangle {
 
                     delegate: Rectangle {
                         width:  ListView.view.width
-                        height: 64
+                        height: modelData.reserveDomains && modelData.reserveDomains.length > 0 ? 78 : 64
                         color:  "transparent"
 
                         RowLayout {
@@ -585,16 +638,26 @@ Rectangle {
                                     width:          parent.width
                                 }
                                 Text {
-                                    text:           "Администратор"
-                                    color:          Theme.accent
+                                    text:           root.reserveDomainsText(modelData.reserveDomains)
+                                    color:          modelData.reserveDomains && modelData.reserveDomains.length > 0 ? Theme.textSecondary : Theme.accent
                                     font.pixelSize: Theme.fontSm
                                     font.family:    Theme.fontFamily
+                                    elide:          Text.ElideRight
+                                    width:          parent.width
                                 }
                             }
 
                             ParaButton {
-                                text:           "Зарегистрировать"
-                                implicitWidth:  140
+                                text:           "Резерв"
+                                secondary:      true
+                                implicitWidth:  86
+                                implicitHeight: 36
+                                onClicked:      root.openAddReserveDomain("admin", modelData.domain, modelData.domain)
+                            }
+
+                            ParaButton {
+                                text:           "Пользователь"
+                                implicitWidth:  122
                                 implicitHeight: 36
                                 onClicked:      root.openRegisterUser(modelData.domain)
                             }

@@ -1,6 +1,8 @@
 #pragma once
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 
 namespace Utils
 {
@@ -19,6 +21,14 @@ namespace Utils
     bool isSupportedExportProfile(const QString &profileType);
 
     QString normalizedServerUrl(const QString &server);
+
+    QStringList normalizedServerUrls(const QStringList &servers, const QString &primaryServer = {});
+
+    QJsonArray stringListToJsonArray(const QStringList &values);
+
+    QStringList stringListFromJsonArray(const QJsonArray &values);
+
+    QString reserveServerUrlsJson(const QStringList &reserveServerUrls);
 
     QString profileIdFor(const QString &server, const QString &username);
 

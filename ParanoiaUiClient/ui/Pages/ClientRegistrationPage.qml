@@ -137,6 +137,15 @@ Rectangle {
                 }
 
                 ParaInput {
+                    id: reserveEndpointInput
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    label: "Резервный адрес сервера"
+                    placeholder: "https://cdn.example.com (опционально)"
+                    visible: !root.generating
+                }
+
+                ParaInput {
                     id: usernameInput
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
@@ -183,7 +192,7 @@ Rectangle {
                         }
                         root.errorMsg = ""
                         root.isLoading = true
-                        Backend.loginClient(server, username, root.privateKey)
+                        Backend.loginClient(server, reserveEndpointInput.text.trim(), username, root.privateKey)
                     }
                 }
 

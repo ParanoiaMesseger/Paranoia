@@ -6,11 +6,17 @@
 
 namespace PlatformNotifications
 {
+    struct NotificationTarget {
+        QString profileId;
+        QString peer;
+    };
+
     void registerBackgroundTasks();
     void setBackgroundPollCallback(std::function<void()> callback);
     void startBackgroundPollingService();
     void stopBackgroundPollingService();
-    void showMessageCount(quint64 count, const QString &peer = {});
+    void showMessageCount(quint64 count, const QString &profileId, const QString &peer = {});
+    NotificationTarget takeOpenTargetFromNotification();
     QString takeOpenPeerFromNotification();
     void triggerBackgroundPoll();
 }

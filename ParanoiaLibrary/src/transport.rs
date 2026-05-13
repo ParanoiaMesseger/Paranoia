@@ -1,9 +1,12 @@
 use crate::client_cover::ClientCover;
-use anyhow::Result;
-use reqwest::Client;
+use anyhow::{Context, Result, anyhow, bail};
+use reqwest::{Client, StatusCode};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Внутренний пакет на отправку (push).
 pub struct CorePush {
@@ -56,15 +59,33 @@ struct RegRequest<'a> {
 
 pub struct Transport {
     client: Client,
-    server_url: String,
+    server_urls: Vec<String>,
     cover: Arc<dyn ClientCover>,
 }
 
+enum EndpointError {
+    Retry(anyhow::Error),
+    Stop(anyhow::Error),
+}
+
 impl Transport {
-    pub fn new(server_url: &str, cover: Arc<dyn ClientCover>) -> Self {
+    pub fn new<I, S>(server_url: &str, reserve_server_urls: I, cover: Arc<dyn ClientCover>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut server_urls = Vec::new();
+        push_server_url(&mut server_urls, server_url);
+        for url in reserve_server_urls {
+            push_server_url(&mut server_urls, url.as_ref());
+        }
+
         Self {
-            client: Client::new(),
-            server_url: server_url.trim_end_matches('/').to_string(),
+            client: Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+            server_urls,
             cover,
         }
     }
@@ -122,15 +143,191 @@ impl Transport {
     // ── HTTP утилита ────────────────────────────────────────────────────
 
     async fn post_json(&self, path: &str, body: &Value) -> Result<Value> {
-        let url = format!("{}{}", self.server_url, path);
-        let resp = self
-            .client
-            .post(&url)
-            .json(body)
-            .send()
-            .await?
-            .json::<Value>()
-            .await?;
-        Ok(resp)
+        let mut last_retry_error = None;
+        for server_url in &self.server_urls {
+            let url = format!("{}{}", server_url, path);
+            match self.post_json_once(&url, body).await {
+                Ok(resp) => return Ok(resp),
+                Err(EndpointError::Retry(err)) => last_retry_error = Some(err),
+                Err(EndpointError::Stop(err)) => return Err(err),
+            }
+        }
+
+        match last_retry_error {
+            Some(err) => Err(err).context("all server endpoints unavailable"),
+            None => bail!("no server endpoints configured"),
+        }
+    }
+
+    async fn post_json_once(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> std::result::Result<Value, EndpointError> {
+        let resp = match self.client.post(url).json(body).send().await {
+            Ok(resp) => resp,
+            Err(err) if err.is_builder() => {
+                return Err(EndpointError::Stop(
+                    anyhow!(err).context("invalid server endpoint"),
+                ));
+            }
+            Err(err) => {
+                return Err(EndpointError::Retry(
+                    anyhow!(err).context("server endpoint request failed"),
+                ));
+            }
+        };
+
+        let status = resp.status();
+        if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(EndpointError::Retry(anyhow!(
+                "server endpoint returned retryable HTTP status {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(EndpointError::Stop(anyhow!(
+                "server endpoint returned HTTP status {status}"
+            )));
+        }
+
+        resp.json::<Value>().await.map_err(|err| {
+            EndpointError::Stop(anyhow!(err).context("invalid server JSON response"))
+        })
+    }
+}
+
+fn push_server_url(server_urls: &mut Vec<String>, url: &str) {
+    let url = url.trim().trim_end_matches('/').to_string();
+    if !url.is_empty() && !server_urls.contains(&url) {
+        server_urls.push(url);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::{CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    struct NoopCover;
+
+    impl ClientCover for NoopCover {
+        fn wrap_push(&self, _core: &CorePush) -> Result<Value> {
+            unreachable!()
+        }
+
+        fn wrap_pull(&self, _core: &CorePull) -> Result<Value> {
+            unreachable!()
+        }
+
+        fn wrap_notify(&self, _core: &CoreNotify) -> Result<Value> {
+            unreachable!()
+        }
+
+        fn wrap_determinate(&self, _core: &CoreDeterminate) -> Result<Value> {
+            unreachable!()
+        }
+
+        fn unwrap_pull_response(&self, _body: &Value) -> Result<Vec<RawPacket>> {
+            unreachable!()
+        }
+
+        fn unwrap_notify_response(&self, _body: &Value) -> Result<u64> {
+            unreachable!()
+        }
+
+        fn unwrap_push_response(&self, _body: &Value) -> Result<()> {
+            unreachable!()
+        }
+
+        fn unwrap_determinate_response(&self, _body: &Value) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    fn noop_cover() -> Arc<dyn ClientCover> {
+        Arc::new(NoopCover)
+    }
+
+    fn unused_local_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        format!("http://{addr}")
+    }
+
+    fn spawn_json_server(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn reserve_urls_are_normalized_and_deduplicated() {
+        let transport = Transport::new(
+            " https://paranoia.example.com/api/ ",
+            ["https://cdn.example.com/", "https://cdn.example.com", "   "],
+            noop_cover(),
+        );
+
+        assert_eq!(
+            transport.server_urls,
+            vec![
+                "https://paranoia.example.com/api".to_string(),
+                "https://cdn.example.com".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reg_falls_back_to_reserve_url_on_primary_connection_error() {
+        let primary_url = unused_local_url();
+        let (reserve_url, reserve_server) = spawn_json_server("200 OK", r#"{"success":true}"#);
+        let transport = Transport::new(
+            &primary_url,
+            std::iter::once(reserve_url.as_str()),
+            noop_cover(),
+        );
+
+        transport
+            .reg("alice", "user_pubkey", "admin_sig")
+            .await
+            .expect("reserve endpoint should handle request");
+        reserve_server.join().expect("reserve server thread");
+    }
+
+    #[tokio::test]
+    async fn reg_falls_back_to_reserve_url_on_retryable_http_status() {
+        let (primary_url, primary_server) = spawn_json_server("502 Bad Gateway", "{}");
+        let (reserve_url, reserve_server) = spawn_json_server("200 OK", r#"{"success":true}"#);
+        let transport = Transport::new(
+            &primary_url,
+            std::iter::once(reserve_url.as_str()),
+            noop_cover(),
+        );
+
+        transport
+            .reg("alice", "user_pubkey", "admin_sig")
+            .await
+            .expect("reserve endpoint should handle request");
+        primary_server.join().expect("primary server thread");
+        reserve_server.join().expect("reserve server thread");
     }
 }

@@ -178,6 +178,7 @@ fn normalize_keyring(keyring: &mut Vec<DialogueKeyEntry>) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub server_url: String,
+    pub reserve_server_urls: Vec<String>,
     pub username: String,
     pub signing_key: ed25519_dalek::SigningKey,
     pub db_path: String,

@@ -5,14 +5,11 @@
     <Version>0.2.1.0</Version>
     <Title>Paranoia Setup</Title>
     <Publisher>Paranoia</Publisher>
-    <StartMenuDir>Paranoia</StartMenuDir>
-    <!-- User-space install: no admin rights required for main installation -->
-    <TargetDir>@HomeDir@/AppData/Local/Programs/Paranoia</TargetDir>
+    <TargetDir>@HomeDir@/Paranoia</TargetDir>
     <MaintenanceToolName>ParanoiaMaintenance</MaintenanceToolName>
     <AllowSpaceInPath>true</AllowSpaceInPath>
     <InstallActionColumnVisible>false</InstallActionColumnVisible>
-    <RunProgram>@TargetDir@/bin/Paranoia.exe</RunProgram>
+    <RunProgram>@TargetDir@/bin/Paranoia</RunProgram>
     <RunProgramDescription>Launch Paranoia</RunProgramDescription>
-    <!-- IFW appends .ico / .icns / .png depending on platform -->
     <InstallerWindowIcon>../../ParanoiaUiClient/resources/design/paranoia</InstallerWindowIcon>
 </Installer>

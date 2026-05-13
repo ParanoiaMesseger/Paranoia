@@ -2,7 +2,6 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Window
 import ParanoiaUiClient
-import QtQuick.VirtualKeyboard.Settings
 
 ApplicationWindow {
     id: appWindow
@@ -12,13 +11,21 @@ ApplicationWindow {
     title: "Paranoia"
     color: Theme.bgPrimary
     property bool importNavigationPending: false
+    property string notificationProfileHint: ""
     property string notificationPeerHint: ""
     readonly property bool virtualKeyboardEnabled: VirtualKeyboardAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
 
+    onActiveChanged: {
+        if (active)
+            appWindow.refreshNotificationPeerHint()
+    }
+
     function refreshNotificationPeerHint() {
         const peer = Backend.takeNotificationPeer();
-        if (peer && peer.length > 0)
+        if (peer && peer.length > 0) {
+            appWindow.notificationProfileHint = Backend.notificationHintProfileId || "";
             appWindow.notificationPeerHint = peer;
+        }
     }
 
     function openMainPageIfReady() {
@@ -60,7 +67,8 @@ ApplicationWindow {
         function onAdminStateChanged() {
             appWindow.openMainPageIfReady();
         }
-        function onNotificationAvailable(count, peer) {
+        function onNotificationAvailable(count, profileId, peer) {
+            appWindow.notificationProfileHint = profileId || "";
             appWindow.notificationPeerHint = peer || "";
         }
         function onSessionSwitched() {
@@ -72,8 +80,6 @@ ApplicationWindow {
         appWindow.refreshNotificationPeerHint();
         if (Backend.loggedIn || Backend.hasAdminAccess)
             stackView.replace(mainPage);
-        if (appWindow.virtualKeyboardEnabled)
-            VirtualKeyboardSettings.activeLocales = ["en_US", "ru_RU"];
     }
 
     StackView {
@@ -152,10 +158,14 @@ ApplicationWindow {
     Component {
         id: mainPage
         MainPage {
+            highlightProfileId: appWindow.notificationProfileHint
             highlightPeer: appWindow.notificationPeerHint
-            onOpenChat: function (peer) {
-                if (appWindow.notificationPeerHint === peer)
+            onOpenChat: function (profileId, peer) {
+                if (appWindow.notificationPeerHint === peer &&
+                        (appWindow.notificationProfileHint.length === 0 || appWindow.notificationProfileHint === profileId)) {
+                    appWindow.notificationProfileHint = "";
                     appWindow.notificationPeerHint = "";
+                }
                 stackView.push(chatPage, { peer: peer });
             }
             onRegisterClient:   stackView.push(clientRegistrationPage)
@@ -166,6 +176,13 @@ ApplicationWindow {
             onOpenUpdateKey:    function (peer) { stackView.push(updateKeyPage, { peer: peer }) }
             onOpenClearHistory: function (peer) { stackView.push(clearHistoryPage, { peer: peer }) }
             onOpenRegisterUser: function (domain) { stackView.push(registerUserPage, { targetDomain: domain }) }
+            onOpenAddReserveDomain: function (targetType, targetId, primaryDomain) {
+                stackView.push(addReserveDomainPage, {
+                    targetType: targetType,
+                    targetId: targetId,
+                    primaryDomain: primaryDomain
+                })
+            }
         }
     }
 
@@ -213,6 +230,13 @@ ApplicationWindow {
     Component {
         id: registerUserPage
         RegisterUserPage {
+            onBack: stackView.pop()
+        }
+    }
+
+    Component {
+        id: addReserveDomainPage
+        AddReserveDomainPage {
             onBack: stackView.pop()
         }
     }

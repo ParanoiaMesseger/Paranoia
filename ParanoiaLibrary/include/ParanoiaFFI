@@ -15,6 +15,7 @@ inline QString takeRustString(char *ptr)
 #define QS_RS2(x, x1) QS_RS(x), QS_RS(x1)
 #define QS_RS3(x, x1, x2) QS_RS(x), QS_RS(x1), QS_RS(x2)
 #define QS_RS4(x, x1, x2, x3) QS_RS(x), QS_RS(x1), QS_RS(x2), QS_RS(x3)
+#define QS_RS5(x, x1, x2, x3, x4) QS_RS(x), QS_RS(x1), QS_RS(x2), QS_RS(x3), QS_RS(x4)
 #define RS_QS(ptr) takeRustString(ptr)
 
 class ParanoiaFFI
@@ -24,8 +25,8 @@ public:
     using PrivateKey = QString;
     using PublicKey  = QString;
 
-    ParanoiaFFI(QSTR server_url, QSTR username, QSTR signing_key_b64, QSTR db_path)
-        : ptr(::paranoia_client_new(QS_RS4(server_url, username, signing_key_b64, db_path)))
+    ParanoiaFFI(QSTR server_url, QSTR reserve_server_urls_json, QSTR username, QSTR signing_key_b64, QSTR db_path)
+        : ptr(::paranoia_client_new(QS_RS5(server_url, reserve_server_urls_json, username, signing_key_b64, db_path)))
     {
     }
     bool isRawOk() const { return ptr != nullptr; }
@@ -67,8 +68,8 @@ public:
 
     ~ParanoiaFFI() { ::paranoia_client_free(ptr); }
 
-    static int register_user(QSTR server_url, QSTR username, QSTR user_pubkey_b64, QSTR secret_b64)
-    { return ::paranoia_register_user(QS_RS4(server_url, username, user_pubkey_b64, secret_b64)); }
+    static int register_user(QSTR server_url, QSTR reserve_server_urls_json, QSTR username, QSTR user_pubkey_b64, QSTR secret_b64)
+    { return ::paranoia_register_user(QS_RS5(server_url, reserve_server_urls_json, username, user_pubkey_b64, secret_b64)); }
 
     static QString qr_create_invitation(QSTR initiator_id)
     { return RS_QS(::paranoia_qr_create_invitation(QS_RS(initiator_id))); }

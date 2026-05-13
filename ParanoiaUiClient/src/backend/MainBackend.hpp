@@ -3,6 +3,7 @@
 #include <QVariantList>
 #include <QTimer>
 #include <QMap>
+#include <QStringList>
 
 class MainBackend : public QObject
 {
@@ -15,6 +16,7 @@ class MainBackend : public QObject
     Q_PROPERTY(bool hasAdminAccess READ hasAdminAccess NOTIFY adminStateChanged)
     Q_PROPERTY(QString devicePubkey READ devicePubkey NOTIFY deviceKeyChanged)
     Q_PROPERTY(QString notificationHintPeer READ notificationHintPeer NOTIFY notificationHintPeerChanged)
+    Q_PROPERTY(QString notificationHintProfileId READ notificationHintProfileId NOTIFY notificationHintPeerChanged)
 
 public:
     explicit MainBackend(QObject *parent = nullptr);
@@ -26,11 +28,15 @@ public:
     bool hasAdminAccess() const;
     QString devicePubkey() const;
     QString notificationHintPeer() const;
+    QString notificationHintProfileId() const;
 
     Q_INVOKABLE void generateKeyPair();
-    Q_INVOKABLE void loginClient(const QString &server, const QString &username, const QString &private_key);
+    Q_INVOKABLE void loginClient(const QString &server, const QString &reserveServer, const QString &username,
+                                 const QString &private_key);
     Q_INVOKABLE void activateProfile(const QString &profileId);
     Q_INVOKABLE void registerUser(const QString &domain, const QString &pubkey);
+    Q_INVOKABLE void addAdminReserveDomain(const QString &primaryDomain, const QString &reserveDomain);
+    Q_INVOKABLE void addClientReserveDomain(const QString &profileId, const QString &reserveDomain);
 
     Q_INVOKABLE void addDialog(const QString &peer, const QString &sharedSecret);
     Q_INVOKABLE void updateDialogKey(const QString &peer, const QString &newSharedSecret);
@@ -63,8 +69,10 @@ signals:
     void loginError(const QString &msg);
     void userRegistered();
     void registerUserError(const QString &msg);
+    void reserveDomainAdded(const QString &targetType, const QString &targetId, const QString &reserveDomain);
+    void reserveDomainError(const QString &msg);
     void dialogsChanged();
-    void notificationAvailable(quint64 count, const QString &peer);
+    void notificationAvailable(quint64 count, const QString &profileId, const QString &peer);
     void notificationHintPeerChanged();
     void dialogDeleted(const QString &peer);
     void serverHistoryCleared(const QString &peer);
@@ -79,6 +87,7 @@ signals:
 public slots:
     void onActivePeerChanged(const QString &peer);
     void onPeerMessagesRead(const QString &peer);
+    void onBackgroundMessagesReceived(const QString &profileId, const QString &peer, quint64 count);
 
 private slots:
     void onPollTimer();
@@ -89,16 +98,18 @@ private:
     QString m_devicePrivkey;
     QTimer *m_pollTimer;
     QMap<QString, quint64> m_notifiedPendingByPeer;
+    QMap<QString, quint64> m_locallyReceivedPendingByPeer;
+    QString m_notificationHintProfileId;
     QString m_notificationHintPeer;
     int m_notifyRetryCount    = 0;
     bool m_notifyPollInFlight = false;
 
     void loginClientInternal(const QString &server, const QString &username, const QString &private_key,
-                             bool makeActive);
+                             const QStringList &reserveServerUrls, bool makeActive);
     void loadClientConfig();
     void saveDeviceKey() const;
     void loadDeviceKey();
-    void setNotificationHintPeer(const QString &peer);
+    void setNotificationHint(const QString &profileId, const QString &peer);
     void pollNotifications();
     void scheduleNotifyPoll(int delayMs = -1);
     int randomNotifyDelayMs() const;

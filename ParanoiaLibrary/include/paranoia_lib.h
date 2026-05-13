@@ -17,7 +17,10 @@ int paranoia_android_init(void *jni_env, void *android_context);
 #endif
 
 // ── Клиент
-ParanoiaHandle *paranoia_client_new(CSTR server_url, CSTR username, CSTR signing_key_b64, CSTR db_path);
+// reserve_server_urls_json: JSON-массив строк с резервными endpoint'ами, например ["https://cdn.example.com"].
+// NULL или пустая строка означают отсутствие резервов.
+ParanoiaHandle *paranoia_client_new(CSTR server_url, CSTR reserve_server_urls_json, CSTR username,
+                                    CSTR signing_key_b64, CSTR db_path);
 void paranoia_client_free(ParanoiaHandle *h);
 
 // ── Server ID derivation
@@ -29,7 +32,8 @@ char *paranoia_derive_server_id(CSTR signing_key_b64);
 void paranoia_generate_keypair(char **out_secret, char **out_pubkey);
 
 // ── Регистрация
-int paranoia_register_user(CSTR server_url, CSTR username, CSTR user_pubkey_b64, CSTR secret_b64);
+int paranoia_register_user(CSTR server_url, CSTR reserve_server_urls_json, CSTR username, CSTR user_pubkey_b64,
+                           CSTR secret_b64);
 
 // ── Сообщения
 // Keyring API

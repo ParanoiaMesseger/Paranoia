@@ -2,9 +2,9 @@
 <Package>
     <DisplayName>Paranoia</DisplayName>
     <Description>Paranoia messaging client</Description>
-    <!-- Sync with Version in installer/config/config.xml -->
-    <Version>0.2.0.0</Version>
-    <ReleaseDate>2026-05-12</ReleaseDate>
+    <!-- CI rewrites Version/ReleaseDate from ParanoiaUiClient/CMakeLists.txt before packaging. -->
+    <Version>0.2.1.0</Version>
+    <ReleaseDate>2026-05-13</ReleaseDate>
     <Default>true</Default>
     <Script>installscript.qs</Script>
 </Package>

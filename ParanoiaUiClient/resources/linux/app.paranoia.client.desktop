@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Paranoia
-Exec=Paranoia
+Exec=env QT_QPA_PLATFORM=wayland;xcb Paranoia
 Icon=app.paranoia.client
 Terminal=false
 Categories=Network;InstantMessaging;

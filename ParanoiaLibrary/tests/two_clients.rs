@@ -24,6 +24,7 @@ fn build_client_db(
 ) -> ParanoiaClient {
     ParanoiaClient::new(ClientConfig {
         server_url: server_url.to_string(),
+        reserve_server_urls: Vec::new(),
         username: username.to_string(),
         signing_key,
         db_path: db_path.to_string(),
@@ -346,6 +347,7 @@ fn build_client(
 ) -> ParanoiaClient {
     ParanoiaClient::new(ClientConfig {
         server_url: server_url.to_string(),
+        reserve_server_urls: Vec::new(),
         username: username.to_string(),
         signing_key,
         db_path: root

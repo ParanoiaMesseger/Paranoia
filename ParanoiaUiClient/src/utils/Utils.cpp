@@ -4,6 +4,7 @@
 
 #include <QCryptographicHash>
 #include <QJsonArray>
+#include <QJsonDocument>
 
 namespace Utils
 {
@@ -27,6 +28,41 @@ namespace Utils
         if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
         while (url.endsWith('/') && !url.endsWith("://")) url.chop(1);
         return url;
+    }
+
+    QStringList normalizedServerUrls(const QStringList &servers, const QString &primaryServer)
+    {
+        const QString primary = normalizedServerUrl(primaryServer);
+        QStringList result;
+        for (const auto &server : servers) {
+            const QString url = normalizedServerUrl(server);
+            if (url.isEmpty() || url == primary || result.contains(url)) continue;
+            result.append(url);
+        }
+        return result;
+    }
+
+    QJsonArray stringListToJsonArray(const QStringList &values)
+    {
+        QJsonArray arr;
+        for (const auto &value : values)
+            if (!value.isEmpty()) arr.append(value);
+        return arr;
+    }
+
+    QStringList stringListFromJsonArray(const QJsonArray &values)
+    {
+        QStringList result;
+        for (const auto &value : values) {
+            const QString text = value.toString().trimmed();
+            if (!text.isEmpty()) result.append(text);
+        }
+        return result;
+    }
+
+    QString reserveServerUrlsJson(const QStringList &reserveServerUrls)
+    {
+        return QString::fromUtf8(QJsonDocument(stringListToJsonArray(reserveServerUrls)).toJson(QJsonDocument::Compact));
     }
 
     QString profileIdFor(const QString &server, const QString &username)

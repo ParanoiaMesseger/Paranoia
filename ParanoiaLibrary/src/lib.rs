@@ -35,7 +35,11 @@ pub struct ParanoiaClient {
 impl ParanoiaClient {
     pub fn new(config: ClientConfig) -> Result<Self> {
         let cover = Arc::new(FoodDeliveryClientCover::new());
-        let transport = Arc::new(Transport::new(&config.server_url, cover));
+        let transport = Arc::new(Transport::new(
+            &config.server_url,
+            config.reserve_server_urls.iter().map(String::as_str),
+            cover,
+        ));
         let store = Arc::new(LocalStore::open(&config.db_path)?);
         Ok(Self {
             config: Arc::new(config),

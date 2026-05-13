@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.0 LANGUAGES CXX)
+project(ParanoiaUiClient VERSION 0.2.1 LANGUAGES CXX)
 
-set(PARANOIA_APP_VERSION "${PROJECT_VERSION}_beta")
+set(PARANOIA_APP_VERSION "${PROJECT_VERSION}")
 math(EXPR PARANOIA_ANDROID_VERSION_CODE
     "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}"
 )
@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(PARANOIA_ENABLE_QT_VIRTUAL_KEYBOARD "Enable Qt Virtual Keyboard when the Qt module is installed" ON)
-option(PARANOIA_BETA_LOGGING "Write all Qt messages to paranoia_debug.log in app data dir" ON)
+option(PARANOIA_BETA_LOGGING "Write all Qt messages to paranoia_debug.log in app data dir" OFF)
 set(PARANOIA_QT_COMPONENTS Quick Concurrent QuickControls2 QuickDialogs2 QuickLayouts Svg Network LabsSettings)
 if(WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID))
     list(APPEND PARANOIA_QT_COMPONENTS Widgets)
@@ -122,6 +122,7 @@ qt_add_qml_module(Paranoia
     ui/Pages/UpdateKeyPage.qml
     ui/Pages/ClearHistoryPage.qml
     ui/Pages/RegisterUserPage.qml
+    ui/Pages/AddReserveDomainPage.qml
 )
 
 target_compile_definitions(Paranoia
@@ -183,6 +184,28 @@ elseif(UNIX AND NOT APPLE)
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications"
         COMPONENT Runtime
     )
+    # Deploy Wayland platform plugins (loaded dynamically — not picked up by auto-deploy)
+    get_filename_component(_qt_prefix "${Qt6Core_DIR}/../../.." ABSOLUTE)
+    get_filename_component(_qt_lib_dir "${Qt6Core_DIR}/../.." ABSOLUTE)
+    file(GLOB _wayland_qt_libs CONFIGURE_DEPENDS "${_qt_lib_dir}/libQt6Wayland*.so*")
+    if(_wayland_qt_libs)
+        install(FILES ${_wayland_qt_libs}
+            DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT Runtime)
+    endif()
+    file(GLOB _wayland_platform_plugins CONFIGURE_DEPENDS "${_qt_prefix}/plugins/platforms/libqwayland*.so*")
+    if(_wayland_platform_plugins)
+        install(FILES ${_wayland_platform_plugins}
+            DESTINATION "plugins/platforms" COMPONENT Runtime)
+    endif()
+    foreach(_dir IN ITEMS
+            wayland-decoration-client
+            wayland-graphics-integration-client
+            wayland-shell-integration)
+        if(EXISTS "${_qt_prefix}/plugins/${_dir}")
+            install(DIRECTORY "${_qt_prefix}/plugins/${_dir}"
+                DESTINATION "plugins" COMPONENT Runtime)
+        endif()
+    endforeach()
 endif()
 
 
@@ -233,3 +256,10 @@ qt_generate_deploy_qml_app_script(
     DEPLOY_USER_QML_MODULES_ON_UNSUPPORTED_PLATFORM
 )
 install(SCRIPT ${deploy_script} COMPONENT Runtime)
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/linux/qt.conf"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        COMPONENT Runtime
+    )
+endif()
