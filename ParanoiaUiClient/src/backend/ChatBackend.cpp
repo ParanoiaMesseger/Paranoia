@@ -165,6 +165,11 @@ namespace
 #else
     void requestAndroidFileAccessIfNeeded() {}
 #endif
+
+    bool applicationIsActive()
+    {
+        return QGuiApplication::applicationState() == Qt::ApplicationActive;
+    }
 }
 
 ChatBackend::ChatBackend(QObject *parent) : QObject(parent)
@@ -560,6 +565,7 @@ void ChatBackend::deleteMessagesUntil(quint64 cutSeq)
 void ChatBackend::fetchMessages()
 {
     if (m_activePeer.isEmpty()) return;
+    if (!applicationIsActive()) return;
     if (m_receiveInFlight) {
         m_receiveAgainAfterCurrent = true;
         return;
@@ -572,10 +578,11 @@ void ChatBackend::fetchMessages()
     const QString serverId     = session->serverId;
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
+    const QString profileId    = session->profileId;
     QPointer self(this);
     m_receiveInFlight = true;
     beginMessagesLoading();
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson]() {
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, profileId]() {
         if (!self) return;
         QString json;
         QString lastErr;
@@ -605,15 +612,20 @@ void ChatBackend::fetchMessages()
             });
             return;
         }
-        QMetaObject::invokeMethod(self, [self, json, peer, lastErr]() {
+        QMetaObject::invokeMethod(self, [self, json, peer, profileId, lastErr]() {
             if (!self) return;
             self->m_receiveInFlight = false;
             self->endMessagesLoading();
             if (lastErr.startsWith("decryption_failed:"))
                 emit self->receiveError("Ошибка расшифровки: неверный ключ диалога или повреждённые данные.");
+            const QVariantList messages = self->parseMessages(json);
+            const bool appActive        = applicationIsActive();
             if (peer == self->m_activePeer) {
-                self->appendMessages(peer, self->parseMessages(json));
-                emit self->peerMessagesRead(peer);
+                self->appendMessages(peer, messages);
+                if (appActive) emit self->peerMessagesRead(peer);
+            }
+            if (!appActive && !messages.isEmpty()) {
+                emit self->backgroundMessagesReceived(profileId, peer, static_cast<quint64>(messages.size()));
             }
             if (self->m_receiveAgainAfterCurrent) {
                 self->m_receiveAgainAfterCurrent = false;
@@ -658,6 +670,16 @@ void ChatBackend::onNetworkRestored()
     scheduleActiveChatPoll(0);
 }
 
+void ChatBackend::onApplicationStateChanged(Qt::ApplicationState state)
+{
+    if (state == Qt::ApplicationActive) {
+        m_activePollRetryCount = 0;
+        scheduleActiveChatPoll(0);
+    } else {
+        m_activePollTimer->stop();
+    }
+}
+
 // ── Active chat poll ──────────────────────────────────────────────────────────
 
 void ChatBackend::onActivePollTimer() { pollActiveChat(); }
@@ -666,6 +688,10 @@ void ChatBackend::pollActiveChat()
 {
     if (m_activePollInFlight) {
         scheduleActiveChatPoll();
+        return;
+    }
+    if (!applicationIsActive()) {
+        m_activePollTimer->stop();
         return;
     }
     auto session = SessionStore::instance()->activeSession();
@@ -727,7 +753,8 @@ void ChatBackend::pollActiveChat()
 void ChatBackend::scheduleActiveChatPoll(int delayMs)
 {
     auto session = SessionStore::instance()->activeSession();
-    if (!session || !session->isLoggedIn() || m_activePeer.isEmpty() || !session->findDialog(m_activePeer)) {
+    if (!applicationIsActive() || !session || !session->isLoggedIn() || m_activePeer.isEmpty() ||
+        !session->findDialog(m_activePeer)) {
         m_activePollTimer->stop();
         return;
     }

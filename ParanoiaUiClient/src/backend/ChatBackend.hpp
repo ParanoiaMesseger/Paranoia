@@ -4,6 +4,7 @@
 #include <QSet>
 #include <QTimer>
 #include <QMap>
+#include <Qt>
 
 class ChatBackend : public QObject
 {
@@ -41,11 +42,13 @@ signals:
     // Cross-backend coordination
     void activePeerChanged(const QString &peer);
     void peerMessagesRead(const QString &peer);
+    void backgroundMessagesReceived(const QString &profileId, const QString &peer, quint64 count);
 
 public slots:
     void onDialogRemoved(const QString &peer);
     void onSessionReset();
     void onNetworkRestored();
+    void onApplicationStateChanged(Qt::ApplicationState state);
 
 private slots:
     void onActivePollTimer();

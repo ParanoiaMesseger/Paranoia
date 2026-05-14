@@ -39,6 +39,7 @@ fn invalid_key_returns_opaque_error_code() {
     let bad_key = "not-valid-base64!!!this_is_secret_material";
     let handle = paranoia_client_new(
         cs("http://127.0.0.1:1").as_ptr(),
+        std::ptr::null(),
         cs("alice").as_ptr(),
         cs(bad_key).as_ptr(),
         cs(db.to_str().unwrap()).as_ptr(),
@@ -62,7 +63,7 @@ fn invalid_key_returns_opaque_error_code() {
     );
 }
 
-// ── Test 2: paranoia_client_new с корректными данными → handle не NULL ────────
+// ── Test 2: reserve-aware client creation with no reserves → handle не NULL ───
 
 #[test]
 fn valid_client_creation_succeeds() {
@@ -71,6 +72,7 @@ fn valid_client_creation_succeeds() {
 
     let handle = paranoia_client_new(
         cs("http://127.0.0.1:9999").as_ptr(),
+        std::ptr::null(),
         cs("alice").as_ptr(),
         cs(ZERO_KEY_B64).as_ptr(),
         cs(db.to_str().unwrap()).as_ptr(),

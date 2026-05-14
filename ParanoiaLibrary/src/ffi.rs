@@ -172,12 +172,13 @@ fn handle_ref<'a>(handle: *mut ParanoiaHandle) -> anyhow::Result<&'a ParanoiaHan
     Ok(unsafe { &*handle })
 }
 
-/// Создать клиента. Возвращает NULL при ошибке.
-/// server_url, username, db_path — null-terminated UTF-8 строки.
-/// signing_key_b64 — base64 Ed25519 private key (32 bytes).
+/// Создать клиента с резервными URL сервера.
+/// reserve_server_urls_json — JSON-массив строк, например ["https://cdn.example.com"].
+/// Можно передать NULL или пустую строку, если резервов нет.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_client_new(
     server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
     username: *const c_char,
     signing_key_b64: *const c_char,
     db_path: *const c_char,
@@ -185,39 +186,15 @@ pub extern "C" fn paranoia_client_new(
     ffi_catch_value("client_init_error", std::ptr::null_mut(), || {
         clear_last_error();
         let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_null());
+        let reserve_server_urls = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_null()
+        );
         let username = ffi_try!(cstr_arg(username), invalid_argument_null());
         let sk_b64 = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_null());
         let db_path = ffi_try!(cstr_arg(db_path), invalid_argument_null());
 
-        let signing_key = match decode_b64_32(&sk_b64) {
-            Ok(sk) => ed25519_dalek::SigningKey::from_bytes(&sk),
-            _ => {
-                set_last_error("invalid_signing_key: expected 32 bytes base64");
-                return std::ptr::null_mut();
-            }
-        };
-
-        let cfg = ClientConfig {
-            server_url,
-            username,
-            signing_key,
-            db_path,
-        };
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(_) => {
-                set_last_error("runtime_error");
-                return std::ptr::null_mut();
-            }
-        };
-
-        match ParanoiaClient::new(cfg) {
-            Ok(client) => Box::into_raw(Box::new(ParanoiaHandle { client, rt })),
-            Err(_) => {
-                set_last_error("client_init_error");
-                std::ptr::null_mut()
-            }
-        }
+        client_handle_from_parts(server_url, reserve_server_urls, username, sk_b64, db_path)
     })
 }
 
@@ -271,11 +248,12 @@ pub extern "C" fn paranoia_generate_keypair(
     })
 }
 
-/// Зарегистрировать пользователя на сервере.
-/// Возвращает 0 при успехе, -1 при ошибке. Ошибку см. paranoia_last_error().
+/// Зарегистрировать пользователя через основной URL с резервными путями доступа.
+/// reserve_server_urls_json — JSON-массив строк, NULL/"" означает отсутствие резервов.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_register_user(
     server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
     username: *const c_char,
     user_pubkey_b64: *const c_char,
     secret_b64: *const c_char,
@@ -284,34 +262,13 @@ pub extern "C" fn paranoia_register_user(
         clear_last_error();
         let sk = ffi_try!(cstr_arg(secret_b64), invalid_argument_i32());
         let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_i32());
+        let reserve_server_urls = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_i32()
+        );
         let username = ffi_try!(cstr_arg(username), invalid_argument_i32());
         let pubkey = ffi_try!(cstr_arg(user_pubkey_b64), invalid_argument_i32());
-        let sig = match AdminKeyPair::from_secret_b64(&sk) {
-            Ok(kp) => kp.sign_user_registration(&username, &pubkey),
-            Err(_) => {
-                set_last_error("invalid_admin_key");
-                return -1;
-            }
-        };
-        let rt = match Runtime::new() {
-            Ok(r) => r,
-            Err(_) => {
-                set_last_error("runtime_error");
-                return -1;
-            }
-        };
-        let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
-        let transport = crate::transport::Transport::new(&server_url, cover);
-        match rt.block_on(transport.reg(&username, &pubkey, sig.as_str())) {
-            Ok(_) => 0,
-            Err(e) => {
-                set_last_error(&classify_network_error(
-                    &anyhow_error_chain(&e),
-                    "register_error",
-                ));
-                -1
-            }
-        }
+        register_user_request(server_url, reserve_server_urls, username, pubkey, sk)
     })
 }
 
@@ -881,6 +838,95 @@ fn cstr_arg(ptr: *const c_char) -> anyhow::Result<String> {
         .to_str()
         .unwrap_or("")
         .to_string())
+}
+
+fn reserve_server_urls_json_arg(ptr: *const c_char) -> anyhow::Result<Vec<String>> {
+    if ptr.is_null() {
+        return Ok(Vec::new());
+    }
+    let value = cstr_arg(ptr)?;
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&value).map_err(Into::into)
+}
+
+fn client_handle_from_parts(
+    server_url: String,
+    reserve_server_urls: Vec<String>,
+    username: String,
+    sk_b64: String,
+    db_path: String,
+) -> *mut ParanoiaHandle {
+    let signing_key = match decode_b64_32(&sk_b64) {
+        Ok(sk) => ed25519_dalek::SigningKey::from_bytes(&sk),
+        _ => {
+            set_last_error("invalid_signing_key: expected 32 bytes base64");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let cfg = ClientConfig {
+        server_url,
+        reserve_server_urls,
+        username,
+        signing_key,
+        db_path,
+    };
+    let rt = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => {
+            set_last_error("runtime_error");
+            return std::ptr::null_mut();
+        }
+    };
+
+    match ParanoiaClient::new(cfg) {
+        Ok(client) => Box::into_raw(Box::new(ParanoiaHandle { client, rt })),
+        Err(_) => {
+            set_last_error("client_init_error");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn register_user_request(
+    server_url: String,
+    reserve_server_urls: Vec<String>,
+    username: String,
+    pubkey: String,
+    sk: String,
+) -> i32 {
+    let sig = match AdminKeyPair::from_secret_b64(&sk) {
+        Ok(kp) => kp.sign_user_registration(&username, &pubkey),
+        Err(_) => {
+            set_last_error("invalid_admin_key");
+            return -1;
+        }
+    };
+    let rt = match Runtime::new() {
+        Ok(r) => r,
+        Err(_) => {
+            set_last_error("runtime_error");
+            return -1;
+        }
+    };
+    let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
+    let transport = crate::transport::Transport::new(
+        &server_url,
+        reserve_server_urls.iter().map(String::as_str),
+        cover,
+    );
+    match rt.block_on(transport.reg(&username, &pubkey, sig.as_str())) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(&classify_network_error(
+                &anyhow_error_chain(&e),
+                "register_error",
+            ));
+            -1
+        }
+    }
 }
 
 fn string_to_c(value: String) -> *mut c_char {

@@ -28,7 +28,8 @@ std::shared_ptr<ServerSession> SessionStore::sessionForProfile(const QString &pr
 
 std::shared_ptr<ServerSession> SessionStore::addSession(std::unique_ptr<ParanoiaFFI> ffi, const QString &server,
                                                         const QString &username, const QString &serverId,
-                                                        const QString &privateKey, const QString &profileId)
+                                                        const QString &privateKey, const QString &profileId,
+                                                        const QStringList &reserveServerUrls)
 {
     auto it = std::find_if(m_sessions.begin(), m_sessions.end(),
                            [&profileId](const auto &s) { return s->profileId == profileId; });
@@ -36,7 +37,8 @@ std::shared_ptr<ServerSession> SessionStore::addSession(std::unique_ptr<Paranoia
         if (m_activeSession == *it) m_activeSession.reset();
         m_sessions.erase(it);
     }
-    auto session = std::make_shared<ServerSession>(std::move(ffi), server, username, serverId, privateKey, profileId);
+    auto session = std::make_shared<ServerSession>(std::move(ffi), server, username, serverId, privateKey, profileId,
+                                                   reserveServerUrls);
     m_sessions.push_back(session);
     emit sessionsChanged();
     return session;

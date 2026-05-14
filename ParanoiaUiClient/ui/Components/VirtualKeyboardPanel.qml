@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.VirtualKeyboard
+import QtQuick.VirtualKeyboard.Settings
 
 InputPanel {
     id: panel
@@ -10,5 +11,9 @@ InputPanel {
 
     Behavior on y {
         NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+    }
+
+    Component.onCompleted: {
+        VirtualKeyboardSettings.activeLocales = ["en_US", "ru_RU"];
     }
 }

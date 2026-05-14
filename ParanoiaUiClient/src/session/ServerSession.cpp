@@ -6,8 +6,10 @@
 #include <QJsonObject>
 
 ServerSession::ServerSession(std::unique_ptr<ParanoiaFFI> ffi, const QString &server, const QString &username,
-                             const QString &serverId, const QString &privateKey, const QString &profileId)
+                             const QString &serverId, const QString &privateKey, const QString &profileId,
+                             const QStringList &reserveServerUrls)
     : server(server), username(username), serverId(serverId), private_key(privateKey), profileId(profileId),
+      reserveServerUrls(Utils::normalizedServerUrls(reserveServerUrls, server)),
       ffi(std::move(ffi))
 {
 }
@@ -43,19 +45,22 @@ void ServerSession::saveClientConfig() const
 {
     if (server.isEmpty() || private_key.isEmpty()) return;
     const QString pid = profileId.isEmpty() ? Utils::profileIdFor(server, serverId) : profileId;
-    saveClientConfigForProfile(pid, server, username, serverId, private_key);
+    saveClientConfigForProfile(pid, server, username, serverId, private_key, reserveServerUrls);
     Utils::upsertProfileManifest(pid, server, username, true);
 }
 
 void ServerSession::saveClientConfigForProfile(const QString &profileId, const QString &server, const QString &username,
-                                               const QString &serverId, const QString &privateKey)
+                                               const QString &serverId, const QString &privateKey,
+                                               const QStringList &reserveServerUrls)
 {
     if (profileId.isEmpty() || server.isEmpty() || privateKey.isEmpty()) return;
     if (!Paths::ensureProfileDir(profileId)) return;
+    const QString normalizedServer = Utils::normalizedServerUrl(server);
     QJsonObject obj;
-    obj["server"]      = Utils::normalizedServerUrl(server);
-    obj["username"]    = username;
-    obj["server_id"]   = serverId;
-    obj["private_key"] = privateKey;
+    obj["server"]              = normalizedServer;
+    obj["reserve_server_urls"] = Utils::stringListToJsonArray(Utils::normalizedServerUrls(reserveServerUrls, normalizedServer));
+    obj["username"]            = username;
+    obj["server_id"]           = serverId;
+    obj["private_key"]         = privateKey;
     Utils::writeJsonObjectFile(Paths::profileClient(profileId), obj);
 }

@@ -172,7 +172,11 @@ fn load_admin_keypair() -> Result<AdminKeyPair> {
 }
 
 /// ADMIN REG-USER: подписать pub клиента и вызвать /reg через Transport.
-async fn admin_reg_user(server_url: &str, username: &str) -> Result<()> {
+async fn admin_reg_user(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+) -> Result<()> {
     let admin = load_admin_keypair()?;
     let user_pub_b64 = fs::read_to_string(USER_PUB)
         .context("failed to read USER_PUB")?
@@ -183,7 +187,11 @@ async fn admin_reg_user(server_url: &str, username: &str) -> Result<()> {
 
     let cover =
         std::sync::Arc::new(paranoia_lib::client_cover_food::FoodDeliveryClientCover::new());
-    let transport = paranoia_lib::transport::Transport::new(server_url, cover);
+    let transport = paranoia_lib::transport::Transport::new(
+        server_url,
+        reserve_server_urls.iter().map(String::as_str),
+        cover,
+    );
     transport
         .reg(username, &user_pub_b64, &admin_sig_b64)
         .await?;
@@ -243,13 +251,19 @@ fn profile_signing_key_b64(profile: &ProfileDialogueStore) -> Result<Option<Stri
     Ok(None)
 }
 
-fn build_client(server_url: &str, username: &str, db_path: &str) -> Result<ParanoiaClient> {
+fn build_client(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+) -> Result<ParanoiaClient> {
     let signing_key = match load_profile_signing_key(server_url, username)? {
         Some(signing_key) => signing_key,
         None => load_user_signing_key()?,
     };
     let cfg = ClientConfig {
         server_url: server_url.to_string(),
+        reserve_server_urls: reserve_server_urls.to_vec(),
         username: username.to_string(),
         signing_key,
         db_path: db_path.to_string(),
@@ -289,12 +303,13 @@ fn build_dialogue(
 /// SEND (text)
 async fn cmd_send(
     server_url: &str,
+    reserve_server_urls: &[String],
     username: &str,
     db_path: &str,
     peer: &str,
     text: &str,
 ) -> Result<()> {
-    let client = build_client(server_url, username, db_path)?;
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
     let dialogue = build_dialogue(&client, server_url, username, peer)?;
     let msg = dialogue.send_text(text).await?;
     println!("Sent: id={} seq={:?}", msg.id, msg.server_seq);
@@ -302,8 +317,14 @@ async fn cmd_send(
 }
 
 /// RECEIVE
-async fn cmd_receive(server_url: &str, username: &str, db_path: &str, peer: &str) -> Result<()> {
-    let client = build_client(server_url, username, db_path)?;
+async fn cmd_receive(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
     let dialogue = build_dialogue(&client, server_url, username, peer)?;
     let (msgs, decrypt_errors) = dialogue.receive().await?;
     if decrypt_errors > 0 {
@@ -327,12 +348,13 @@ async fn cmd_receive(server_url: &str, username: &str, db_path: &str, peer: &str
 /// CLEAR server history
 async fn cmd_clear(
     server_url: &str,
+    reserve_server_urls: &[String],
     username: &str,
     db_path: &str,
     peer: &str,
     cut_seq: u64,
 ) -> Result<()> {
-    let client = build_client(server_url, username, db_path)?;
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
     let dialogue = build_dialogue(&client, server_url, username, peer)?;
     dialogue.clear_server_history(cut_seq).await?;
     println!("Server history cleared up to seq={}", cut_seq);
@@ -469,7 +491,8 @@ fn cmd_export(
 
     if export_includes_admin(profile) {
         let admin_private_key_b64 = read_encrypted_secret_b64(ADMIN_SECRETS, "ADMIN_SECRETS")?;
-        AdminKeyPair::from_secret_b64(&admin_private_key_b64).context("invalid admin private key")?;
+        AdminKeyPair::from_secret_b64(&admin_private_key_b64)
+            .context("invalid admin private key")?;
         payload.admin_servers.push(ExportAdminServer {
             url: server_url.to_string(),
             admin_private_key_b64,
@@ -632,6 +655,9 @@ struct Cli {
     #[arg(long, default_value = "https://paranoia.example.com/api")]
     server_url: String,
 
+    #[arg(long = "reserve-server-url")]
+    reserve_server_urls: Vec<String>,
+
     #[arg(long, default_value = "paranoia.db")]
     db_path: String,
 
@@ -762,7 +788,7 @@ async fn main() -> Result<()> {
                 admin_init()?;
             }
             AdminCmd::RegUser { username } => {
-                admin_reg_user(&cli.server_url, &username).await?;
+                admin_reg_user(&cli.server_url, &cli.reserve_server_urls, &username).await?;
             }
         },
         Commands::User { cmd } => match cmd {
@@ -803,17 +829,40 @@ async fn main() -> Result<()> {
             peer,
             text,
         } => {
-            cmd_send(&cli.server_url, &username, &cli.db_path, &peer, &text).await?;
+            cmd_send(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+                &text,
+            )
+            .await?;
         }
         Commands::Receive { username, peer } => {
-            cmd_receive(&cli.server_url, &username, &cli.db_path, &peer).await?;
+            cmd_receive(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+            )
+            .await?;
         }
         Commands::Clear {
             username,
             peer,
             cut_seq,
         } => {
-            cmd_clear(&cli.server_url, &username, &cli.db_path, &peer, cut_seq).await?;
+            cmd_clear(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+                cut_seq,
+            )
+            .await?;
         }
     }
 

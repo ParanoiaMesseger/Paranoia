@@ -17,8 +17,9 @@ public:
     const std::vector<std::shared_ptr<ServerSession>> &allSessions() const { return m_sessions; }
 
     std::shared_ptr<ServerSession> addSession(std::unique_ptr<ParanoiaFFI> ffi, const QString &server,
-                                              const QString &username, const QString &serverId,
-                                              const QString &privateKey, const QString &profileId);
+                                               const QString &username, const QString &serverId,
+                                               const QString &privateKey, const QString &profileId,
+                                               const QStringList &reserveServerUrls = {});
     void setActiveSession(const std::shared_ptr<ServerSession> &session);
     void removeSession(const std::shared_ptr<ServerSession> &session);
 

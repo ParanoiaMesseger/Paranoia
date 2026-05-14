@@ -20,6 +20,7 @@ import android.util.Log;
 public final class ParanoiaForegroundService extends Service {
     private static final String CHANNEL_ID = "paranoia_polling";
     private static final String MESSAGE_CHANNEL_ID = "paranoia_messages";
+    private static final String EXTRA_OPEN_PROFILE_ID = "app.paranoia.client.OPEN_PROFILE_ID";
     private static final String EXTRA_OPEN_PEER = "app.paranoia.client.OPEN_PEER";
     private static final String TAG = "ParanoiaService";
     private static final int FOREGROUND_NOTIFICATION_ID = 1001;
@@ -68,7 +69,7 @@ public final class ParanoiaForegroundService extends Service {
         context.stopService(new Intent(context, ParanoiaForegroundService.class));
     }
 
-    public static void showNewMessages(Context context, long count, String peer) {
+    public static void showNewMessages(Context context, long count, String profileId, String peer) {
         if (count <= 0) {
             return;
         }
@@ -85,7 +86,7 @@ public final class ParanoiaForegroundService extends Service {
                 .setContentTitle("Paranoia")
                 .setContentText("Новых сообщений: " + count)
                 .setSmallIcon(context.getApplicationInfo().icon)
-                .setContentIntent(openAppIntent(context, peer))
+                .setContentIntent(openAppIntent(context, MESSAGE_NOTIFICATION_ID, profileId, peer))
                 .setAutoCancel(true)
                 .setShowWhen(true);
         try {
@@ -134,7 +135,7 @@ public final class ParanoiaForegroundService extends Service {
                 .setContentTitle("Paranoia")
                 .setContentText("Paranoia: ожидание сообщений")
                 .setSmallIcon(getApplicationInfo().icon)
-                .setContentIntent(openAppIntent(this, null))
+                .setContentIntent(openAppIntent(this, FOREGROUND_NOTIFICATION_ID, null, null))
                 .setOngoing(true)
                 .setShowWhen(false);
         return buildNotification(builder);
@@ -187,7 +188,7 @@ public final class ParanoiaForegroundService extends Service {
         manager.createNotificationChannel(messages);
     }
 
-    private static PendingIntent openAppIntent(Context context, String peer) {
+    private static PendingIntent openAppIntent(Context context, int requestCode, String profileId, String peer) {
         Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
         if (launchIntent == null) {
             launchIntent = new Intent();
@@ -197,6 +198,9 @@ public final class ParanoiaForegroundService extends Service {
         launchIntent.setPackage(context.getPackageName());
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP |
                 Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        if (profileId != null && !profileId.isEmpty()) {
+            launchIntent.putExtra(EXTRA_OPEN_PROFILE_ID, profileId);
+        }
         if (peer != null && !peer.isEmpty()) {
             launchIntent.putExtra(EXTRA_OPEN_PEER, peer);
         }
@@ -204,10 +208,10 @@ public final class ParanoiaForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             flags |= PendingIntent.FLAG_IMMUTABLE;
         }
-        return PendingIntent.getActivity(context, 0, launchIntent, flags);
+        return PendingIntent.getActivity(context, requestCode, launchIntent, flags);
     }
 
-    public static String takeOpenPeer(Context context) {
+    public static String takeOpenTarget(Context context) {
         if (!(context instanceof Activity)) {
             return "";
         }
@@ -215,9 +219,20 @@ public final class ParanoiaForegroundService extends Service {
         if (intent == null) {
             return "";
         }
+        String profileId = intent.getStringExtra(EXTRA_OPEN_PROFILE_ID);
         String peer = intent.getStringExtra(EXTRA_OPEN_PEER);
+        intent.removeExtra(EXTRA_OPEN_PROFILE_ID);
         intent.removeExtra(EXTRA_OPEN_PEER);
-        return peer == null ? "" : peer;
+        if (peer == null || peer.isEmpty()) {
+            return "";
+        }
+        return (profileId == null ? "" : profileId) + "\n" + peer;
+    }
+
+    public static String takeOpenPeer(Context context) {
+        String target = takeOpenTarget(context);
+        int separator = target.indexOf('\n');
+        return separator >= 0 ? target.substring(separator + 1) : target;
     }
 
     private static void requestPostNotificationsIfNeeded(Context context) {

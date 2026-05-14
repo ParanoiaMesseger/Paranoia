@@ -76,36 +76,52 @@ namespace PlatformNotifications
 #endif
     }
 
-    void showMessageCount(quint64 count, const QString &peer)
+    void showMessageCount(quint64 count, const QString &profileId, const QString &peer)
     {
 #if defined(Q_OS_ANDROID)
         const QJniObject context = androidContext();
         if (!context.isValid()) return;
+        const QJniObject javaProfileId = QJniObject::fromString(profileId);
         const QJniObject javaPeer = QJniObject::fromString(peer);
         QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaForegroundService", "showNewMessages",
-                                           "(Landroid/content/Context;JLjava/lang/String;)V", context.object<jobject>(),
-                                           static_cast<jlong>(count), javaPeer.object<jstring>());
+                                            "(Landroid/content/Context;JLjava/lang/String;Ljava/lang/String;)V",
+                                            context.object<jobject>(), static_cast<jlong>(count),
+                                            javaProfileId.object<jstring>(), javaPeer.object<jstring>());
 #elif defined(Q_OS_IOS)
+        Q_UNUSED(profileId)
         Q_UNUSED(peer)
         paranoia_ios_show_message_count(static_cast<unsigned long long>(count));
 #else
         Q_UNUSED(count)
+        Q_UNUSED(profileId)
         Q_UNUSED(peer)
 #endif
     }
 
-    QString takeOpenPeerFromNotification()
+    NotificationTarget takeOpenTargetFromNotification()
     {
+        NotificationTarget target;
 #if defined(Q_OS_ANDROID)
         const QJniObject context = androidContext();
-        if (!context.isValid()) return {};
+        if (!context.isValid()) return target;
         const QJniObject result = QJniObject::callStaticObjectMethod(
-            "app/paranoia/client/ParanoiaForegroundService", "takeOpenPeer",
+            "app/paranoia/client/ParanoiaForegroundService", "takeOpenTarget",
             "(Landroid/content/Context;)Ljava/lang/String;", context.object<jobject>());
-        return result.isValid() ? result.toString() : QString();
-#else
-        return {};
+        const QString encoded = result.isValid() ? result.toString() : QString();
+        const qsizetype separator = encoded.indexOf(QLatin1Char('\n'));
+        if (separator < 0) {
+            target.peer = encoded;
+        } else {
+            target.profileId = encoded.left(separator);
+            target.peer      = encoded.mid(separator + 1);
+        }
 #endif
+        return target;
+    }
+
+    QString takeOpenPeerFromNotification()
+    {
+        return takeOpenTargetFromNotification().peer;
     }
 }
 

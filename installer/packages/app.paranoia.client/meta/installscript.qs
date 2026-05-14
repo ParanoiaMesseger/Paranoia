@@ -3,6 +3,21 @@ function Component() {}
 Component.prototype.createOperations = function() {
     component.createOperations();
 
+    if (systemInfo.productType !== "windows") {
+        component.addOperation("Mkdir", "@HomeDir@/.local/bin");
+        component.addOperation(
+            "CreateLink",
+            "@HomeDir@/.local/bin/Paranoia",
+            "@TargetDir@/bin/Paranoia"
+        );
+        component.addOperation("Mkdir", "@HomeDir@/.local/share/applications");
+        component.addOperation(
+            "CreateLink",
+            "@HomeDir@/.local/share/applications/app.paranoia.client.desktop",
+            "@TargetDir@/share/applications/app.paranoia.client.desktop"
+        );
+    }
+
     if (systemInfo.productType === "windows") {
         // Install MSVC runtime silently; noop if already installed
         component.addElevatedOperation(

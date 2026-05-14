@@ -144,6 +144,10 @@ int main(int argc, char *argv[])
     // Cross-backend wiring
     QObject::connect(&chatBackend, &ChatBackend::activePeerChanged, &backend, &MainBackend::onActivePeerChanged);
     QObject::connect(&chatBackend, &ChatBackend::peerMessagesRead,  &backend, &MainBackend::onPeerMessagesRead);
+    QObject::connect(&chatBackend, &ChatBackend::backgroundMessagesReceived, &backend,
+                     &MainBackend::onBackgroundMessagesReceived);
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &chatBackend,
+                     &ChatBackend::onApplicationStateChanged);
     QObject::connect(&backend, &MainBackend::networkRestored, &chatBackend, &ChatBackend::onNetworkRestored);
     QObject::connect(&backend, &MainBackend::dialogRemoved,   &chatBackend, &ChatBackend::onDialogRemoved);
     QObject::connect(&backend, &MainBackend::sessionReset,    &chatBackend, &ChatBackend::onSessionReset);
@@ -161,7 +165,9 @@ int main(int argc, char *argv[])
         for (const auto &warning : warnings) qWarning().noquote() << warning.toString();
     });
     QObject::connect(&backend, &MainBackend::notificationAvailable, &app,
-                     [](quint64 count, const QString &peer) { PlatformNotifications::showMessageCount(count, peer); });
+                     [](quint64 count, const QString &profileId, const QString &peer) {
+                         PlatformNotifications::showMessageCount(count, profileId, peer);
+                     });
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
         [&engine]() {
@@ -198,12 +204,14 @@ int main(int argc, char *argv[])
     QObject::connect(&tray, &QSystemTrayIcon::activated, &app, [&](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) showWindow();
     });
-    QObject::connect(&backend, &MainBackend::notificationAvailable, &app, [&](quint64 count, const QString &peer) {
-        Q_UNUSED(peer)
-        if (!tray.isVisible()) return;
-        tray.showMessage(QStringLiteral("Paranoia"), QStringLiteral("Новых сообщений: %1").arg(count),
-                         QSystemTrayIcon::Information, 10000);
-    });
+    QObject::connect(&backend, &MainBackend::notificationAvailable, &app,
+                     [&](quint64 count, const QString &profileId, const QString &peer) {
+                         Q_UNUSED(profileId)
+                         Q_UNUSED(peer)
+                         if (!tray.isVisible()) return;
+                         tray.showMessage(QStringLiteral("Paranoia"), QStringLiteral("Новых сообщений: %1").arg(count),
+                                          QSystemTrayIcon::Information, 10000);
+                     });
     if (desktopTrayEnabled) tray.show();
 #endif
     return app.exec();
