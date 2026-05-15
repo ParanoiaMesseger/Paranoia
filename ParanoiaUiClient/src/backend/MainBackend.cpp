@@ -16,6 +16,10 @@
 #include <QJsonParseError>
 #include <QGuiApplication>
 #include <QNetworkInformation>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QMutexLocker>
 #include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QThreadPool>
@@ -23,10 +27,17 @@
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QUrl>
+#if defined(Q_OS_ANDROID)
+#include <QJniEnvironment>
+#include <android/log.h>
+#endif
 #include <algorithm>
 
 namespace
 {
+    constexpr auto PendingRegistrationKeyFile = "pending_registration_key.json";
+
     QStringList reserveUrlsFromObject(const QJsonObject &obj, const QString &primaryUrl)
     {
         return Utils::normalizedServerUrls(
@@ -36,6 +47,45 @@ namespace
     QStringList appendReserveUrl(QStringList urls, const QString &primaryUrl, const QString &reserveUrl)
     {
         urls.append(reserveUrl);
+        return Utils::normalizedServerUrls(urls, primaryUrl);
+    }
+
+    QString serverIdFromPubkey(const QString &pubkey)
+    {
+        QByteArray pubkeyBytes;
+        if (!Utils::decodeFixedBase64(pubkey, 32, &pubkeyBytes)) return {};
+        QCryptographicHash hasher(QCryptographicHash::Sha256);
+        hasher.addData(QByteArrayLiteral("paranoia:server-id:v1\n"));
+        hasher.addData(pubkeyBytes);
+        return QString::fromLatin1(hasher.result().toHex());
+    }
+
+    bool isValidRegistrationKeyPair(const QString &pubkey, const QString &privateKey)
+    {
+        if (!Utils::decodeFixedBase64(pubkey, 32) || !Utils::decodeFixedBase64(privateKey, 32)) return false;
+        const QString privateServerId = ParanoiaFFI::derive_server_id(privateKey);
+        return !privateServerId.isEmpty() && privateServerId == serverIdFromPubkey(pubkey);
+    }
+
+    QJsonObject readPendingRegistrationKeyPair()
+    {
+        return Utils::readJsonObjectFile(QString::fromLatin1(PendingRegistrationKeyFile));
+    }
+
+    void savePendingRegistrationKeyPair(const QString &pubkey, const QString &privateKey)
+    {
+        if (!isValidRegistrationKeyPair(pubkey, privateKey)) return;
+        QJsonObject obj;
+        obj["public_key"]  = pubkey;
+        obj["private_key"] = privateKey;
+        obj["updated_at"]  = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        Utils::writeJsonObjectFile(QString::fromLatin1(PendingRegistrationKeyFile), obj);
+    }
+
+    QStringList removeReserveUrl(QStringList urls, const QString &primaryUrl, const QString &reserveUrl)
+    {
+        urls = Utils::normalizedServerUrls(urls, primaryUrl);
+        urls.removeAll(Utils::normalizedServerUrl(reserveUrl));
         return Utils::normalizedServerUrls(urls, primaryUrl);
     }
 }
@@ -56,6 +106,15 @@ MainBackend::MainBackend(QObject *parent) : QObject(parent)
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::sessionsChanged);
     QPointer self(this);
     PlatformNotifications::setBackgroundPollCallback([self]() {
+        // Runs on the Android service handler thread. Qt main thread event loop
+        // is suspended while the app is backgrounded, so we must not roundtrip
+        // through QMetaObject::invokeMethod here. Do the polling on a thread
+        // pool worker using the snapshot, then post the notification through
+        // the Android JNI bridge directly.
+        QThreadPool::globalInstance()->start([self]() {
+            if (!self) return;
+            self->runBackgroundPollFromService();
+        });
         if (!self) return;
         QMetaObject::invokeMethod(self, [self]() {
             if (!self) return;
@@ -103,10 +162,35 @@ QString MainBackend::notificationHintProfileId() const { return m_notificationHi
 
 void MainBackend::generateKeyPair()
 {
-    QThreadPool::globalInstance()->start([this]() {
+    const QJsonObject pending       = readPendingRegistrationKeyPair();
+    const QString pendingPubkey     = pending.value("public_key").toString().trimmed();
+    const QString pendingPrivateKey = pending.value("private_key").toString().trimmed();
+    if (isValidRegistrationKeyPair(pendingPubkey, pendingPrivateKey)) {
+        emit keyPairGenerated(pendingPubkey, pendingPrivateKey);
+        return;
+    }
+
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self]() {
         auto [secret, pubkey] = ParanoiaFFI::generate_keypair();
-        QMetaObject::invokeMethod(this, [this, pubkey, secret]() { emit keyPairGenerated(pubkey, secret); });
+        savePendingRegistrationKeyPair(pubkey, secret);
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, pubkey, secret]() {
+            if (self) emit self->keyPairGenerated(pubkey, secret);
+        });
     });
+}
+
+void MainBackend::rotateRegistrationKeyPair(const QString &previousPrivateKey)
+{
+    const QString expected = previousPrivateKey.trimmed();
+    if (!expected.isEmpty()) {
+        const QJsonObject pending       = readPendingRegistrationKeyPair();
+        const QString currentPrivateKey = pending.value("private_key").toString().trimmed();
+        if (!currentPrivateKey.isEmpty() && currentPrivateKey != expected) return;
+    }
+    auto [secret, pubkey] = ParanoiaFFI::generate_keypair();
+    savePendingRegistrationKeyPair(pubkey, secret);
 }
 
 // ── Client Login ──────────────────────────────────────────────────────────────
@@ -116,11 +200,12 @@ void MainBackend::loginClient(const QString &server, const QString &reserveServe
 {
     QStringList reserveUrls;
     if (!reserveServer.trimmed().isEmpty()) reserveUrls.append(reserveServer);
-    loginClientInternal(server, username, private_key, reserveUrls, true);
+    loginClientInternal(server, username, private_key, reserveUrls, true, true);
 }
 
 void MainBackend::loginClientInternal(const QString &server, const QString &username, const QString &private_key,
-                                      const QStringList &reserveServerUrls, bool makeActive)
+                                      const QStringList &reserveServerUrls, bool makeActive,
+                                      bool rotateRegistrationKeyOnSuccess)
 {
     const QString url                    = Utils::normalizedServerUrl(server);
     const QStringList normalizedReserves = Utils::normalizedServerUrls(reserveServerUrls, url);
@@ -139,9 +224,12 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
     const QString dbPath = Paths::profileDb(profileId);
     QPointer self(this);
     QThreadPool::globalInstance()->start([self, url, normalizedReserves, reserveUrlsJson, trimmedUsername, serverId,
-                                           private_key, dbPath, profileId, makeActive]() {
+                                          private_key, dbPath, profileId, makeActive,
+                                          rotateRegistrationKeyOnSuccess]() {
+        if (!self) return;
         QMetaObject::invokeMethod(self, [self, dbPath, url, normalizedReserves, reserveUrlsJson, trimmedUsername,
-                                          serverId, private_key, profileId, makeActive]() {
+                                         serverId, private_key, profileId, makeActive,
+                                         rotateRegistrationKeyOnSuccess]() {
             auto handle = std::make_unique<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
             if (!self) return;
             if (!handle || !handle->isRawOk()) {
@@ -152,6 +240,8 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
             auto session = store->addSession(std::move(handle), url, trimmedUsername, serverId, private_key, profileId,
                                              normalizedReserves);
             session->loadDialogs();
+            session->saveClientConfig();
+            if (rotateRegistrationKeyOnSuccess) self->rotateRegistrationKeyPair(private_key);
             const bool notificationTargetsThisProfile = !self->m_notificationHintProfileId.isEmpty() &&
                                                         self->m_notificationHintProfileId == profileId;
             const bool notificationTargetsOtherProfile = !self->m_notificationHintProfileId.isEmpty() &&
@@ -163,7 +253,6 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
                 emit self->loginStateChanged();
                 emit self->dialogsChanged();
             }
-            session->saveClientConfig();
             self->scheduleNotifyPoll(0);
         });
     });
@@ -193,15 +282,11 @@ void MainBackend::registerUser(const QString &domain, const QString &pubkey)
         emit registerUserError("Нет прав администратора для этого сервера.");
         return;
     }
-    const QByteArray pubkeyBytes = QByteArray::fromBase64(pubkey.toUtf8());
-    if (pubkeyBytes.size() != 32) {
+    const QString serverId = serverIdFromPubkey(pubkey);
+    if (serverId.isEmpty()) {
         emit registerUserError("Некорректный публичный ключ.");
         return;
     }
-    QCryptographicHash hasher(QCryptographicHash::Sha256);
-    hasher.addData(QByteArrayLiteral("paranoia:server-id:v1\n"));
-    hasher.addData(pubkeyBytes);
-    const QString serverId = QString::fromLatin1(hasher.result().toHex());
     found->regUser(serverId, pubkey).then([this](bool ok) {
         QMetaObject::invokeMethod(this, [this, ok]() {
             if (ok)
@@ -210,6 +295,32 @@ void MainBackend::registerUser(const QString &domain, const QString &pubkey)
                 emit registerUserError("Ошибка регистрации. Проверьте данные.");
         });
     });
+}
+
+QVariantList MainBackend::getReserveDomains(const QString &targetType, const QString &targetId,
+                                            const QString &primaryDomain) const
+{
+    QStringList urls;
+    if (targetType == "client") {
+        const auto session    = SessionStore::instance()->sessionForProfile(targetId);
+        const QJsonObject obj = Utils::readJsonObjectFile(Paths::profileClient(targetId));
+        QString primaryUrl    = obj.value("server").toString();
+        if (primaryUrl.isEmpty() && session) primaryUrl = session->server;
+        if (primaryUrl.isEmpty()) primaryUrl = primaryDomain;
+        urls = reserveUrlsFromObject(obj, primaryUrl);
+        if (session) urls.append(session->reserveServerUrls);
+        urls = Utils::normalizedServerUrls(urls, primaryUrl);
+    } else {
+        const QString primaryUrl = Utils::normalizedServerUrl(primaryDomain.isEmpty() ? targetId : primaryDomain);
+        const auto found =
+            std::ranges::find_if(admin::Admin::admins, [&](const admin::Admin &a) { return a.domain == primaryUrl; });
+        if (found != admin::Admin::admins.end())
+            urls = Utils::normalizedServerUrls(found->reserveServerUrls, found->domain);
+    }
+
+    QVariantList result;
+    for (const auto &url : urls) result.append(url);
+    return result;
 }
 
 void MainBackend::addAdminReserveDomain(const QString &primaryDomain, const QString &reserveDomain)
@@ -304,40 +415,152 @@ void MainBackend::addClientReserveDomain(const QString &profileId, const QString
     emit reserveDomainAdded("client", profileId, reserveUrl);
 }
 
-// ── Dialogs Management ────────────────────────────────────────────────────────
-
-void MainBackend::addDialog(const QString &peer, const QString &sharedSecret)
+void MainBackend::removeAdminReserveDomain(const QString &primaryDomain, const QString &reserveDomain)
 {
-    upsertDialogKeyringEntry(peer.trimmed(), {}, Dialog::deriveKey(sharedSecret), 1, true);
+    const QString primaryUrl = Utils::normalizedServerUrl(primaryDomain);
+    auto found =
+        std::ranges::find_if(admin::Admin::admins, [&](const admin::Admin &a) { return a.domain == primaryUrl; });
+    if (found == admin::Admin::admins.end()) {
+        emit reserveDomainError("Нет прав администратора для этого сервера.");
+        return;
+    }
+
+    const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
+    QStringList reserveUrls  = Utils::normalizedServerUrls(found->reserveServerUrls, found->domain);
+    if (reserveUrl.isEmpty() || !reserveUrls.contains(reserveUrl)) {
+        emit reserveDomainError("Резервный домен не найден.");
+        return;
+    }
+
+    found->reserveServerUrls = removeReserveUrl(reserveUrls, found->domain, reserveUrl);
+    admin::Admin::saveAdmins();
+    emit adminStateChanged();
+    emit reserveDomainRemoved("admin", found->domain, reserveUrl);
 }
 
-void MainBackend::updateDialogKey(const QString &peer, const QString &newSharedSecret)
+void MainBackend::removeClientReserveDomain(const QString &profileId, const QString &reserveDomain)
 {
-    const QString trimmedPeer = peer.trimmed();
-    const QByteArray key      = Dialog::deriveKey(newSharedSecret);
-    auto session              = SessionStore::instance()->activeSession();
-    if (!session) return;
-    const auto *dlg = session->findDialog(trimmedPeer);
-    if (!dlg) return;
-    const QString peerServerId = dlg->peerServerId;
-    const QString serverId     = session->serverId;
-    QPointer self(this);
-    QThreadPool::globalInstance()->start([self, session, trimmedPeer, peerServerId, serverId, key]() {
-        if (!self) return;
-        quint64 seq = 1;
-        {
-            QMutexLocker locker(&session->ffiMutex);
-            if (session->ffi && !serverId.isEmpty() && !peerServerId.isEmpty()) {
-                uint64_t last = 0;
-                session->ffi->last_pulled_seq(serverId, peerServerId, last);
-                seq = static_cast<quint64>(last) + 1;
-            }
-        }
-        QMetaObject::invokeMethod(self, [self, trimmedPeer, key, seq]() {
-            if (self) self->upsertDialogKeyringEntry(trimmedPeer, {}, key, seq, false);
-        });
+    if (profileId.trimmed().isEmpty()) {
+        emit reserveDomainError("Не выбран клиентский профиль.");
+        return;
+    }
+
+    auto *store              = SessionStore::instance();
+    const auto session       = store->sessionForProfile(profileId);
+    const auto activeSession = store->activeSession();
+    const QJsonObject obj    = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+    QString primaryUrl       = obj.value("server").toString();
+    QString username         = obj.value("username").toString();
+    QString privateKey       = obj.value("private_key").toString();
+    QString serverId         = obj.value("server_id").toString();
+    QStringList reserveUrls  = reserveUrlsFromObject(obj, primaryUrl);
+    if (session) {
+        if (primaryUrl.isEmpty()) primaryUrl = session->server;
+        if (username.isEmpty()) username = session->username;
+        if (privateKey.isEmpty()) privateKey = session->private_key;
+        if (serverId.isEmpty()) serverId = session->serverId;
+        reserveUrls.append(session->reserveServerUrls);
+    }
+    primaryUrl  = Utils::normalizedServerUrl(primaryUrl);
+    reserveUrls = Utils::normalizedServerUrls(reserveUrls, primaryUrl);
+    if (primaryUrl.isEmpty() || privateKey.isEmpty()) {
+        emit reserveDomainError("Клиентский профиль повреждён.");
+        return;
+    }
+
+    const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
+    if (reserveUrl.isEmpty() || !reserveUrls.contains(reserveUrl)) {
+        emit reserveDomainError("Резервный домен не найден.");
+        return;
+    }
+    if (serverId.isEmpty()) serverId = ParanoiaFFI::derive_server_id(privateKey);
+    if (serverId.isEmpty()) {
+        emit reserveDomainError("Не удалось вычислить server ID из ключа профиля.");
+        return;
+    }
+
+    const QStringList updatedReserveUrls = removeReserveUrl(reserveUrls, primaryUrl, reserveUrl);
+    ServerSession::saveClientConfigForProfile(profileId, primaryUrl, username, serverId, privateKey,
+                                              updatedReserveUrls);
+    const QJsonObject manifest = Utils::loadProfilesManifest();
+    Utils::upsertProfileManifest(profileId, primaryUrl, username,
+                                 manifest.value("last_profile_id").toString() == profileId);
+    if (session)
+        loginClientInternal(primaryUrl, username, privateKey, updatedReserveUrls, session == activeSession);
+    else
+        emit sessionsChanged();
+    emit reserveDomainRemoved("client", profileId, reserveUrl);
+}
+
+void MainBackend::checkReserveDomain(const QString &targetType, const QString &targetId, const QString &primaryDomain,
+                                     const QString &reserveDomain)
+{
+    const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
+    if (reserveUrl.isEmpty()) {
+        emit reserveDomainCheckFinished(targetType, targetId, reserveUrl, false, "Укажите резервный домен.");
+        return;
+    }
+
+    const QUrl notifyUrl(reserveUrl + QStringLiteral("/notify"));
+    if (!notifyUrl.isValid()) {
+        emit reserveDomainCheckFinished(targetType, targetId, reserveUrl, false, "Некорректный URL /notify.");
+        return;
+    }
+
+    auto *manager = new QNetworkAccessManager(this);
+    QNetworkRequest request(notifyUrl);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setTransferTimeout(10'000);
+
+    const QByteArray body =
+        R"({"operation":"checkOrders","clientId":"availability-check","partnerId":"availability-check","cursor":0,"auth":""})";
+    auto *reply = manager->put(request, body);
+    reply->setProperty("paranoiaTimedOut", false);
+
+    auto *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, reply, [reply]() {
+        reply->setProperty("paranoiaTimedOut", true);
+        reply->abort();
     });
+    timer->start(10'000);
+
+    const QString normalizedTargetId =
+        targetType == "client" ? targetId
+                               : Utils::normalizedServerUrl(primaryDomain.isEmpty() ? targetId : primaryDomain);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, manager, timer, targetType, normalizedTargetId, reserveUrl]() {
+                timer->stop();
+                bool ok = false;
+                QString msg;
+                const bool timedOut = reply->property("paranoiaTimedOut").toBool();
+                if (timedOut) {
+                    msg = "Таймаут при обращении к /notify.";
+                } else if (reply->error() != QNetworkReply::NoError) {
+                    msg = "Ошибка /notify: " + reply->errorString();
+                } else {
+                    const int status              = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                    const QByteArray responseBody = reply->readAll();
+                    QJsonParseError parseError;
+                    const QJsonDocument doc = QJsonDocument::fromJson(responseBody, &parseError);
+                    if (status >= 200 && status < 300 && parseError.error == QJsonParseError::NoError &&
+                        doc.isObject()) {
+                        ok  = true;
+                        msg = "Endpoint /notify доступен.";
+                    } else if (status >= 200 && status < 300) {
+                        msg = "Endpoint /notify ответил невалидным JSON.";
+                    } else {
+                        msg = QStringLiteral("Endpoint /notify вернул HTTP %1.").arg(status);
+                    }
+                }
+
+                emit reserveDomainCheckFinished(targetType, normalizedTargetId, reserveUrl, ok, msg);
+                reply->deleteLater();
+                manager->deleteLater();
+            });
 }
+
+// ── Dialogs Management ────────────────────────────────────────────────────────
 
 QVariantMap MainBackend::createDialogKeyInvitation(const QString &peer) const
 {
@@ -1105,6 +1328,7 @@ void MainBackend::onNetworkChanged()
 
 void MainBackend::scheduleNotifyPoll(int delayMs)
 {
+    rebuildBackgroundPollSnapshot();
     const auto &sessions = SessionStore::instance()->allSessions();
     bool anyActive       = false;
     for (const auto &s : sessions)
@@ -1120,6 +1344,94 @@ void MainBackend::scheduleNotifyPoll(int delayMs)
     PlatformNotifications::startBackgroundPollingService();
     if (delayMs < 0) delayMs = randomNotifyDelayMs();
     m_pollTimer->start(delayMs);
+}
+
+void MainBackend::rebuildBackgroundPollSnapshot()
+{
+    std::vector<BackgroundPollTarget> next;
+    for (const auto &session : SessionStore::instance()->allSessions()) {
+        if (!session || !session->isLoggedIn()) continue;
+        for (const auto &dialog : session->dialogs) {
+            const QString keyringJson = dialog.keyringJson();
+            if (dialog.peer.isEmpty() || keyringJson.isEmpty()) continue;
+            next.push_back({session, session->profileId, dialog.peer, dialog.peerServerId, keyringJson});
+        }
+    }
+    QMutexLocker lock(&m_bgPollSnapshotMutex);
+    m_bgPollSnapshot.swap(next);
+}
+
+void MainBackend::runBackgroundPollFromService()
+{
+#if defined(Q_OS_ANDROID)
+    QJniEnvironment jniEnv; // ensure this thread is attached to the JVM so that
+                            // rustls-platform-verifier can make Android TLS JNI
+                            // calls during notify_count_keyring()
+#endif
+    std::vector<BackgroundPollTarget> targets;
+    {
+        QMutexLocker lock(&m_bgPollSnapshotMutex);
+        targets = m_bgPollSnapshot;
+    }
+#if defined(Q_OS_ANDROID)
+    __android_log_print(ANDROID_LOG_INFO, "ParanoiaService",
+                        "background notify poll started: targets=%zu", targets.size());
+#endif
+    if (targets.empty()) {
+#if defined(Q_OS_ANDROID)
+        __android_log_write(ANDROID_LOG_INFO, "ParanoiaService",
+                            "background notify poll finished: no targets");
+#endif
+        return;
+    }
+    quint64 total = 0;
+    int failures  = 0;
+    QString firstError;
+    QString hintProfileId;
+    QString hintPeer;
+    int pendingPeers = 0;
+    for (const auto &target : targets) {
+        uint64_t count = 0;
+        int rc;
+        {
+            QMutexLocker locker(&target.session->ffiMutex);
+            if (!target.session->ffi) continue;
+            const QString myId =
+                target.session->serverId.isEmpty() ? target.session->username : target.session->serverId;
+            const QString peerId = target.peerServerId.isEmpty() ? target.peer : target.peerServerId;
+            rc                   = target.session->ffi->notify_count_keyring(myId, peerId, target.keyringJson, count);
+        }
+        if (rc != 0) {
+            ++failures;
+            if (firstError.isEmpty()) firstError = ParanoiaFFI::last_error();
+            continue;
+        }
+        if (count > 0) {
+            total += static_cast<quint64>(count);
+            ++pendingPeers;
+            if (pendingPeers == 1) {
+                hintProfileId = target.profileId;
+                hintPeer      = target.peer;
+            } else {
+                hintProfileId.clear();
+                hintPeer.clear();
+            }
+        }
+    }
+#if defined(Q_OS_ANDROID)
+    __android_log_print(ANDROID_LOG_INFO, "ParanoiaService",
+                        "background notify poll finished: total=%llu pendingPeers=%d failures=%d",
+                        static_cast<unsigned long long>(total), pendingPeers, failures);
+#endif
+    if (failures > 0 && total == 0) {
+#if defined(Q_OS_ANDROID)
+        __android_log_print(ANDROID_LOG_WARN, "ParanoiaService",
+                            "background notify polling had failures: %s",
+                            firstError.toUtf8().constData());
+#endif
+        return;
+    }
+    if (total > 0) PlatformNotifications::showMessageCount(total, hintProfileId, hintPeer);
 }
 
 void MainBackend::setNotificationHint(const QString &profileId, const QString &peer)

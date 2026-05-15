@@ -47,62 +47,24 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Введите новый общий секрет. Обе стороны должны ввести одинаковое значение."
+                    text: "Ручной ввод ключа отключён. Обновление ключа диалога выполняется только через защищённый обмен JSON/QR."
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family:    Theme.fontFamily
                     wrapMode: Text.WordWrap
                 }
 
-                ParaInput {
-                    id: newKeyInput
+                ParaButton {
                     Layout.fillWidth: true
-                    label:       "Новый общий секрет"
-                    placeholder: "секретная фраза…"
-                    echoMode:    TextInput.Password
+                    text: "Начать обмен через QR/JSON"
+                    onClicked: root.openQrExchange(root.peer, true)
                 }
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Обменяться ключом через QR/JSON"
+                    text: "Отмена"
                     secondary: true
-                    onClicked: root.openQrExchange(root.peer, true)
-                }
-
-                Text {
-                    id: updateKeyError
-                    Layout.fillWidth: true
-                    color: Theme.error
-                    font.pixelSize: Theme.fontSm
-                    font.family:    Theme.fontFamily
-                    wrapMode: Text.WordWrap
-                    visible: text.length > 0
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    ParaButton {
-                        Layout.fillWidth: true
-                        text: "Обновить"
-                        onClicked: {
-                            let secret = newKeyInput.text
-                            if (secret.length < 4) {
-                                updateKeyError.text = "Секрет слишком короткий (минимум 4 символа)."
-                                return
-                            }
-                            Backend.updateDialogKey(root.peer, secret)
-                            root.back()
-                        }
-                    }
-
-                    ParaButton {
-                        Layout.fillWidth: true
-                        text: "Отмена"
-                        secondary: true
-                        onClicked: root.back()
-                    }
+                    onClicked: root.back()
                 }
 
                 Item { Layout.preferredHeight: 16 }

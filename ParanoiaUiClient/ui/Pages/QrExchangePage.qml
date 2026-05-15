@@ -21,11 +21,27 @@ Rectangle {
     property string peerPayloadJson:  ""
     property string sas:            ""
     property string feedback:       ""
+    property var cameraScanTargetField: null
+    readonly property bool mobileQrScan: Qt.platform.os === "android" || Qt.platform.os === "ios"
 
     function localFilePath(fileUrl) {
         let value = decodeURIComponent(String(fileUrl))
         if (value.startsWith("file://")) value = value.substring(7)
         return value
+    }
+
+    function openCameraScanner(targetField) {
+        root.cameraScanTargetField = targetField
+        cameraScanLoader.active = true
+    }
+
+    function openQrReader(targetField) {
+        if (root.mobileQrScan) {
+            root.openCameraScanner(targetField)
+            return
+        }
+        scanImageDialog.targetField = targetField
+        scanImageDialog.open()
     }
 
     FileDialog {
@@ -42,6 +58,25 @@ Rectangle {
             }
             if (targetField) targetField.text = decoded.text
             root.feedback = "Payload считан из QR-кода."
+        }
+    }
+
+    Loader {
+        id: cameraScanLoader
+        anchors.fill: parent
+        z: 1000
+        active: false
+        source: active ? "QrScanPage.qml" : ""
+        onLoaded: {
+            item.title = "Сканировать QR payload"
+            item.instructions = "Наведите камеру на QR-код с payload обмена ключом."
+            item.back.connect(function () { cameraScanLoader.active = false })
+            item.qrScanned.connect(function (text) {
+                if (root.cameraScanTargetField)
+                    root.cameraScanTargetField.text = text
+                root.feedback = "Payload считан из QR-кода."
+                cameraScanLoader.active = false
+            })
         }
     }
 
@@ -178,12 +213,9 @@ Rectangle {
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: "Считать из QR-изображения"
+                                text: root.mobileQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
                                 secondary: true
-                                onClicked: {
-                                    scanImageDialog.targetField = initiatorResponseInput
-                                    scanImageDialog.open()
-                                }
+                                onClicked: root.openQrReader(initiatorResponseInput)
                             }
 
                             ParaButton {
@@ -219,12 +251,9 @@ Rectangle {
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: "Считать из QR-изображения"
+                                text: root.mobileQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
                                 secondary: true
-                                onClicked: {
-                                    scanImageDialog.targetField = responderInvitationInput
-                                    scanImageDialog.open()
-                                }
+                                onClicked: root.openQrReader(responderInvitationInput)
                             }
 
                             ParaButton {

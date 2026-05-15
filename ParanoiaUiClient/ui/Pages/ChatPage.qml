@@ -83,6 +83,18 @@ Rectangle {
         errorTimer.restart()
     }
 
+    function handleBackButton(): bool {
+        if (photoViewer.visible) {
+            photoViewer.close()
+            return true
+        }
+        if (messageMenu.opened) {
+            messageMenu.close()
+            return true
+        }
+        return false
+    }
+
     function openMessageMenu(sender, text, messageId, imageMessage, downloading, filename, seq, bodyToSeq, item, localX, localY) {
         messageMenu.messageSender = sender || ""
         messageMenu.messageText = text || ""

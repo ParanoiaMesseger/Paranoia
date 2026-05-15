@@ -8,6 +8,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+#[cfg(target_os = "android")]
+unsafe extern "C" {
+    #[link_name = "__android_log_write"]
+    fn paranoia_android_log_print(prio: i32, tag: *const c_char, text: *const c_char) -> i32;
+}
+
 use crate::{
     ClientConfig, Dialogue, ParanoiaClient,
     error_classify::{
@@ -131,6 +137,23 @@ pub extern "C" fn paranoia_android_init(
     raw_env: *mut std::ffi::c_void,
     raw_context: *mut std::ffi::c_void,
 ) -> i32 {
+    // Install a panic hook that forwards Rust panic messages to Android logcat
+    // (under tag "ParanoiaService") so notify_panic / send_panic etc. don't
+    // silently disappear into stderr.
+    static PANIC_HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
+    PANIC_HOOK_INSTALLED.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("rust panic: {}", info);
+            let tag = std::ffi::CString::new("ParanoiaService").unwrap();
+            let cmsg = std::ffi::CString::new(msg).unwrap_or_else(|_| {
+                std::ffi::CString::new("rust panic: <bad message>").unwrap()
+            });
+            unsafe {
+                // ANDROID_LOG_ERROR = 6
+                paranoia_android_log_print(6, tag.as_ptr(), cmsg.as_ptr());
+            }
+        }));
+    });
     ffi_catch_i32("android_init_error", || {
         clear_last_error();
 
@@ -138,18 +161,19 @@ pub extern "C" fn paranoia_android_init(
             return invalid_argument_i32();
         }
 
-        let mut env = match unsafe { jni::JNIEnv::from_raw(raw_env as *mut jni::sys::JNIEnv) } {
-            Ok(env) => env,
-            Err(_) => {
-                set_last_error("android_init_error");
-                return -1;
-            }
-        };
-        let context = unsafe { jni::objects::JObject::from_raw(raw_context as jni::sys::jobject) };
+        let mut unowned = unsafe { jni::EnvUnowned::from_raw(raw_env as *mut jni::sys::JNIEnv) };
+        match unowned
+            .with_env(|env| -> jni::errors::Result<()> {
+                let context = unsafe {
+                    jni::objects::JObject::from_raw(env, raw_context as jni::sys::jobject)
+                };
 
-        match rustls_platform_verifier::android::init_with_env(&mut env, context) {
-            Ok(()) => 0,
-            Err(_) => {
+                rustls_platform_verifier::android::init_with_env(env, context)
+            })
+            .into_outcome()
+        {
+            jni::Outcome::Ok(()) => 0,
+            jni::Outcome::Err(_) | jni::Outcome::Panic(_) => {
                 set_last_error("android_init_error");
                 -1
             }

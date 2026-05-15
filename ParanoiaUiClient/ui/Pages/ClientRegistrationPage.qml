@@ -118,10 +118,13 @@ Rectangle {
 
                 Text {
                     Layout.alignment:   Qt.AlignHCenter
-                    text:               "Или дайте администратору отсканировать этот QR-код"
+                    text:               "Или дайте администратору отсканировать этот QR-код. Ключ сохранён локально и восстановится после перезапуска приложения."
                     color:              Theme.textSecondary
                     font.pixelSize:     Theme.fontXs
                     font.family:        Theme.fontFamily
+                    wrapMode:           Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    Layout.fillWidth:   true
                     visible:            !root.generating
                 }
 

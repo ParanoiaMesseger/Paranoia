@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.2 LANGUAGES CXX)
+project(ParanoiaUiClient VERSION 0.2.3 LANGUAGES CXX)
 
 set(PARANOIA_APP_VERSION "${PROJECT_VERSION}")
 math(EXPR PARANOIA_ANDROID_VERSION_CODE
@@ -18,10 +18,22 @@ if(WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID))
 endif()
 find_package(Qt6 REQUIRED COMPONENTS ${PARANOIA_QT_COMPONENTS})
 set(PARANOIA_HAS_QT_VIRTUAL_KEYBOARD 0)
+set(PARANOIA_HAS_QT_MULTIMEDIA 0)
 set(PARANOIA_OPTIONAL_QML_FILES)
 set(PARANOIA_REQUIRES_QT_VIRTUAL_KEYBOARD OFF)
+set(PARANOIA_REQUIRES_QT_MULTIMEDIA OFF)
 if(ANDROID OR IOS)
     set(PARANOIA_REQUIRES_QT_VIRTUAL_KEYBOARD ON)
+    set(PARANOIA_REQUIRES_QT_MULTIMEDIA ON)
+endif()
+if(PARANOIA_REQUIRES_QT_MULTIMEDIA)
+    find_package(Qt6 REQUIRED COMPONENTS Multimedia)
+    set(PARANOIA_HAS_QT_MULTIMEDIA 1)
+else()
+    find_package(Qt6Multimedia QUIET)
+    if(TARGET Qt6::Multimedia)
+        set(PARANOIA_HAS_QT_MULTIMEDIA 1)
+    endif()
 endif()
 if(PARANOIA_REQUIRES_QT_VIRTUAL_KEYBOARD)
     find_package(Qt6 REQUIRED COMPONENTS VirtualKeyboard)
@@ -96,6 +108,8 @@ qt_add_qml_module(Paranoia
     src/utils/ClientSSH.cpp
     src/utils/QrCodeUtils.cpp
     src/utils/QrCodeUtils.hpp
+    src/utils/QrCameraScanner.cpp
+    src/utils/QrCameraScanner.hpp
     src/utils/Utils.cpp
     src/utils/Utils.hpp
     src/utils/Paths.cpp
@@ -118,6 +132,7 @@ qt_add_qml_module(Paranoia
     ui/Pages/ChatPage.qml
     ui/Pages/ExportImportPage.qml
     ui/Pages/QrExchangePage.qml
+    ui/Pages/QrScanPage.qml
     ui/Pages/AddDialogPage.qml
     ui/Pages/UpdateKeyPage.qml
     ui/Pages/ClearHistoryPage.qml
@@ -129,6 +144,7 @@ target_compile_definitions(Paranoia
     PRIVATE
     APP_VERSION="${PARANOIA_APP_VERSION}"
     PARANOIA_HAS_QT_VIRTUAL_KEYBOARD=${PARANOIA_HAS_QT_VIRTUAL_KEYBOARD}
+    PARANOIA_HAS_QT_MULTIMEDIA=${PARANOIA_HAS_QT_MULTIMEDIA}
 )
 if(PARANOIA_BETA_LOGGING)
     target_compile_definitions(Paranoia PRIVATE PARANOIA_BETA_LOGGING=1)
@@ -168,7 +184,7 @@ if(ANDROID)
         QT_ANDROID_APP_NAME "Paranoia"
         QT_ANDROID_VERSION_NAME "${PARANOIA_APP_VERSION}"
         QT_ANDROID_VERSION_CODE ${PARANOIA_ANDROID_VERSION_CODE}
-        QT_ANDROID_PERMISSIONS "android.permission.INTERNET;android.permission.ACCESS_NETWORK_STATE;android.permission.FOREGROUND_SERVICE;android.permission.FOREGROUND_SERVICE_DATA_SYNC;android.permission.POST_NOTIFICATIONS;android.permission.READ_EXTERNAL_STORAGE;android.permission.WRITE_EXTERNAL_STORAGE;android.permission.READ_MEDIA_IMAGES;android.permission.READ_MEDIA_VIDEO;android.permission.READ_MEDIA_AUDIO"
+        QT_ANDROID_PERMISSIONS "android.permission.INTERNET;android.permission.ACCESS_NETWORK_STATE;android.permission.FOREGROUND_SERVICE;android.permission.FOREGROUND_SERVICE_DATA_SYNC;android.permission.POST_NOTIFICATIONS;android.permission.CAMERA;android.permission.READ_EXTERNAL_STORAGE;android.permission.WRITE_EXTERNAL_STORAGE;android.permission.READ_MEDIA_IMAGES;android.permission.READ_MEDIA_VIDEO;android.permission.READ_MEDIA_AUDIO"
         QT_ANDROID_APP_ICON "@drawable/icon"
     )
 elseif(UNIX AND NOT APPLE)
@@ -228,6 +244,10 @@ if(TARGET Qt6::VirtualKeyboard)
         FILES
         ui/keyboard/Paranoia/style.qml
     )
+endif()
+
+if(TARGET Qt6::Multimedia)
+    target_link_libraries(Paranoia PRIVATE Qt6::Multimedia)
 endif()
 
 if(WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID))

@@ -22,6 +22,8 @@
     <string>@PARANOIA_APP_VERSION@</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>Камера нужна для сканирования QR-кодов обмена ключами.</string>
     <key>UILaunchStoryboardName</key>
     <string>LaunchScreen</string>
     <key>UIBackgroundModes</key>

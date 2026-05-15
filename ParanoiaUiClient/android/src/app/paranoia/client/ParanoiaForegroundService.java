@@ -28,14 +28,20 @@ public final class ParanoiaForegroundService extends Service {
     private static final long POLL_INTERVAL_MS = 60_000L;
     private static volatile boolean started = false;
 
+    private static volatile boolean nativeLibraryWarningLogged = false;
+
     private final Handler pollHandler = new Handler(Looper.getMainLooper());
     private final Runnable pollRunnable = new Runnable() {
         @Override
         public void run() {
+            Log.i(TAG, "poll tick: calling native callback");
             try {
                 triggerBackgroundPollNative();
             } catch (UnsatisfiedLinkError ignored) {
-                // The service can be recreated by Android before Qt loads the native library.
+                if (!nativeLibraryWarningLogged) {
+                    nativeLibraryWarningLogged = true;
+                    Log.i(TAG, "poll tick: native library is not loaded");
+                }
             } catch (Throwable t) {
                 Log.w(TAG, "Background poll callback failed", t);
             }
@@ -45,7 +51,14 @@ public final class ParanoiaForegroundService extends Service {
 
     private static native void triggerBackgroundPollNative();
 
+    public static void initialize(Context context) {
+        ensureChannels(context);
+        requestPostNotificationsIfNeeded(context);
+    }
+
     public static void start(Context context) {
+        Log.i(TAG, "start requested");
+        ensureChannels(context);
         requestPostNotificationsIfNeeded(context);
         if (started) {
             return;
@@ -53,6 +66,7 @@ public final class ParanoiaForegroundService extends Service {
         Intent intent = new Intent(context, ParanoiaForegroundService.class);
         try {
             started = true;
+            Log.i(TAG, "startForegroundService requested");
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent);
             } else {
@@ -70,11 +84,13 @@ public final class ParanoiaForegroundService extends Service {
     }
 
     public static void showNewMessages(Context context, long count, String profileId, String peer) {
+        Log.i(TAG, "showNewMessages requested: count=" + count);
         if (count <= 0) {
             return;
         }
         requestPostNotificationsIfNeeded(context);
         if (!notificationsAllowed(context)) {
+            Log.i(TAG, "showNewMessages skipped: POST_NOTIFICATIONS is not granted");
             return;
         }
         ensureChannels(context);
@@ -91,6 +107,7 @@ public final class ParanoiaForegroundService extends Service {
                 .setShowWhen(true);
         try {
             manager.notify(MESSAGE_NOTIFICATION_ID, buildNotification(builder));
+            Log.i(TAG, "showNewMessages posted notification id=" + MESSAGE_NOTIFICATION_ID);
         } catch (RuntimeException e) {
             Log.w(TAG, "Cannot show message notification", e);
         }
@@ -98,6 +115,7 @@ public final class ParanoiaForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        Log.i(TAG, "onStartCommand");
         ensureChannels(this);
         Notification notification = buildForegroundNotification();
         try {
@@ -106,6 +124,7 @@ public final class ParanoiaForegroundService extends Service {
             } else {
                 startForeground(FOREGROUND_NOTIFICATION_ID, notification);
             }
+            Log.i(TAG, "entered foreground");
             started = true;
             startPollLoop();
         } catch (RuntimeException e) {
@@ -143,6 +162,7 @@ public final class ParanoiaForegroundService extends Service {
 
     private void startPollLoop() {
         pollHandler.removeCallbacks(pollRunnable);
+        Log.i(TAG, "poll loop scheduled: intervalMs=" + POLL_INTERVAL_MS);
         pollHandler.postDelayed(pollRunnable, POLL_INTERVAL_MS);
     }
 

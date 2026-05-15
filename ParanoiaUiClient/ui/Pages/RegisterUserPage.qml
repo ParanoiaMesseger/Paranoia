@@ -9,8 +9,16 @@ Rectangle {
     color: Theme.bgPrimary
 
     required property string targetDomain
+    readonly property bool mobileQrScan: Qt.platform.os === "android" || Qt.platform.os === "ios"
 
     signal back()
+
+    function openQrReader() {
+        if (root.mobileQrScan)
+            cameraScanLoader.active = true
+        else
+            registrationQrImageDialog.open()
+    }
 
     function localFilePath(fileUrl) {
         let value = decodeURIComponent(String(fileUrl))
@@ -43,6 +51,30 @@ Rectangle {
             }
             newUserPubKeyInput.text = parsed.pubkey
             regFeedback.text = "QR-код прочитан ✓"
+        }
+    }
+
+    Loader {
+        id: cameraScanLoader
+        anchors.fill: parent
+        z: 1000
+        active: false
+        source: active ? "QrScanPage.qml" : ""
+        onLoaded: {
+            item.title = "Сканировать ключ"
+            item.instructions = "Наведите камеру на QR-код с публичным ключом клиента."
+            item.back.connect(function () { cameraScanLoader.active = false })
+            item.qrScanned.connect(function (text) {
+                const parsed = QrCodeUtils.registrationPublicKeyFromQr(text)
+                if (!parsed.ok) {
+                    regFeedback.text = parsed.error || "QR-код не содержит публичный ключ."
+                    cameraScanLoader.active = false
+                    return
+                }
+                newUserPubKeyInput.text = parsed.pubkey
+                regFeedback.text = "QR-код прочитан ✓"
+                cameraScanLoader.active = false
+            })
         }
     }
 
@@ -89,9 +121,9 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Считать QR с изображения"
+                    text: root.mobileQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
                     secondary: true
-                    onClicked: registrationQrImageDialog.open()
+                    onClicked: root.openQrReader()
                 }
 
                 Text {
