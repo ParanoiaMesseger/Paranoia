@@ -1,11 +1,16 @@
 #include "PlatformNotifications.hpp"
 
+#include <QDebug>
 #include <mutex>
 
 #if defined(Q_OS_ANDROID)
 #include <QJniObject>
 #include <QCoreApplication>
+#include <android/log.h>
 #include <jni.h>
+#define PARANOIA_LOGI(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "ParanoiaService", fmt, ##__VA_ARGS__)
+#else
+#define PARANOIA_LOGI(...) ((void)0)
 #endif
 
 #if defined(Q_OS_IOS)
@@ -37,7 +42,9 @@ namespace PlatformNotifications
 {
     void registerBackgroundTasks()
     {
-#if defined(Q_OS_IOS)
+#if defined(Q_OS_ANDROID)
+        callAndroidService("initialize");
+#elif defined(Q_OS_IOS)
         paranoia_ios_register_background_tasks();
 #endif
     }
@@ -55,7 +62,12 @@ namespace PlatformNotifications
             std::scoped_lock lock(callbackMutex);
             callback = backgroundPollCallback;
         }
-        if (callback) callback();
+        if (callback) {
+            PARANOIA_LOGI("android service callback received in background");
+            callback();
+        } else {
+            PARANOIA_LOGI("android service callback ignored: no callback registered");
+        }
     }
 
     void startBackgroundPollingService()

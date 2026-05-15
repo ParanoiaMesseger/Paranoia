@@ -4,6 +4,11 @@
 #include <QTimer>
 #include <QMap>
 #include <QStringList>
+#include <QMutex>
+#include <memory>
+#include <vector>
+
+class ServerSession;
 
 class MainBackend : public QObject
 {
@@ -35,11 +40,15 @@ public:
                                  const QString &private_key);
     Q_INVOKABLE void activateProfile(const QString &profileId);
     Q_INVOKABLE void registerUser(const QString &domain, const QString &pubkey);
+    Q_INVOKABLE QVariantList getReserveDomains(const QString &targetType, const QString &targetId,
+                                               const QString &primaryDomain) const;
     Q_INVOKABLE void addAdminReserveDomain(const QString &primaryDomain, const QString &reserveDomain);
     Q_INVOKABLE void addClientReserveDomain(const QString &profileId, const QString &reserveDomain);
+    Q_INVOKABLE void removeAdminReserveDomain(const QString &primaryDomain, const QString &reserveDomain);
+    Q_INVOKABLE void removeClientReserveDomain(const QString &profileId, const QString &reserveDomain);
+    Q_INVOKABLE void checkReserveDomain(const QString &targetType, const QString &targetId,
+                                        const QString &primaryDomain, const QString &reserveDomain);
 
-    Q_INVOKABLE void addDialog(const QString &peer, const QString &sharedSecret);
-    Q_INVOKABLE void updateDialogKey(const QString &peer, const QString &newSharedSecret);
     Q_INVOKABLE QVariantMap createDialogKeyInvitation(const QString &peer) const;
     Q_INVOKABLE QVariantMap createDialogKeyResponse(const QString &invitationPayloadJson);
     Q_INVOKABLE QVariantMap dialogKeyFingerprint(const QString &localStateJson, const QString &peerPayloadJson);
@@ -70,6 +79,9 @@ signals:
     void userRegistered();
     void registerUserError(const QString &msg);
     void reserveDomainAdded(const QString &targetType, const QString &targetId, const QString &reserveDomain);
+    void reserveDomainRemoved(const QString &targetType, const QString &targetId, const QString &reserveDomain);
+    void reserveDomainCheckFinished(const QString &targetType, const QString &targetId, const QString &reserveDomain,
+                                    bool ok, const QString &msg);
     void reserveDomainError(const QString &msg);
     void dialogsChanged();
     void notificationAvailable(quint64 count, const QString &profileId, const QString &peer);
@@ -104,8 +116,23 @@ private:
     int m_notifyRetryCount    = 0;
     bool m_notifyPollInFlight = false;
 
+    struct BackgroundPollTarget {
+        std::shared_ptr<ServerSession> session;
+        QString profileId;
+        QString peer;
+        QString peerServerId;
+        QString keyringJson;
+    };
+    mutable QMutex m_bgPollSnapshotMutex;
+    std::vector<BackgroundPollTarget> m_bgPollSnapshot;
+
+    void rebuildBackgroundPollSnapshot();
+    void runBackgroundPollFromService();
+
     void loginClientInternal(const QString &server, const QString &username, const QString &private_key,
-                             const QStringList &reserveServerUrls, bool makeActive);
+                             const QStringList &reserveServerUrls, bool makeActive,
+                             bool rotateRegistrationKeyOnSuccess = false);
+    void rotateRegistrationKeyPair(const QString &previousPrivateKey = {});
     void loadClientConfig();
     void saveDeviceKey() const;
     void loadDeviceKey();
