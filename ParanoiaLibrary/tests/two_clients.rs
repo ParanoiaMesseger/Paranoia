@@ -422,7 +422,7 @@ async fn wait_for_server(server_url: &str) {
     let client = reqwest::Client::new();
     for _ in 0..100 {
         if client
-            .post(format!("{server_url}/pull"))
+            .put(format!("{server_url}/pull"))
             .send()
             .await
             .is_ok()

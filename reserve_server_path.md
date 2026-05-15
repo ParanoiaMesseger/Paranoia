@@ -45,7 +45,7 @@ yc cdn resource create \
   --origin-hostname paranoia.example.com \
   --origin-protocol HTTPS \
   --ssl-certificate-type lets_encrypt \
-  --allowed-http-methods GET,POST,HEAD,OPTIONS \
+  --allowed-http-methods GET,PUT,HEAD,OPTIONS \
   --cache-enabled=false
 ```
 
@@ -86,7 +86,7 @@ const ENDPOINTS: &[&str] = &[
 async fn send_request(path: &str, body: &[u8]) -> Result<Response> {
     for base in ENDPOINTS {
         let url = format!("{}{}", base, path);
-        match client.post(&url).body(body.to_vec()).send().await {
+        match client.put(&url).body(body.to_vec()).send().await {
             Ok(resp) => return Ok(resp),
             Err(_) => continue, // переходим к следующему
         }

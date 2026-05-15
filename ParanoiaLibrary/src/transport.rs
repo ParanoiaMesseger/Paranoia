@@ -103,7 +103,7 @@ impl Transport {
             pub_key: user_pubkey_b64,
             admin_sig: admin_sig_b64,
         };
-        let resp = self.post_json("/reg", &serde_json::to_value(&req)?).await?;
+        let resp = self.put_json("/reg", &serde_json::to_value(&req)?).await?;
         let success = resp
             .get("success")
             .and_then(|v| v.as_bool())
@@ -118,35 +118,35 @@ impl Transport {
 
     pub async fn push(&self, core: &CorePush) -> Result<()> {
         let body = self.cover.wrap_push(core)?;
-        let resp = self.post_json("/push", &body).await?;
+        let resp = self.put_json("/push", &body).await?;
         self.cover.unwrap_push_response(&resp)
     }
 
     pub async fn pull(&self, core: &CorePull) -> Result<Vec<RawPacket>> {
         let body = self.cover.wrap_pull(core)?;
-        let resp = self.post_json("/pull", &body).await?;
+        let resp = self.put_json("/pull", &body).await?;
         self.cover.unwrap_pull_response(&resp)
     }
 
     pub async fn notify(&self, core: &CoreNotify) -> Result<u64> {
         let body = self.cover.wrap_notify(core)?;
-        let resp = self.post_json("/notify", &body).await?;
+        let resp = self.put_json("/notify", &body).await?;
         self.cover.unwrap_notify_response(&resp)
     }
 
     pub async fn determinate(&self, core: &CoreDeterminate) -> Result<()> {
         let body = self.cover.wrap_determinate(core)?;
-        let resp = self.post_json("/determinate", &body).await?;
+        let resp = self.put_json("/determinate", &body).await?;
         self.cover.unwrap_determinate_response(&resp)
     }
 
     // ── HTTP утилита ────────────────────────────────────────────────────
 
-    async fn post_json(&self, path: &str, body: &Value) -> Result<Value> {
+    async fn put_json(&self, path: &str, body: &Value) -> Result<Value> {
         let mut last_retry_error = None;
         for server_url in &self.server_urls {
             let url = format!("{}{}", server_url, path);
-            match self.post_json_once(&url, body).await {
+            match self.put_json_once(&url, body).await {
                 Ok(resp) => return Ok(resp),
                 Err(EndpointError::Retry(err)) => last_retry_error = Some(err),
                 Err(EndpointError::Stop(err)) => return Err(err),
@@ -159,12 +159,12 @@ impl Transport {
         }
     }
 
-    async fn post_json_once(
+    async fn put_json_once(
         &self,
         url: &str,
         body: &Value,
     ) -> std::result::Result<Value, EndpointError> {
-        let resp = match self.client.post(url).json(body).send().await {
+        let resp = match self.client.put(url).json(body).send().await {
             Ok(resp) => resp,
             Err(err) if err.is_builder() => {
                 return Err(EndpointError::Stop(

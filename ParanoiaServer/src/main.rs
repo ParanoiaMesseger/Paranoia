@@ -8,7 +8,7 @@ mod store;
 use crate::{
     config::Config, cover::Cover, food_delivery_cover::FoodDeliveryCover, store::PacketStore,
 };
-use axum::{Router, routing::post};
+use axum::{Router, routing::put};
 use std::sync::Arc;
 use tracing::info;
 
@@ -40,11 +40,11 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let app = Router::new()
-        .route("/reg", post(routes::reg::handle))
-        .route("/push", post(routes::push::handle))
-        .route("/pull", post(routes::pull::handle))
-        .route("/notify", post(routes::notify::handle))
-        .route("/determinate", post(routes::determinate::handle))
+        .route("/reg", put(routes::reg::handle))
+        .route("/push", put(routes::push::handle))
+        .route("/pull", put(routes::pull::handle))
+        .route("/notify", put(routes::notify::handle))
+        .route("/determinate", put(routes::determinate::handle))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
