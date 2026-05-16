@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.3 LANGUAGES CXX)
+project(ParanoiaUiClient VERSION 0.2.4 LANGUAGES CXX)
 
 set(PARANOIA_APP_VERSION "${PROJECT_VERSION}")
 math(EXPR PARANOIA_ANDROID_VERSION_CODE
@@ -34,6 +34,9 @@ else()
     if(TARGET Qt6::Multimedia)
         set(PARANOIA_HAS_QT_MULTIMEDIA 1)
     endif()
+endif()
+if(PARANOIA_HAS_QT_MULTIMEDIA)
+    list(APPEND PARANOIA_OPTIONAL_QML_FILES ui/Components/QrCameraPreview.qml)
 endif()
 if(PARANOIA_REQUIRES_QT_VIRTUAL_KEYBOARD)
     find_package(Qt6 REQUIRED COMPONENTS VirtualKeyboard)

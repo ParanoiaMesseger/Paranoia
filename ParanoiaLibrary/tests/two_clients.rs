@@ -4,6 +4,7 @@ use paranoia_lib::{
     AdminKeyPair, ClientConfig, DialogueConfig, DialogueKey, DialogueKeyEntry, MessageContent,
     ParanoiaClient,
 };
+use rand::RngCore;
 use std::{
     fs,
     net::TcpListener,
@@ -335,7 +336,7 @@ async fn multi_megabyte_file_sends_and_downloads_in_small_requests() {
 
 fn signing_key() -> SigningKey {
     let mut secret = [0u8; 32];
-    rand::fill(&mut secret);
+    rand::rngs::OsRng.fill_bytes(&mut secret);
     SigningKey::from_bytes(&secret)
 }
 

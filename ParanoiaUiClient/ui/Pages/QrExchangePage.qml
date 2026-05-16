@@ -22,7 +22,7 @@ Rectangle {
     property string sas:            ""
     property string feedback:       ""
     property var cameraScanTargetField: null
-    readonly property bool mobileQrScan: Qt.platform.os === "android" || Qt.platform.os === "ios"
+    readonly property bool mobileQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
 
     function localFilePath(fileUrl) {
         let value = decodeURIComponent(String(fileUrl))

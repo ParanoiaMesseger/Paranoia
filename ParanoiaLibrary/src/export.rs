@@ -11,6 +11,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use hkdf::Hkdf;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
@@ -167,7 +168,7 @@ pub fn validate_export_payload(payload: &ExportPayload) -> Result<ExportPayloadS
 /// Возвращает (private_key_bytes, pubkey_bytes).
 pub fn generate_device_keypair() -> ([u8; 32], [u8; 32]) {
     let mut priv_bytes = [0u8; 32];
-    rand::fill(&mut priv_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut priv_bytes);
     let secret = StaticSecret::from(priv_bytes);
     let pubkey = *PublicKey::from(&secret).as_bytes();
     (priv_bytes, pubkey)
@@ -184,7 +185,7 @@ pub fn pubkey_from_private_key(priv_bytes: &[u8; 32]) -> [u8; 32] {
 /// Возвращает JSON-строку EciesEnvelope.
 pub fn ecies_encrypt(receiver_pub: &[u8; 32], plaintext: &[u8]) -> Result<String> {
     let mut eph_priv_bytes = [0u8; 32];
-    rand::fill(&mut eph_priv_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut eph_priv_bytes);
     let eph_secret = StaticSecret::from(eph_priv_bytes);
     let eph_pub_bytes = *PublicKey::from(&eph_secret).as_bytes();
 
@@ -199,7 +200,7 @@ pub fn ecies_encrypt(receiver_pub: &[u8; 32], plaintext: &[u8]) -> Result<String
         ChaCha20Poly1305::new_from_slice(&enc_key).map_err(|_| anyhow!("invalid key length"))?;
 
     let mut nonce_bytes = [0u8; 12];
-    rand::fill(&mut nonce_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ct = cipher

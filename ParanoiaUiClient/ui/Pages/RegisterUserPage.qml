@@ -9,7 +9,7 @@ Rectangle {
     color: Theme.bgPrimary
 
     required property string targetDomain
-    readonly property bool mobileQrScan: Qt.platform.os === "android" || Qt.platform.os === "ios"
+    readonly property bool mobileQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
 
     signal back()
 

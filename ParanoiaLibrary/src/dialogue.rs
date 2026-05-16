@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use rand::Rng;
 use std::{
     fs::{self, File},
     io::{BufReader, BufWriter, Read, Write},
@@ -867,11 +868,12 @@ fn random_chunks(data: &[u8]) -> Vec<&[u8]> {
 fn random_chunk_sizes(total_size: usize) -> Vec<usize> {
     let mut sizes = Vec::new();
     let mut remaining = total_size;
+    let mut rng = rand::thread_rng();
     while remaining > 0 {
         let size = if remaining <= CHUNK_SIZE_MIN {
             remaining
         } else {
-            rand::random_range(CHUNK_SIZE_MIN..=CHUNK_SIZE_MAX.min(remaining))
+            rng.gen_range(CHUNK_SIZE_MIN..=CHUNK_SIZE_MAX.min(remaining))
         };
         sizes.push(size);
         remaining -= size;

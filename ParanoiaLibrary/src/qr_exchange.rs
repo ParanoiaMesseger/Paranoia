@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use hkdf::Hkdf;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -256,7 +257,7 @@ struct X25519Keypair {
 
 fn generate_x25519_keypair() -> X25519Keypair {
     let mut private = [0u8; 32];
-    rand::fill(&mut private);
+    rand::rngs::OsRng.fill_bytes(&mut private);
     let secret = StaticSecret::from(private);
     let public = PublicKey::from(&secret).to_bytes();
     X25519Keypair { private, public }

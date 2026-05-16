@@ -32,6 +32,10 @@
 #define PARANOIA_HAS_QT_VIRTUAL_KEYBOARD 0
 #endif
 
+#ifndef PARANOIA_HAS_QT_MULTIMEDIA
+#define PARANOIA_HAS_QT_MULTIMEDIA 0
+#endif
+
 #ifndef PARANOIA_BETA_LOGGING
 #define PARANOIA_BETA_LOGGING 0
 #endif
@@ -155,6 +159,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("Backend", &backend);
     engine.rootContext()->setContextProperty("Chat", &chatBackend);
     engine.rootContext()->setContextProperty("VirtualKeyboardAvailable", PARANOIA_HAS_QT_VIRTUAL_KEYBOARD != 0);
+    engine.rootContext()->setContextProperty("MultimediaAvailable", PARANOIA_HAS_QT_MULTIMEDIA != 0);
 #if PARANOIA_DESKTOP_TRAY
     const bool desktopTrayEnabled = QSystemTrayIcon::isSystemTrayAvailable();
 #else
