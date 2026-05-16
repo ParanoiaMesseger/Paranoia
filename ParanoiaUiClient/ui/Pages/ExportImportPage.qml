@@ -326,12 +326,13 @@ Rectangle {
                                             color: root.selectedExportPeers[modelData.peer] === true ? Theme.accent : "transparent"
                                             border.color: modelData.hasKey ? Theme.accent : Theme.border
 
-                                            Text {
+                                            CheckMark {
                                                 anchors.centerIn: parent
-                                                text: root.selectedExportPeers[modelData.peer] === true ? "✓" : ""
+                                                width: 14
+                                                height: 14
+                                                visible: root.selectedExportPeers[modelData.peer] === true
                                                 color: Theme.textPrimary
-                                                font.pixelSize: 12
-                                                font.family: Theme.fontFamily
+                                                strokeWidth: 2
                                             }
                                         }
 

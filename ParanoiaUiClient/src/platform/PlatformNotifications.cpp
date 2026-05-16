@@ -20,6 +20,11 @@ extern "C" void paranoia_ios_cancel_background_polling();
 extern "C" void paranoia_ios_show_message_count(unsigned long long count);
 #endif
 
+#if defined(Q_OS_DARWIN) && !defined(Q_OS_IOS)
+extern "C" void paranoia_macos_register_notifications();
+extern "C" void paranoia_macos_show_message_count(unsigned long long count);
+#endif
+
 namespace
 {
     std::mutex callbackMutex;
@@ -46,6 +51,8 @@ namespace PlatformNotifications
         callAndroidService("initialize");
 #elif defined(Q_OS_IOS)
         paranoia_ios_register_background_tasks();
+#elif defined(Q_OS_DARWIN)
+        paranoia_macos_register_notifications();
 #endif
     }
 
@@ -103,6 +110,10 @@ namespace PlatformNotifications
         Q_UNUSED(profileId)
         Q_UNUSED(peer)
         paranoia_ios_show_message_count(static_cast<unsigned long long>(count));
+#elif defined(Q_OS_DARWIN)
+        Q_UNUSED(profileId)
+        Q_UNUSED(peer)
+        paranoia_macos_show_message_count(static_cast<unsigned long long>(count));
 #else
         Q_UNUSED(count)
         Q_UNUSED(profileId)

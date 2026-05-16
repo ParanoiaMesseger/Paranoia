@@ -222,6 +222,46 @@ pub extern "C" fn paranoia_client_new(
     })
 }
 
+/// Проверить доступность резервного URL через /notify endpoint.
+/// `url` — базовый URL сервера, БЕЗ хвостового `/notify`; путь добавит сам Transport.
+/// Возвращает JSON {"ok": true} или {"ok": false, "error": "..."}.
+/// NULL только при ошибке инициализации/панике. Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_check_reserve_url(url: *const c_char) -> *mut c_char {
+    ffi_catch_ptr("check_reserve_url_error", || {
+        clear_last_error();
+        let url_str = ffi_try!(cstr_arg(url), invalid_argument_ptr());
+        if url_str.trim().is_empty() {
+            set_last_error("invalid_url");
+            return std::ptr::null_mut();
+        }
+
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(_) => {
+                set_last_error("runtime_error");
+                return std::ptr::null_mut();
+            }
+        };
+
+        let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
+        let transport =
+            crate::transport::Transport::new(&url_str, std::iter::empty::<&str>(), cover);
+        let core = crate::transport::CoreNotify {
+            sender: "availability-check".to_string(),
+            partner: "availability-check".to_string(),
+            seq: 0,
+            sig: vec![0u8; 64],
+        };
+
+        let json = match rt.block_on(transport.probe(&core)) {
+            Ok(_) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": anyhow_error_chain(&e) }),
+        };
+        string_to_c(json.to_string())
+    })
+}
+
 /// Вывести server_id из Ed25519 signing key.
 /// Возвращает hex SHA256("paranoia:server-id:v1\n" || public_key_bytes) или NULL при ошибке.
 /// Освободить через paranoia_free_string.

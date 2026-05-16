@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ParanoiaUiClient
 
+
 Column {
     id: root
     spacing: 6
@@ -17,7 +18,6 @@ Column {
     property int pasteButtonHeight: 20
     property int lineCount: 1
 
-    // Sync text property to/from active field without loops
     onTextChanged: {
         if (field.text !== root.text) field.text = root.text
         if (multiField.text !== root.text) multiField.text = root.text
@@ -28,6 +28,11 @@ Column {
     width: 320
 
     readonly property bool _anyFocus: field.activeFocus || multiField.activeFocus
+
+    function selectInputText(input) {
+        input.forceActiveFocus()
+        Qt.callLater(function() { input.selectAll() })
+    }
 
     Text {
         text: root.label
@@ -95,6 +100,24 @@ Column {
                 rightPadding: 0
                 onAccepted: root.accepted()
                 onTextChanged: if (root.lineCount <= 1 && root.text !== text) root.text = text
+
+                // Долгое нажатие/двойной клик — выделить весь текст
+                TapHandler {
+                    property bool selectAllOnRelease: false
+
+                    gesturePolicy: TapHandler.DragThreshold
+                    longPressThreshold: 0.4
+
+                    onLongPressed: {
+                        selectAllOnRelease = true
+                        root.selectInputText(field)
+                    }
+                    onDoubleTapped: root.selectInputText(field)
+                    onPressedChanged: if (!pressed && selectAllOnRelease) {
+                        selectAllOnRelease = false
+                        root.selectInputText(field)
+                    }
+                }
             }
 
             TextArea {
@@ -117,74 +140,187 @@ Column {
                 leftPadding: 0
                 rightPadding: 0
                 onTextChanged: if (root.lineCount > 1 && root.text !== text) root.text = text
+
+                // Долгое нажатие/двойной клик — выделить весь текст
+                TapHandler {
+                    property bool selectAllOnRelease: false
+
+                    gesturePolicy: TapHandler.DragThreshold
+                    longPressThreshold: 0.6
+
+                    onLongPressed: {
+                        selectAllOnRelease = true
+                        root.selectInputText(multiField)
+                    }
+                    onDoubleTapped: root.selectInputText(multiField)
+                    onPressedChanged: if (!pressed && selectAllOnRelease) {
+                        selectAllOnRelease = false
+                        root.selectInputText(multiField)
+                    }
+                }
             }
 
-            Rectangle {
+            // Кнопка вставки с 3D-анимацией
+            Item {
                 implicitWidth: root.pasteButtonWidth
                 implicitHeight: root.pasteButtonHeight
                 width: root.pasteButtonWidth
                 height: root.pasteButtonHeight
                 Layout.alignment: Qt.AlignTop
-                radius: Theme.radiusSm
-                color: pasteArea.containsMouse ? Theme.bgButton : "transparent"
 
+                // --- Состояния анимации ---
+                property bool animating: false
+                property bool showCheck: false
+
+                // Таймер: скрыть галочку через 1.2с и вернуть иконку
+                Timer {
+                    id: resetTimer
+                    interval: 1200
+                    repeat: false
+                    onTriggered: {
+                        // Второй полуоборот — возврат иконки
+                        returnRotation.start()
+                    }
+                }
+
+                // Фон кнопки
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Theme.radiusSm
+                    color: pasteArea.containsMouse ? Theme.bgButton : "transparent"
+                    Behavior on color { ColorAnimation { duration: 100 } }
+                }
+
+                // Иконка вставки (Canvas)
                 Canvas {
                     id: pasteIcon
                     anchors.centerIn: parent
-                    width: 14
-                    height: 14
+                    width: 20
+                    height: 20
                     antialiasing: true
+                    visible: !parent.showCheck
 
                     property bool hovered: pasteArea.containsMouse
                     onHoveredChanged: requestPaint()
 
-                    onPaint: {
-                        const ctx = getContext("2d");
-                        ctx.clearRect(0, 0, width, height);
-                        ctx.lineWidth = 1.5;
-                        ctx.lineJoin = "round";
-                        ctx.lineCap = "round";
-                        ctx.strokeStyle = Theme.accentHover;
-
-                        ctx.fillStyle = hovered ? Theme.bgButton : "transparent";
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.22, height * 0.22);
-                        ctx.lineTo(width * 0.22, height * 0.92);
-                        ctx.lineTo(width * 0.78, height * 0.92);
-                        ctx.lineTo(width * 0.78, height * 0.22);
-                        ctx.lineTo(width * 0.64, height * 0.22);
-                        ctx.lineTo(width * 0.64, height * 0.14);
-                        ctx.lineTo(width * 0.36, height * 0.14);
-                        ctx.lineTo(width * 0.36, height * 0.22);
-                        ctx.closePath();
-                        ctx.fill();
-                        ctx.stroke();
-
-                        ctx.fillStyle = Theme.bgBase;
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.38, height * 0.08);
-                        ctx.lineTo(width * 0.62, height * 0.08);
-                        ctx.lineTo(width * 0.62, height * 0.28);
-                        ctx.lineTo(width * 0.38, height * 0.28);
-                        ctx.closePath();
-                        ctx.fill();
-                        ctx.stroke();
-
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.34, height * 0.50);
-                        ctx.lineTo(width * 0.66, height * 0.50);
-                        ctx.stroke();
-
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.34, height * 0.65);
-                        ctx.lineTo(width * 0.66, height * 0.65);
-                        ctx.stroke();
-
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.34, height * 0.80);
-                        ctx.lineTo(width * 0.54, height * 0.80);
-                        ctx.stroke();
+                    transform: Rotation {
+                        id: pasteIconRotation
+                        origin.x: pasteIcon.width / 2
+                        origin.y: pasteIcon.height / 2
+                        axis { x: 0; y: 1; z: 0 }
+                        angle: 0
                     }
+
+                    onPaint: {
+                        const ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.lineWidth = 1.5
+                        ctx.lineJoin = "round"
+                        ctx.lineCap = "round"
+                        ctx.strokeStyle = Theme.accentHover
+
+                        ctx.fillStyle = hovered ? Theme.bgButton : "transparent"
+                        ctx.beginPath()
+                        ctx.moveTo(width * 0.22, height * 0.22)
+                        ctx.lineTo(width * 0.22, height * 0.92)
+                        ctx.lineTo(width * 0.78, height * 0.92)
+                        ctx.lineTo(width * 0.78, height * 0.22)
+                        ctx.lineTo(width * 0.64, height * 0.22)
+                        ctx.lineTo(width * 0.64, height * 0.14)
+                        ctx.lineTo(width * 0.36, height * 0.14)
+                        ctx.lineTo(width * 0.36, height * 0.22)
+                        ctx.closePath()
+                        ctx.fill()
+                        ctx.stroke()
+
+                        ctx.fillStyle = Theme.bgBase
+                        ctx.beginPath()
+                        ctx.moveTo(width * 0.38, height * 0.08)
+                        ctx.lineTo(width * 0.62, height * 0.08)
+                        ctx.lineTo(width * 0.62, height * 0.28)
+                        ctx.lineTo(width * 0.38, height * 0.28)
+                        ctx.closePath()
+                        ctx.fill()
+                        ctx.stroke()
+
+                        ctx.beginPath()
+                        ctx.moveTo(width * 0.34, height * 0.50)
+                        ctx.lineTo(width * 0.66, height * 0.50)
+                        ctx.stroke()
+
+                        ctx.beginPath()
+                        ctx.moveTo(width * 0.34, height * 0.65)
+                        ctx.lineTo(width * 0.66, height * 0.65)
+                        ctx.stroke()
+
+                        ctx.beginPath()
+                        ctx.moveTo(width * 0.34, height * 0.80)
+                        ctx.lineTo(width * 0.54, height * 0.80)
+                        ctx.stroke()
+                    }
+                }
+
+                CheckMark {
+                    id: checkIcon
+                    anchors.centerIn: parent
+                    visible: parent.showCheck
+                }
+
+                // Анимация: первый полуоборот (иконка уходит)
+                SequentialAnimation {
+                    id: forwardRotation
+
+                    NumberAnimation {
+                        target: pasteIconRotation
+                        property: "angle"
+                        from: 0
+                        to: 90
+                        duration: 150
+                        easing.type: Easing.InCubic
+                    }
+                    ScriptAction {
+                        script: {
+                            // Переключаем на галочку в момент "перпендикулярно"
+                            pasteIcon.parent.showCheck = true
+                            checkIcon.rotY = -90
+                            resetTimer.start()
+                        }
+                    }
+                    NumberAnimation {
+                        target: checkIcon
+                        property: "rotY"
+                        from: -90; to: 0
+                        duration: 150
+                        easing.type: Easing.OutCubic
+                    }
+                }
+
+                // Анимация: возврат к иконке
+                SequentialAnimation {
+                    id: returnRotation
+
+                    NumberAnimation {
+                        target: checkIcon
+                        property: "rotY"
+                        from: 0;to: 90
+                        duration: 150
+                        easing.type: Easing.InCubic
+                    }
+                    ScriptAction {
+                        script: {
+                            pasteIcon.parent.showCheck = false
+                            pasteIconRotation.angle = -90
+                        }
+                    }
+                    NumberAnimation {
+                        target: pasteIconRotation
+                        property: "angle"
+                        from: -90
+                        to: 0
+                        duration: 150
+                        easing.type: Easing.OutCubic
+                    }
+                    onStopped: pasteIcon.parent.animating = false
                 }
 
                 MouseArea {
@@ -193,11 +329,18 @@ Column {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        copyHelper.text = "";
-                        copyHelper.paste();
-                        const pasted = copyHelper.text;
+                        if (parent.animating) return
+
+                        // Вставка из буфера обмена
+                        copyHelper.text = ""
+                        copyHelper.paste()
+                        const pasted = copyHelper.text
                         if (root.lineCount > 1) multiField.text = pasted
                         else field.text = pasted
+
+                        // Запустить анимацию
+                        parent.animating = true
+                        forwardRotation.start()
                     }
                 }
             }

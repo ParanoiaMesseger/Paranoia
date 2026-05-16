@@ -44,6 +44,15 @@ pub(crate) fn classify_network_error(err: &str, fallback: &str) -> String {
                 "platform-verifier",
                 "native verifier",
                 "trust manager",
+                "sectrust",
+                "trust evaluation",
+                "trustevaluation",
+                "certificate is not trusted",
+                "not valid for name",
+                "certificate expired",
+                "certificate has expired",
+                "revocation",
+                "errsec",
                 "classnotfound",
                 "noclassdeffound",
                 "expect rustls-platform-verifier to be initialized",
@@ -223,6 +232,18 @@ mod tests {
     fn android_native_verifier_errors_are_tls_errors() {
         let raw = "error sending request for url: invalid peer certificate: failed to call native verifier: java.lang.ClassNotFoundException";
         assert_eq!(classify_network_error(raw, "receive_error"), "tls_error");
+    }
+
+    #[test]
+    fn apple_trust_errors_are_tls_errors() {
+        assert_eq!(
+            classify_network_error("SecTrust evaluation failed with errSecCertificateExpired", "receive_error"),
+            "tls_error"
+        );
+        assert_eq!(
+            classify_network_error("certificate is not trusted by the platform verifier", "send_error"),
+            "tls_error"
+        );
     }
 
     #[test]

@@ -81,7 +81,7 @@ signals:
     void reserveDomainAdded(const QString &targetType, const QString &targetId, const QString &reserveDomain);
     void reserveDomainRemoved(const QString &targetType, const QString &targetId, const QString &reserveDomain);
     void reserveDomainCheckFinished(const QString &targetType, const QString &targetId, const QString &reserveDomain,
-                                    bool ok, const QString &msg);
+                                    bool ok, const QString &msg, qint64 pingMs);
     void reserveDomainError(const QString &msg);
     void dialogsChanged();
     void notificationAvailable(quint64 count, const QString &profileId, const QString &peer);

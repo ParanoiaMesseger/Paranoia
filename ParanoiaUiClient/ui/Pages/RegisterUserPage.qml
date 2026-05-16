@@ -9,12 +9,12 @@ Rectangle {
     color: Theme.bgPrimary
 
     required property string targetDomain
-    readonly property bool mobileQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
+    readonly property bool cameraQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
 
     signal back()
 
     function openQrReader() {
-        if (root.mobileQrScan)
+        if (root.cameraQrScan)
             cameraScanLoader.active = true
         else
             registrationQrImageDialog.open()
@@ -121,7 +121,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: root.mobileQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
+                    text: root.cameraQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
                     secondary: true
                     onClicked: root.openQrReader()
                 }

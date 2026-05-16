@@ -24,7 +24,7 @@ class QrCameraScanner : public QObject
     Q_OBJECT
     QML_ELEMENT
     Q_PROPERTY(bool active READ active WRITE setActive NOTIFY activeChanged)
-    Q_PROPERTY(bool supported READ supported CONSTANT)
+    Q_PROPERTY(bool supported READ supported NOTIFY supportedChanged)
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)
     Q_PROPERTY(QObject *videoOutput READ videoOutput WRITE setVideoOutput NOTIFY videoOutputChanged)
 
@@ -44,6 +44,7 @@ public:
 
 signals:
     void activeChanged();
+    void supportedChanged();
     void errorChanged();
     void videoOutputChanged();
     void decoded(const QString &text);

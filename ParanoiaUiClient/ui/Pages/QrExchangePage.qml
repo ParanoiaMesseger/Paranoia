@@ -22,7 +22,7 @@ Rectangle {
     property string sas:            ""
     property string feedback:       ""
     property var cameraScanTargetField: null
-    readonly property bool mobileQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
+    readonly property bool cameraQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
 
     function localFilePath(fileUrl) {
         let value = decodeURIComponent(String(fileUrl))
@@ -36,7 +36,7 @@ Rectangle {
     }
 
     function openQrReader(targetField) {
-        if (root.mobileQrScan) {
+        if (root.cameraQrScan) {
             root.openCameraScanner(targetField)
             return
         }
@@ -213,7 +213,7 @@ Rectangle {
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: root.mobileQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
+                                text: root.cameraQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
                                 secondary: true
                                 onClicked: root.openQrReader(initiatorResponseInput)
                             }
@@ -251,7 +251,7 @@ Rectangle {
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: root.mobileQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
+                                text: root.cameraQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
                                 secondary: true
                                 onClicked: root.openQrReader(responderInvitationInput)
                             }

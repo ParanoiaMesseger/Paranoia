@@ -134,6 +134,16 @@ impl Transport {
         self.cover.unwrap_notify_response(&resp)
     }
 
+    /// Зондировать /notify: считаем endpoint доступным, если сервер ответил
+    /// валидным JSON, даже если на уровне протокола это ошибка
+    /// (например, "user not registered" для фиктивного запроса).
+    /// Возвращает Err только при сетевых/TLS/HTTP-ошибках или невалидном JSON.
+    pub async fn probe(&self, core: &CoreNotify) -> Result<()> {
+        let body = self.cover.wrap_notify(core)?;
+        let _resp = self.put_json("/notify", &body).await?;
+        Ok(())
+    }
+
     pub async fn determinate(&self, core: &CoreDeterminate) -> Result<()> {
         let body = self.cover.wrap_determinate(core)?;
         let resp = self.put_json("/determinate", &body).await?;

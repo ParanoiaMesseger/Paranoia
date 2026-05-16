@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Installer>
+    <Name>Paranoia</Name>
+    <!-- CI rewrites this from ParanoiaUiClient/CMakeLists.txt before packaging. -->
+    <Version>0.2.1.0</Version>
+    <Title>Paranoia Setup</Title>
+    <Publisher>Paranoia</Publisher>
+    <TargetDir>@ApplicationsDir@/Paranoia</TargetDir>
+    <MaintenanceToolName>ParanoiaMaintenance</MaintenanceToolName>
+    <AllowSpaceInPath>true</AllowSpaceInPath>
+    <InstallActionColumnVisible>false</InstallActionColumnVisible>
+    <RunProgram>@TargetDir@/Paranoia.app/Contents/MacOS/Paranoia</RunProgram>
+    <RunProgramDescription>Launch Paranoia</RunProgramDescription>
+</Installer>

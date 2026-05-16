@@ -36,6 +36,15 @@ function(setup_paranoia_lib TARGET)
             WORKING_DIRECTORY "${RUST_LIB_DIR}"
             COMMENT "Building paranoia_lib (Rust) → ${PARANOIA_CARGO_TARGET}"
         )
+    elseif(IOS AND DEFINED PARANOIA_CARGO_TARGET)
+        add_custom_target(paranoia_lib_build
+            COMMAND ${CMAKE_COMMAND} -E env
+                "IPHONEOS_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+                cargo build ${_cargo_args}
+            BYPRODUCTS "${PARANOIA_LIB_FILE}"
+            WORKING_DIRECTORY "${RUST_LIB_DIR}"
+            COMMENT "Building paranoia_lib (Rust) → ${PARANOIA_CARGO_TARGET}"
+        )
     else()
         add_custom_target(paranoia_lib_build
             COMMAND cargo build ${_cargo_args}
@@ -58,6 +67,7 @@ function(setup_paranoia_lib TARGET)
         target_link_libraries(${TARGET} PRIVATE pthread dl)
     elseif(APPLE)
         target_link_libraries(${TARGET} PRIVATE
+            "-framework CoreFoundation"
             "-framework Security"
             "-framework SystemConfiguration"
         )

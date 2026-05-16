@@ -1,6 +1,6 @@
 [package]
 name = "paranoia-lib"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 
 [profile.release]
@@ -12,7 +12,8 @@ codegen-units = 1
 [lib]
 name = "paranoia_lib"
 path = "src/lib.rs"
-crate-type = ["rlib", "staticlib", "cdylib"]
+# UI clients link the static archive; keeping crate types static avoids iOS cdylib builds.
+crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 tokio = { version = "1.52.3", features = ["full"] }
