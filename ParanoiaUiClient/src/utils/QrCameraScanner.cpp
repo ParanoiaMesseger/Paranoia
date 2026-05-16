@@ -1,8 +1,9 @@
 #include "QrCameraScanner.hpp"
 
-#include <QBuffer>
 #include <QDebug>
 #include <QImage>
+#include <QtConcurrent>
+#include <QVariant>
 
 #if PARANOIA_HAS_QT_MULTIMEDIA
 #include <QCameraDevice>
@@ -13,9 +14,25 @@
 #include <ReadBarcode.h>
 #endif
 
-QrCameraScanner::QrCameraScanner(QObject *parent) : QObject(parent) {}
+namespace
+{
+    constexpr qint64 DecodeIntervalMs = 250;
+}
 
-QrCameraScanner::~QrCameraScanner() { stop(); }
+QrCameraScanner::QrCameraScanner(QObject *parent) : QObject(parent)
+{
+#if PARANOIA_HAS_QT_MULTIMEDIA
+    connect(&m_decodeWatcher, &QFutureWatcher<QString>::finished, this, &QrCameraScanner::handleDecodeFinished);
+#endif
+}
+
+QrCameraScanner::~QrCameraScanner()
+{
+    stop();
+#if PARANOIA_HAS_QT_MULTIMEDIA
+    m_decodeWatcher.waitForFinished();
+#endif
+}
 
 bool QrCameraScanner::active() const { return m_active; }
 
@@ -38,7 +55,29 @@ bool QrCameraScanner::supported() const
 
 QString QrCameraScanner::error() const { return m_error; }
 
-QString QrCameraScanner::previewFrame() const { return m_previewFrame; }
+QObject *QrCameraScanner::videoOutput() const { return m_videoOutput; }
+
+void QrCameraScanner::setVideoOutput(QObject *videoOutput)
+{
+    if (m_videoOutput == videoOutput) return;
+
+    if (m_videoOutputDestroyedConnection) disconnect(m_videoOutputDestroyedConnection);
+    m_videoOutput = videoOutput;
+
+#if PARANOIA_HAS_QT_MULTIMEDIA
+    if (m_videoOutput) {
+        m_videoOutputDestroyedConnection = connect(m_videoOutput, &QObject::destroyed, this, [this]() {
+            m_videoOutput = nullptr;
+            connectVideoSink(nullptr);
+            if (m_captureSession) m_captureSession->setVideoOutput(nullptr);
+            emit videoOutputChanged();
+        });
+    }
+    applyVideoOutput();
+#endif
+
+    emit videoOutputChanged();
+}
 
 void QrCameraScanner::start()
 {
@@ -73,6 +112,8 @@ void QrCameraScanner::start()
     }
     clearError();
     if (!m_active) {
+        ++m_scanSessionId;
+        m_decodeTimer.invalidate();
         m_active = true;
         emit activeChanged();
     }
@@ -88,6 +129,9 @@ void QrCameraScanner::stop()
     if (m_camera) m_camera->stop();
 #endif
     if (!m_active) return;
+#if PARANOIA_HAS_QT_MULTIMEDIA
+    ++m_scanSessionId;
+#endif
     m_active = false;
     emit activeChanged();
 }
@@ -118,62 +162,68 @@ void QrCameraScanner::ensureCamera()
     }
 
     m_camera         = std::make_unique<QCamera>(selected);
-    m_videoSink      = std::make_unique<QVideoSink>();
     m_captureSession = std::make_unique<QMediaCaptureSession>();
     m_captureSession->setCamera(m_camera.get());
-    m_captureSession->setVideoSink(m_videoSink.get());
+    applyVideoOutput();
 
-    connect(m_videoSink.get(), &QVideoSink::videoFrameChanged, this, &QrCameraScanner::handleFrame);
-    connect(m_camera.get(), &QCamera::errorOccurred, this,
-            [this](QCamera::Error error, const QString &errorString) {
-                if (error != QCamera::NoError) setError(errorString.isEmpty() ? "Ошибка камеры." : errorString);
-            });
+    connect(m_camera.get(), &QCamera::errorOccurred, this, [this](QCamera::Error error, const QString &errorString) {
+        if (error != QCamera::NoError) setError(errorString.isEmpty() ? "Ошибка камеры." : errorString);
+    });
+}
+
+void QrCameraScanner::applyVideoOutput()
+{
+    if (!m_captureSession) return;
+
+    m_captureSession->setVideoOutput(m_videoOutput);
+
+    QVideoSink *videoSink = nullptr;
+    if (m_videoOutput) videoSink = m_videoOutput->property("videoSink").value<QVideoSink *>();
+    connectVideoSink(videoSink);
+}
+
+void QrCameraScanner::connectVideoSink(QVideoSink *videoSink)
+{
+    if (m_videoSink == videoSink) return;
+
+    if (m_videoFrameConnection) disconnect(m_videoFrameConnection);
+    m_videoSink = videoSink;
+    if (m_videoSink)
+        m_videoFrameConnection =
+            connect(m_videoSink, &QVideoSink::videoFrameChanged, this, &QrCameraScanner::handleFrame);
 }
 
 void QrCameraScanner::handleFrame(const QVideoFrame &frame)
 {
-    if (!m_active) return;
-
-    QImage image = frame.toImage();
-    if (image.isNull()) return;
-
-    if (!m_previewTimer.isValid() || m_previewTimer.elapsed() > 160) {
-        m_previewTimer.restart();
-        updatePreview(image);
-    }
-
-    if (m_decodeTimer.isValid() && m_decodeTimer.elapsed() < 240) return;
+    if (!m_active || !frame.isValid() || m_decodeInFlight) return;
+    if (m_decodeTimer.isValid() && m_decodeTimer.elapsed() < DecodeIntervalMs) return;
     m_decodeTimer.restart();
 
-    if (image.width() > 1280) image = image.scaledToWidth(1280, Qt::FastTransformation);
-    const QString text = decodeQr(image);
-    if (text.isEmpty()) return;
+    m_pendingDecodeSessionId = m_scanSessionId;
+    m_decodeInFlight         = true;
+    m_decodeWatcher.setFuture(QtConcurrent::run(&QrCameraScanner::decodeFrame, frame));
+}
+
+void QrCameraScanner::handleDecodeFinished()
+{
+    const QString text = m_decodeWatcher.result();
+    m_decodeInFlight   = false;
+    if (!m_active || m_pendingDecodeSessionId != m_scanSessionId || text.isEmpty()) return;
 
     stop();
     emit decoded(text);
 }
 
-void QrCameraScanner::updatePreview(const QImage &image)
+QString QrCameraScanner::decodeFrame(QVideoFrame frame)
 {
-    QImage preview = image;
-    if (preview.width() > 720) preview = preview.scaledToWidth(720, Qt::FastTransformation);
+    QImage image = frame.toImage();
+    if (image.isNull()) return {};
 
-    QByteArray bytes;
-    QBuffer buffer(&bytes);
-    buffer.open(QIODevice::WriteOnly);
-    if (!preview.save(&buffer, "JPG", 70)) {
-        bytes.clear();
-        buffer.close();
-        buffer.open(QIODevice::WriteOnly);
-        if (!preview.save(&buffer, "PNG")) return;
-        m_previewFrame = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(bytes.toBase64());
-    } else {
-        m_previewFrame = QStringLiteral("data:image/jpeg;base64,") + QString::fromLatin1(bytes.toBase64());
-    }
-    emit previewFrameChanged();
+    if (image.width() > 1280) image = image.scaledToWidth(1280, Qt::FastTransformation);
+    return decodeQr(image);
 }
 
-QString QrCameraScanner::decodeQr(const QImage &image) const
+QString QrCameraScanner::decodeQr(const QImage &image)
 {
     const QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
     try {

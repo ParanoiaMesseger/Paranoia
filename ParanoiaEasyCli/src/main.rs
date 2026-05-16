@@ -12,6 +12,7 @@ use paranoia_lib::{
         pubkey_from_private_key, validate_export_payload,
     },
 };
+use rand::RngCore;
 use rpassword::read_password;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -203,7 +204,7 @@ async fn admin_reg_user(
 fn user_init() -> Result<()> {
     // генерируем 32‑байтовый секрет, как у AdminKeyPair.
     let mut secret_bytes = [0u8; 32];
-    rand::fill(&mut secret_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
     let sk = SigningKey::from(secret_bytes);
     let pk = sk.verifying_key();
 

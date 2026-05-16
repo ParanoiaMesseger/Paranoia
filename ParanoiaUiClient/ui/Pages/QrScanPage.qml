@@ -43,12 +43,12 @@ Rectangle {
                 color: "black"
             }
 
-            Image {
+            Loader {
+                id: previewLoader
                 anchors.fill: parent
-                source: scanner.previewFrame
-                fillMode: Image.PreserveAspectCrop
-                visible: scanner.previewFrame.length > 0
-                asynchronous: true
+                active: scanner.supported
+                source: active ? "../Components/QrCameraPreview.qml" : ""
+                onLoaded: item.scanner = scanner
             }
 
             Rectangle {
