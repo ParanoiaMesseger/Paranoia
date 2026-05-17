@@ -4,6 +4,7 @@
 #include "session/SessionStore.hpp"
 
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QDateTime>
 #include <QGuiApplication>
@@ -35,9 +36,7 @@ namespace
     }
 
     bool isContentUri(const QString &urlOrPath)
-    {
-        return urlOrPath.startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
-    }
+    { return urlOrPath.startsWith(QStringLiteral("content://"), Qt::CaseInsensitive); }
 
     QString temporaryAttachmentPath()
     {
@@ -77,9 +76,7 @@ namespace
     }
 
     bool isImageAttachment(const QString &kind, const QString &mimeType)
-    {
-        return kind == QStringLiteral("image") || mimeType.startsWith(QStringLiteral("image/"), Qt::CaseInsensitive);
-    }
+    { return kind == QStringLiteral("image") || mimeType.startsWith(QStringLiteral("image/"), Qt::CaseInsensitive); }
 
     QString localFileUrlIfReadable(const QString &path)
     {
@@ -97,6 +94,75 @@ namespace
             error.contains(QStringLiteral("attachment_bad_chunk"), Qt::CaseInsensitive))
             return QStringLiteral("Вложение повреждено. Попросите отправить файл повторно.");
         return error;
+    }
+
+    QVariantList reactionsForEvents(const QVariantList &events, const QString &myId, const QString &myUsername,
+                                    const QMap<QString, QString> &peerIdToUsername)
+    {
+        QVariantList reactions;
+        QSet<QString> seen;
+        for (const auto &eventValue : events) {
+            const QVariantMap event = eventValue.toMap();
+            const QString emoji     = event.value(QStringLiteral("emoji")).toString();
+            const QString sender    = event.value(QStringLiteral("sender")).toString();
+            if (emoji.isEmpty() || sender.isEmpty()) continue;
+            const QString key = sender + QChar('\n') + emoji;
+            if (seen.contains(key)) continue;
+            seen.insert(key);
+            const bool mine = !myId.isEmpty() && sender == myId;
+            QString senderName;
+            if (mine)
+                senderName = myUsername;
+            else
+                senderName = peerIdToUsername.value(sender);
+            if (senderName.isEmpty()) senderName = sender;
+            reactions.append(QVariantMap{
+                {QStringLiteral("emoji"), emoji},
+                {QStringLiteral("sender"), sender},
+                {QStringLiteral("sender_name"), senderName},
+                {QStringLiteral("mine"), mine},
+            });
+        }
+        return reactions;
+    }
+
+    void applyReactionToCache(QVariantList &cache, const QVariantMap &reaction, const QString &myId,
+                              const QString &myUsername, const QMap<QString, QString> &peerIdToUsername)
+    {
+        const QString targetId = reaction.value(QStringLiteral("target_id")).toString();
+        const QString emoji =
+            reaction.value(QStringLiteral("emoji"), reaction.value(QStringLiteral("text"))).toString();
+        const QString sender = reaction.value(QStringLiteral("sender")).toString();
+        if (targetId.isEmpty() || emoji.isEmpty() || sender.isEmpty()) return;
+
+        for (auto &messageValue : cache) {
+            QVariantMap message = messageValue.toMap();
+            if (message.value(QStringLiteral("id")).toString() != targetId) continue;
+
+            QVariantList events = message.value(QStringLiteral("reaction_events")).toList();
+            bool replaced       = false;
+            for (auto &eventValue : events) {
+                QVariantMap event = eventValue.toMap();
+                if (event.value(QStringLiteral("sender")).toString() != sender) continue;
+                event[QStringLiteral("emoji")] = emoji;
+                eventValue                     = event;
+                replaced                       = true;
+                break;
+            }
+            if (!replaced) {
+                events.append(QVariantMap{
+                    {QStringLiteral("sender"), sender},
+                    {QStringLiteral("emoji"), emoji},
+                });
+            }
+            const QVariantList reactionsList           = reactionsForEvents(events, myId, myUsername, peerIdToUsername);
+            message[QStringLiteral("reaction_events")] = events;
+            message[QStringLiteral("reactions")]       = reactionsList;
+            message[QStringLiteral("reactions_json")]  = QString::fromUtf8(
+                QJsonDocument(QJsonArray::fromVariantList(reactionsList)).toJson(QJsonDocument::Compact));
+            messageValue = message;
+            return;
+        }
     }
 
 #if defined(Q_OS_ANDROID)
@@ -166,10 +232,7 @@ namespace
     void requestAndroidFileAccessIfNeeded() {}
 #endif
 
-    bool applicationIsActive()
-    {
-        return QGuiApplication::applicationState() == Qt::ApplicationActive;
-    }
+    bool applicationIsActive() { return QGuiApplication::applicationState() == Qt::ApplicationActive; }
 }
 
 ChatBackend::ChatBackend(QObject *parent) : QObject(parent)
@@ -177,11 +240,20 @@ ChatBackend::ChatBackend(QObject *parent) : QObject(parent)
     m_activePollTimer = new QTimer(this);
     m_activePollTimer->setSingleShot(true);
     connect(m_activePollTimer, &QTimer::timeout, this, &ChatBackend::onActivePollTimer);
+    connect(qApp, &QGuiApplication::applicationStateChanged, this, &ChatBackend::onApplicationStateChanged);
 }
 
 ChatBackend::~ChatBackend() { m_activePollTimer->stop(); }
 
 bool ChatBackend::messagesLoading() const { return m_messageLoadingJobs > 0; }
+
+bool ChatBackend::readReceiptsEnabled() const
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session || m_activePeer.isEmpty()) return true;
+    const auto *dialog = session->findDialog(m_activePeer);
+    return dialog ? dialog->receiptsEnabled : true;
+}
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
@@ -189,10 +261,12 @@ void ChatBackend::openChat(const QString &peer)
 {
     m_activePeer = peer;
     emit activePeerChanged(peer);
+    emit readReceiptsEnabledChanged();
     auto session = SessionStore::instance()->activeSession();
     if (session && session->isLoggedIn() && session->findDialog(peer)) {
         loadHistory(peer);
         fetchMessages();
+        refreshArrivedStatus();
         scheduleActiveChatPoll(0);
     }
 }
@@ -202,6 +276,7 @@ void ChatBackend::stopChat()
     m_activePeer.clear();
     m_activePollTimer->stop();
     emit activePeerChanged({});
+    emit readReceiptsEnabledChanged();
 }
 
 void ChatBackend::sendText(const QString &text)
@@ -270,9 +345,79 @@ void ChatBackend::sendText(const QString &text)
             if (!self) return;
             self->m_sendInFlightKeys.remove(sendKey);
             self->appendMessages(peer, self->parseMessages(json));
-            if (peer == self->m_activePeer) self->loadHistory(peer);
+            if (peer == self->m_activePeer) {
+                self->fetchMessages();
+                self->refreshArrivedStatus();
+                self->scheduleActiveChatPoll(0);
+            }
         });
     });
+}
+
+void ChatBackend::sendReaction(const QString &targetId, const QString &emoji)
+{
+    const QString trimmedTarget = targetId.trimmed();
+    const QString trimmedEmoji  = emoji.trimmed();
+    if (m_activePeer.isEmpty() || trimmedTarget.isEmpty() || trimmedEmoji.isEmpty() || trimmedEmoji.size() > 16) return;
+
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) {
+        emit sendError("Нет активной сессии.");
+        return;
+    }
+    auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) {
+        emit sendError("Диалог не найден.");
+        return;
+    }
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    const QString sendKey =
+        peer + QChar('\n') + QStringLiteral("reaction") + QChar('\n') + trimmedTarget + QChar('\n') + trimmedEmoji;
+    if (m_sendInFlightKeys.contains(sendKey)) return;
+    m_sendInFlightKeys.insert(sendKey);
+
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, session, peer, serverId, peerServerId, keyringJson, trimmedTarget, trimmedEmoji, sendKey]() {
+            if (!self) return;
+            QString json;
+            QString err;
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                if (!session->ffi) {
+                    err = "client_not_ready";
+                } else {
+                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                    json = session->ffi->send_reaction_json_keyring(serverId, peerId, keyringJson, trimmedTarget,
+                                                                    trimmedEmoji);
+                    if (json.isEmpty()) err = ParanoiaFFI::last_error();
+                }
+            }
+            if (json.isEmpty()) {
+                QMetaObject::invokeMethod(self, [self, err, sendKey]() {
+                    if (!self) return;
+                    self->m_sendInFlightKeys.remove(sendKey);
+                    if (err == "server_unavailable")
+                        emit self->sendError("Сервер недоступен. Проверьте соединение.");
+                    else
+                        emit self->sendError("Ошибка отправки реакции.");
+                });
+                return;
+            }
+            QMetaObject::invokeMethod(self, [self, peer, json, sendKey]() {
+                if (!self) return;
+                self->m_sendInFlightKeys.remove(sendKey);
+                self->appendMessages(peer, self->parseMessages(json));
+                if (peer == self->m_activePeer) {
+                    self->fetchMessages();
+                    self->scheduleActiveChatPoll(0);
+                }
+            });
+        });
 }
 
 void ChatBackend::sendFile(const QString &fileUrlOrPath)
@@ -361,7 +506,11 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
             if (!self) return;
             self->m_sendInFlightKeys.remove(sendKey);
             self->appendMessages(peer, self->parseMessages(json));
-            if (peer == self->m_activePeer) self->loadHistory(peer);
+            if (peer == self->m_activePeer) {
+                self->fetchMessages();
+                self->refreshArrivedStatus();
+                self->scheduleActiveChatPoll(0);
+            }
         });
     });
 }
@@ -562,6 +711,56 @@ void ChatBackend::deleteMessagesUntil(quint64 cutSeq)
     });
 }
 
+void ChatBackend::setReadReceiptsEnabled(bool enabled)
+{
+    if (m_activePeer.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) return;
+    if (dlg->receiptsEnabled == enabled) return;
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    const bool previous        = dlg->receiptsEnabled;
+    dlg->receiptsEnabled       = enabled;
+    session->saveDialogs();
+    emit readReceiptsEnabledChanged();
+    emit dialogsChanged();
+
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, session, peer, serverId, peerServerId, keyringJson, enabled, previous]() {
+            if (!self) return;
+            int rc = -1;
+            QString err;
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                if (!session->ffi) {
+                    err = "client_not_ready";
+                } else {
+                    const QString myId   = serverId.isEmpty() ? session->username : serverId;
+                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                    rc                   = session->ffi->arrived_put_keyring(myId, peerId, keyringJson, enabled);
+                    if (rc != 0) err = ParanoiaFFI::last_error();
+                }
+            }
+            if (rc == 0 || !self) return;
+            QMetaObject::invokeMethod(self, [self, session, peer, previous, err]() {
+                if (!self) return;
+                if (auto *dialog = session->findDialog(peer)) {
+                    dialog->receiptsEnabled = previous;
+                    session->saveDialogs();
+                }
+                if (peer == self->m_activePeer) emit self->readReceiptsEnabledChanged();
+                emit self->dialogsChanged();
+                emit self->receiveError("Не удалось изменить уведомления о прочтении: " + err);
+            });
+        });
+}
+
 void ChatBackend::fetchMessages()
 {
     if (m_activePeer.isEmpty()) return;
@@ -651,6 +850,7 @@ void ChatBackend::onDialogRemoved(const QString &peer)
     if (m_activePeer == peer) {
         m_activePeer.clear();
         m_activePollTimer->stop();
+        emit readReceiptsEnabledChanged();
     }
 }
 
@@ -662,6 +862,8 @@ void ChatBackend::onSessionReset()
     m_activePollTimer->stop();
     m_receiveInFlight          = false;
     m_receiveAgainAfterCurrent = false;
+    m_arrivedInFlight          = false;
+    emit readReceiptsEnabledChanged();
 }
 
 void ChatBackend::onNetworkRestored()
@@ -745,7 +947,56 @@ void ChatBackend::pollActiveChat()
             }
             self->m_activePollRetryCount = 0;
             if (count > 0) self->fetchMessages();
+            self->refreshArrivedStatus();
             self->scheduleActiveChatPoll();
+        });
+    });
+}
+
+void ChatBackend::refreshArrivedStatus()
+{
+    if (m_arrivedInFlight) return;
+    if (!applicationIsActive()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session || !session->isLoggedIn() || m_activePeer.isEmpty()) return;
+    const auto *dialog = session->findDialog(m_activePeer);
+    if (!dialog) return;
+    const QString keyringJson = dialog->keyringJson();
+    if (keyringJson.isEmpty()) return;
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dialog->peerServerId;
+    QPointer self(this);
+    m_arrivedInFlight = true;
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson]() {
+        if (!self) return;
+        uint64_t changed = 0;
+        bool failed      = false;
+        QString error;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (!session->ffi) {
+                failed = true;
+                error  = "client_not_ready";
+            } else {
+                const QString myId   = serverId.isEmpty() ? session->username : serverId;
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                const int rc         = session->ffi->arrived_get_keyring(myId, peerId, keyringJson, changed);
+                if (rc != 0) {
+                    failed = true;
+                    error  = ParanoiaFFI::last_error();
+                }
+            }
+        }
+        QMetaObject::invokeMethod(self, [self, peer, changed, failed, error]() {
+            if (!self) return;
+            self->m_arrivedInFlight = false;
+            if (failed) {
+                qWarning().noquote() << "Arrived status refresh failed:" << error;
+                return;
+            }
+            if (changed > 0 && peer == self->m_activePeer) self->loadHistory(peer);
         });
     });
 }
@@ -803,6 +1054,7 @@ void ChatBackend::loadHistory(const QString &peer)
             const QVariantList messages = self->parseMessages(json);
             self->m_messageCache[peer].clear();
             self->m_seenIds[peer].clear();
+            self->m_appliedReactionIds[peer].clear();
             if (messages.isEmpty()) {
                 emit self->messagesReceived(peer, QVariantList{});
                 emit self->dialogsChanged();
@@ -816,14 +1068,32 @@ void ChatBackend::loadHistory(const QString &peer)
 void ChatBackend::appendMessages(const QString &peer, const QVariantList &messages)
 {
     if (messages.isEmpty()) return;
-    auto &cache = m_messageCache[peer];
-    auto &seen  = m_seenIds[peer];
+    auto &cache            = m_messageCache[peer];
+    auto &seen             = m_seenIds[peer];
+    auto &appliedReactions = m_appliedReactionIds[peer];
+    QVariantList reactions;
+    const auto session = SessionStore::instance()->activeSession();
+    const QString myId = session ? (session->serverId.isEmpty() ? session->username : session->serverId) : QString();
+    const QString myUsername = session ? session->username : QString();
+    QMap<QString, QString> peerIdToUsername;
+    if (session) {
+        for (const auto &d : session->dialogs) {
+            if (!d.peerServerId.isEmpty()) peerIdToUsername.insert(d.peerServerId, d.peer);
+            if (!d.peer.isEmpty()) peerIdToUsername.insert(d.peer, d.peer);
+        }
+    }
     for (const auto &msg : messages) {
         const QVariantMap map = msg.toMap();
         const QString id      = map["id"].toString();
-        bool hasSeq           = false;
-        const quint64 seq     = map["seq"].toULongLong(&hasSeq);
-        auto found            = cache.end();
+        if (map.value(QStringLiteral("kind")).toString() == QStringLiteral("reaction")) {
+            if (!id.isEmpty() && appliedReactions.contains(id)) continue;
+            if (!id.isEmpty()) appliedReactions.insert(id);
+            reactions.append(map);
+            continue;
+        }
+        bool hasSeq       = false;
+        const quint64 seq = map["seq"].toULongLong(&hasSeq);
+        auto found        = cache.end();
         if (!id.isEmpty()) {
             found = std::ranges::find_if(
                 cache, [&id](const QVariant &cached) { return cached.toMap().value("id").toString() == id; });
@@ -836,7 +1106,15 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
             });
         }
         if (found != cache.end()) {
-            *found = msg;
+            QVariantMap updated        = map;
+            const QVariantMap existing = found->toMap();
+            if (existing.contains(QStringLiteral("reaction_events")))
+                updated[QStringLiteral("reaction_events")] = existing.value(QStringLiteral("reaction_events"));
+            if (existing.contains(QStringLiteral("reactions")))
+                updated[QStringLiteral("reactions")] = existing.value(QStringLiteral("reactions"));
+            if (existing.contains(QStringLiteral("reactions_json")))
+                updated[QStringLiteral("reactions_json")] = existing.value(QStringLiteral("reactions_json"));
+            *found = updated;
         } else {
             if (!id.isEmpty()) seen.insert(id);
             cache.append(msg);
@@ -845,7 +1123,8 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
     std::sort(cache.begin(), cache.end(), [](const QVariant &lhs, const QVariant &rhs) {
         return lhs.toMap()["ts"].toLongLong() < rhs.toMap()["ts"].toLongLong();
     });
-    auto session = SessionStore::instance()->activeSession();
+    for (const auto &reaction : reactions)
+        applyReactionToCache(cache, reaction.toMap(), myId, myUsername, peerIdToUsername);
     if (session && !cache.isEmpty()) {
         auto &dialogs = session->dialogs;
         if (const auto found = std::ranges::find_if(dialogs, [&](const Dialog &d) { return d.peer == peer; });
@@ -892,6 +1171,7 @@ QVariantList ChatBackend::parseMessages(const QString &json)
         const QString previewSource = isImageAttachment(kind, mimeType) ? localFileUrlIfReadable(cachePath) : QString();
         msg["id"]                   = obj["id"].toString();
         msg["sender"]               = obj["sender"].toString();
+        msg["status"]               = obj["status"].toString(QStringLiteral("pending"));
         msg["kind"]                 = kind;
         msg["filename"]             = obj["filename"].toString();
         msg["mime_type"]            = mimeType;
@@ -907,12 +1187,19 @@ QVariantList ChatBackend::parseMessages(const QString &json)
             msg["text"] = obj.contains("text") ? obj["text"].toString() : extractText(obj["content"].toString());
         else if (kind == "file" || kind == "image" || kind == "voice")
             msg["text"] = obj["filename"].toString(obj["text"].toString("Файл"));
-        else
-            msg["text"] = QString();
-        msg["ts"]   = obj.value("ts").toVariant().toLongLong();
-        msg["seq"]  = obj.value("seq").toVariant().toULongLong();
-        msg["isMe"] = (obj["sender"].toString() == myId);
-        if (!msg["text"].toString().isEmpty()) result.append(msg);
+        else if (kind == "reaction") {
+            msg["text"]      = obj["text"].toString();
+            msg["emoji"]     = obj["emoji"].toString(obj["text"].toString());
+            msg["target_id"] = obj["target_id"].toString();
+        } else
+            msg["text"] = obj["text"].toString();
+        msg["ts"]                = obj.value("ts").toVariant().toLongLong();
+        msg["seq"]               = obj.value("seq").toVariant().toULongLong();
+        msg["isMe"]              = (obj["sender"].toString() == myId);
+        msg["reactions_json"]    = QStringLiteral("[]");
+        const bool nonVisualKind = kind == QStringLiteral("read_receipt") || kind == QStringLiteral("delete") ||
+                                   kind == QStringLiteral("file_header") || kind == QStringLiteral("file_chunk");
+        if (!nonVisualKind) result.append(msg);
     }
     return result;
 }

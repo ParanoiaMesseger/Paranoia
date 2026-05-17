@@ -11,6 +11,8 @@ pub mod qr_exchange;
 pub mod store;
 pub mod transport;
 pub mod types;
+pub mod voip;
+pub mod voip_ffi;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -59,6 +61,10 @@ impl ParanoiaClient {
 
     pub fn transport(&self) -> Arc<Transport> {
         Arc::clone(&self.transport)
+    }
+
+    pub fn config(&self) -> &ClientConfig {
+        &self.config
     }
 
     pub fn delete_local_dialogue(&self, key: &DialogueKey) -> anyhow::Result<()> {

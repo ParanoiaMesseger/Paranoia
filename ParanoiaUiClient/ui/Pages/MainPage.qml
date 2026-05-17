@@ -35,6 +35,7 @@ Rectangle {
     signal openClearHistory(string peer)
     signal openRegisterUser(string domain)
     signal openAddReserveDomain(string targetType, string targetId, string primaryDomain)
+    signal openVersionInfo()
 
     function reserveDomainsText(domains) {
         if (!domains || domains.length === 0)
@@ -82,6 +83,11 @@ Rectangle {
     Connections {
         target: Chat
         function onDialogsChanged() { dialogsView.model = Backend.getDialogs() }
+    }
+
+    Connections {
+        target: Notifications
+        function onDialogsChanged() { dialogsView.model = Backend.getDialogs(); root.refreshSessions() }
     }
 
     ColumnLayout {
@@ -710,6 +716,13 @@ Rectangle {
                         text:             "Установить свой сервер"
                         secondary:        true
                         onClicked:        root.installNewServer()
+                    }
+
+                    ParaButton {
+                        Layout.fillWidth: true
+                        text:             "Версия приложения"
+                        secondary:        true
+                        onClicked:        root.openVersionInfo()
                     }
                 }
             }

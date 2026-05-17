@@ -431,6 +431,7 @@ fn export_dialogues(
                 keyring.sort_by_key(|entry| entry.start_seq);
                 dialogues.push(ExportDialogue {
                     peer: peer.clone(),
+                    peer_server_id: None,
                     keyring,
                 });
             }
@@ -443,6 +444,7 @@ fn export_dialogues(
             let entry = key_entry_from_hex(1, key_hex)?;
             dialogues.push(ExportDialogue {
                 peer: peer.clone(),
+                peer_server_id: None,
                 keyring: vec![ExportKeyEntry {
                     start_seq: entry.start_seq,
                     key: entry.key,

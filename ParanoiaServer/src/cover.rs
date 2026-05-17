@@ -16,6 +16,14 @@ pub trait Cover: Send + Sync + 'static {
         &self,
         body: &serde_json::Value,
     ) -> anyhow::Result<crate::routes::determinate::DeterminateRequest>;
+    fn unwrap_call_signal(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<crate::routes::call_signal::CallSignalRequest>;
+    fn unwrap_call_poll(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<crate::routes::call_poll::CallPollRequest>;
 
     fn wrap_push_response(&self, resp: &crate::routes::push::ApiResponse) -> serde_json::Value;
     fn wrap_pull_response(&self, resp: &crate::routes::pull::ApiResponse) -> serde_json::Value;
@@ -23,5 +31,13 @@ pub trait Cover: Send + Sync + 'static {
     fn wrap_determinate_response(
         &self,
         resp: &crate::routes::determinate::ApiResponse,
+    ) -> serde_json::Value;
+    fn wrap_call_signal_response(
+        &self,
+        resp: &crate::routes::call_signal::ApiResponse,
+    ) -> serde_json::Value;
+    fn wrap_call_poll_response(
+        &self,
+        resp: &crate::routes::call_poll::ApiResponse,
     ) -> serde_json::Value;
 }

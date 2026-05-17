@@ -9,6 +9,7 @@
     <!-- User-space install: no admin rights required for main installation -->
     <TargetDir>@HomeDir@/AppData/Local/Programs/Paranoia</TargetDir>
     <MaintenanceToolName>ParanoiaMaintenance</MaintenanceToolName>
+    <ControlScript>controlscript.qs</ControlScript>
     <AllowSpaceInPath>true</AllowSpaceInPath>
     <InstallActionColumnVisible>false</InstallActionColumnVisible>
     <RunProgram>@TargetDir@/bin/Paranoia.exe</RunProgram>

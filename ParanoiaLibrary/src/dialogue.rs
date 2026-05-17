@@ -14,7 +14,10 @@ use crate::{
     crypto,
     packet::PacketInner,
     store::LocalStore,
-    transport::{CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket, Transport},
+    transport::{
+        CoreArrivedGet, CoreArrivedSet, CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket,
+        Transport,
+    },
     types::{
         AttachmentKind, CHUNK_SIZE_MAX, CHUNK_SIZE_MIN, ClientConfig, DialogueConfig, DialogueKey,
         FileAttachment, Message, MessageContent, MessageStatus,
@@ -126,6 +129,14 @@ impl Dialogue {
         Ok(())
     }
 
+    pub async fn send_reaction(&self, target_id: &str, emoji: &str) -> Result<Message> {
+        self.send(MessageContent::Reaction {
+            target_id: target_id.to_string(),
+            emoji: emoji.to_string(),
+        })
+        .await
+    }
+
     /// Получить новые сообщения с сервера.
     /// Возвращает (сообщения, кол-во ошибок расшифровки).
     /// Ошибки расшифровки означают несовпадение ключа диалога.
@@ -173,6 +184,10 @@ impl Dialogue {
                             .update_status(&msg_id, MessageStatus::Delivered)?;
                         cursor = next_cursor;
                         self.store.set_last_pulled_seq(&self.key, cursor)?;
+                        // Возвращаем обновлённое сообщение, чтобы UI сразу обновил статус.
+                        if let Some(updated) = self.store.get_message_by_id(&self.key, &msg_id)? {
+                            messages.push(updated);
+                        }
                         continue;
                     }
                 }
@@ -205,6 +220,56 @@ impl Dialogue {
         };
 
         self.transport.notify(&core_notify).await
+    }
+
+    pub async fn refresh_arrived_status(&self) -> Result<usize> {
+        let username = &self.client_cfg.username;
+        if matches!(
+            self.store.latest_outgoing_status(&self.key, username)?,
+            None | Some((_, MessageStatus::Read))
+        ) {
+            return Ok(0);
+        }
+
+        let partner = self.partner();
+        let dialogue_id = crypto::make_dialogue_id(username, partner);
+
+        let msg = format!("arrived:get:{username}:{partner}:{dialogue_id}");
+        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
+        let core = CoreArrivedGet {
+            sender: username.clone(),
+            partner: partner.to_string(),
+            dialogue_id,
+            sig,
+        };
+
+        let response = self.transport.arrived_get(&core).await?;
+        if let Some(partner_last_seq) = response.partner_last_seq {
+            let count =
+                self.store
+                    .mark_outgoing_read_until(&self.key, username, partner_last_seq)?;
+            debug!("Arrived: {count} outgoing messages marked Read up to seq={partner_last_seq}");
+            Ok(count)
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub async fn set_receipts_enabled(&self, receipts_enabled: bool) -> Result<()> {
+        let username = &self.client_cfg.username;
+        let partner = self.partner();
+        let dialogue_id = crypto::make_dialogue_id(username, partner);
+
+        let msg = format!("arrived:put:{username}:{dialogue_id}:{receipts_enabled}");
+        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
+        let core = CoreArrivedSet {
+            sender: username.clone(),
+            dialogue_id,
+            receipts_enabled,
+            sig,
+        };
+
+        self.transport.arrived_set(&core).await
     }
 
     pub async fn history(

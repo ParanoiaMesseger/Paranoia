@@ -26,9 +26,7 @@ QString Dialog::keyringJson() const
 }
 
 QByteArray Dialog::deriveKey(const QString &sharedSecret)
-{
-    return QCryptographicHash::hash(sharedSecret.toUtf8(), QCryptographicHash::Sha256);
-}
+{ return QCryptographicHash::hash(sharedSecret.toUtf8(), QCryptographicHash::Sha256); }
 
 QList<Dialog> Dialog::loadFromPath(const QString &path)
 {
@@ -39,6 +37,7 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
         QString peer         = obj["peer"].toString();
         QString peerServerId = obj["peerServerId"].toString();
         QString lastMsg      = obj["lastMsg"].toString();
+        bool receiptsEnabled = obj["receiptsEnabled"].toBool(true);
         QList<DialogKeyEntry> keyring;
 
         const QJsonArray keyringJson = obj["keyring"].toArray();
@@ -52,14 +51,14 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
 
         std::sort(keyring.begin(), keyring.end(),
                   [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
-        if (!peer.isEmpty() && !keyring.isEmpty()) dialogs.append({peer, peerServerId, keyring, lastMsg});
+        if (!peer.isEmpty()) dialogs.append({peer, peerServerId, keyring, lastMsg, receiptsEnabled});
     }
     return dialogs;
 }
 
 void Dialog::saveToPath(const QString &path, const QList<Dialog> &dialogs)
 {
-    const QString profileId = Paths::profilesRoot.relativeFilePath(QFileInfo(path).dir().path());
+    const QString profileId = Paths::profilesRoot().relativeFilePath(QFileInfo(path).dir().path());
     if (!profileId.isEmpty() && !profileId.startsWith("..")) Paths::ensureProfileDir(profileId);
     QJsonArray arr;
     for (const auto &d : dialogs) {
@@ -74,8 +73,9 @@ void Dialog::saveToPath(const QString &path, const QList<Dialog> &dialogs)
             keyObj["key"]       = QString::fromLatin1(entry.key.toBase64());
             keyring.append(keyObj);
         }
-        o["keyring"] = keyring;
-        o["lastMsg"] = d.lastMsg;
+        o["keyring"]         = keyring;
+        o["lastMsg"]         = d.lastMsg;
+        o["receiptsEnabled"] = d.receiptsEnabled;
         arr.append(QJsonValue(o));
     }
     QFile f(path);

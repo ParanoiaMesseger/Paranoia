@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QObject>
 #include <QQmlEngine>
 #include <QElapsedTimer>
 #include <QFutureWatcher>
@@ -73,8 +72,8 @@ private:
     QMetaObject::Connection m_videoFrameConnection;
     QFutureWatcher<QString> m_decodeWatcher;
     QElapsedTimer m_decodeTimer;
-    bool m_decodeInFlight = false;
-    quint64 m_scanSessionId = 0;
+    bool m_decodeInFlight            = false;
+    quint64 m_scanSessionId          = 0;
     quint64 m_pendingDecodeSessionId = 0;
 #endif
 };

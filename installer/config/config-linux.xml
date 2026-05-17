@@ -7,6 +7,7 @@
     <Publisher>Paranoia</Publisher>
     <TargetDir>@HomeDir@/Paranoia</TargetDir>
     <MaintenanceToolName>ParanoiaMaintenance</MaintenanceToolName>
+    <ControlScript>controlscript.qs</ControlScript>
     <AllowSpaceInPath>true</AllowSpaceInPath>
     <InstallActionColumnVisible>false</InstallActionColumnVisible>
     <RunProgram>@TargetDir@/bin/Paranoia</RunProgram>

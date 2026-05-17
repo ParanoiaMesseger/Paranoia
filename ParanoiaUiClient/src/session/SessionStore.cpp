@@ -26,7 +26,7 @@ std::shared_ptr<ServerSession> SessionStore::sessionForProfile(const QString &pr
     return nullptr;
 }
 
-std::shared_ptr<ServerSession> SessionStore::addSession(std::unique_ptr<ParanoiaFFI> ffi, const QString &server,
+std::shared_ptr<ServerSession> SessionStore::addSession(std::shared_ptr<ParanoiaFFI> ffi, const QString &server,
                                                         const QString &username, const QString &serverId,
                                                         const QString &privateKey, const QString &profileId,
                                                         const QStringList &reserveServerUrls)

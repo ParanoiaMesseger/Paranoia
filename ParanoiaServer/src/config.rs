@@ -10,6 +10,21 @@ pub struct Config {
     pub admin_key: String, // base64 Ed25519 pubkey (32 bytes)
     #[serde(default)]
     pub users: HashMap<String, String>, // username -> base64 pubkey
+    /// UDP-адрес для встроенного STUN-сервера (формат `ip:port`). Если
+    /// `null`/отсутствует — STUN-листенер не запускается. По умолчанию
+    /// `0.0.0.0:3478` (стандартный STUN-порт).
+    #[serde(default = "default_stun_bind")]
+    pub stun_bind: Option<String>,
+    /// Публичный IP, который TURN отдаёт в XOR-RELAYED-ADDRESS. Нужен, если
+    /// `stun_bind` слушает `0.0.0.0`; если не задан, сервер отдаёт локальный
+    /// адрес relay-сокета, а клиент попробует заменить unspecified IP хостом
+    /// TURN-сервера.
+    #[serde(default)]
+    pub turn_public_ip: Option<String>,
+}
+
+fn default_stun_bind() -> Option<String> {
+    Some("0.0.0.0:3478".to_string())
 }
 
 impl Config {
@@ -63,6 +78,8 @@ impl Default for Config {
             store_path: "store".into(),
             admin_key: String::new(),
             users: HashMap::new(),
+            stun_bind: default_stun_bind(),
+            turn_public_ip: None,
         }
     }
 }

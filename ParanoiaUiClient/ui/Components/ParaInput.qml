@@ -17,6 +17,9 @@ Column {
     property int pasteButtonWidth: 28
     property int pasteButtonHeight: 20
     property int lineCount: 1
+    property bool predictiveText: false
+    property int inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoAutoUppercase | (predictiveText ? 0 : Qt.ImhNoPredictiveText)
+    property bool showPasteButton: true
 
     onTextChanged: {
         if (field.text !== root.text) field.text = root.text
@@ -90,7 +93,7 @@ Column {
                 font.family: Theme.fontFamily
                 placeholderText: root.placeholder
                 placeholderTextColor: Theme.textHint
-                inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+                inputMethodHints: root.inputMethodHints
                 background: null
                 selectionColor: Theme.accentDark
                 selectedTextColor: Theme.textPrimary
@@ -130,7 +133,7 @@ Column {
                 font.family: Theme.fontFamily
                 placeholderText: root.placeholder
                 placeholderTextColor: Theme.textHint
-                inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+                inputMethodHints: root.inputMethodHints
                 wrapMode: TextEdit.Wrap
                 background: null
                 selectionColor: Theme.accentDark
@@ -162,10 +165,11 @@ Column {
 
             // Кнопка вставки с 3D-анимацией
             Item {
-                implicitWidth: root.pasteButtonWidth
-                implicitHeight: root.pasteButtonHeight
-                width: root.pasteButtonWidth
-                height: root.pasteButtonHeight
+                visible: root.showPasteButton
+                implicitWidth: root.showPasteButton ? root.pasteButtonWidth : 0
+                implicitHeight: root.showPasteButton ? root.pasteButtonHeight : 0
+                Layout.preferredWidth: implicitWidth
+                Layout.preferredHeight: implicitHeight
                 Layout.alignment: Qt.AlignTop
 
                 // --- Состояния анимации ---
@@ -233,7 +237,7 @@ Column {
                         ctx.fill()
                         ctx.stroke()
 
-                        ctx.fillStyle = Theme.bgBase
+                        ctx.fillStyle = Theme.bgInput
                         ctx.beginPath()
                         ctx.moveTo(width * 0.38, height * 0.08)
                         ctx.lineTo(width * 0.62, height * 0.08)

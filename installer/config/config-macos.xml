@@ -7,6 +7,7 @@
     <Publisher>Paranoia</Publisher>
     <TargetDir>@ApplicationsDir@/Paranoia</TargetDir>
     <MaintenanceToolName>ParanoiaMaintenance</MaintenanceToolName>
+    <ControlScript>controlscript.qs</ControlScript>
     <AllowSpaceInPath>true</AllowSpaceInPath>
     <InstallActionColumnVisible>false</InstallActionColumnVisible>
     <RunProgram>@TargetDir@/Paranoia.app/Contents/MacOS/Paranoia</RunProgram>

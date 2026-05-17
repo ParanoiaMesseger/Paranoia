@@ -6,6 +6,7 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.DocumentsContract;
@@ -22,8 +23,40 @@ import java.util.ArrayList;
 public final class ParanoiaAndroidUtils {
     private static final String TAG = "ParanoiaAndroidUtils";
     private static final int FILE_PERMISSION_REQUEST = 2027;
+    private static final int MICROPHONE_PERMISSION_REQUEST = 2028;
+    private static final int CAMERA_PERMISSION_REQUEST = 2029;
 
     private ParanoiaAndroidUtils() {}
+
+    /// Перевести audio-стек в режим VoIP-звонка. Без MODE_IN_COMMUNICATION
+    /// AudioManager на Android считает наше приложение медиа-плеером, и при
+    /// одновременном recording (микрофон) приглушает media stream — звук
+    /// QAudioSink становится физически неслышен в динамике.
+    ///
+    /// Speakerphone=true гарантирует, что вывод идёт через громкий динамик,
+    /// а не «телефонную трубку» (earpiece). Для нашего use-case (видеозвонок
+    /// с экрана) это правильный выбор.
+    ///
+    /// При `enable=false` возвращаем NORMAL — чтобы после звонка системные
+    /// звуки/музыка снова шли как ожидается.
+    public static void setVoiceCallMode(Context context, boolean enable, boolean speakerphone) {
+        if (context == null) return;
+        try {
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return;
+            if (enable) {
+                am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+                am.setSpeakerphoneOn(speakerphone);
+                Log.i(TAG, "voice call mode ON, speakerphone=" + speakerphone);
+            } else {
+                am.setMode(AudioManager.MODE_NORMAL);
+                am.setSpeakerphoneOn(false);
+                Log.i(TAG, "voice call mode OFF");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "setVoiceCallMode failed: " + e.getMessage());
+        }
+    }
 
     public static void requestFileAccessIfNeeded(Context context) {
         if (!(context instanceof Activity) || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
@@ -44,6 +77,32 @@ public final class ParanoiaAndroidUtils {
         }
         if (!permissions.isEmpty()) {
             activity.requestPermissions(permissions.toArray(new String[0]), FILE_PERMISSION_REQUEST);
+        }
+    }
+
+    public static void requestMicrophonePermission(Context context) {
+        if (!(context instanceof Activity) || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        Activity activity = (Activity) context;
+        if (activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(
+                new String[]{Manifest.permission.RECORD_AUDIO},
+                MICROPHONE_PERMISSION_REQUEST);
+        }
+    }
+
+    public static void requestCameraPermission(Context context) {
+        if (!(context instanceof Activity) || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        Activity activity = (Activity) context;
+        if (activity.checkSelfPermission(Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(
+                new String[]{Manifest.permission.CAMERA},
+                CAMERA_PERMISSION_REQUEST);
         }
     }
 

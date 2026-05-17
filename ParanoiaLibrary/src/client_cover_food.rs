@@ -1,6 +1,9 @@
 use crate::client_cover::ClientCover;
 use crate::crypto::{decode_b64, encode_b64};
-use crate::transport::{CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket};
+use crate::transport::{
+    CallEnvelopeIn, CoreCallPoll, CoreCallSignal, CoreDeterminate, CoreNotify, CorePull, CorePush,
+    RawPacket,
+};
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -117,5 +120,62 @@ impl ClientCover for FoodDeliveryClientCover {
 
     fn unwrap_determinate_response(&self, body: &Value) -> Result<()> {
         check_ok(body, "Determinate")
+    }
+
+    fn wrap_call_signal(&self, core: &CoreCallSignal) -> Result<Value> {
+        Ok(json!({
+            "operation": "dispatchCourier",
+            "courierId": core.sender,
+            "targetId": core.recver,
+            "stage": core.kind,
+            "issuedAt": core.ts_ms,
+            "manifest": encode_b64(&core.payload),
+            "auth": encode_b64(&core.sig),
+        }))
+    }
+
+    fn wrap_call_poll(&self, core: &CoreCallPoll) -> Result<Value> {
+        Ok(json!({
+            "operation": "pollDispatch",
+            "courierId": core.user,
+            "nonce": core.nonce,
+            "waitMs": core.long_poll_ms,
+            "auth": encode_b64(&core.sig),
+        }))
+    }
+
+    fn unwrap_call_signal_response(&self, body: &Value) -> Result<()> {
+        check_ok(body, "CallSignal")
+    }
+
+    fn unwrap_call_poll_response(&self, body: &Value) -> Result<Vec<CallEnvelopeIn>> {
+        check_ok(body, "CallPoll")?;
+        let arr = body["tasks"]
+            .as_array()
+            .ok_or_else(|| anyhow!("CallPoll: expected 'tasks' array"))?;
+        arr.iter()
+            .map(|item| {
+                Ok(CallEnvelopeIn {
+                    sender: item["from"]
+                        .as_str()
+                        .ok_or_else(|| anyhow!("CallPoll: missing from"))?
+                        .to_string(),
+                    kind: u8::try_from(
+                        item["stage"]
+                            .as_u64()
+                            .ok_or_else(|| anyhow!("CallPoll: missing stage"))?,
+                    )
+                    .map_err(|_| anyhow!("CallPoll: stage out of range"))?,
+                    payload: decode_b64(
+                        item["manifest"]
+                            .as_str()
+                            .ok_or_else(|| anyhow!("CallPoll: missing manifest"))?,
+                    )?,
+                    ts_ms: item["issuedAt"]
+                        .as_i64()
+                        .ok_or_else(|| anyhow!("CallPoll: missing issuedAt"))?,
+                })
+            })
+            .collect()
     }
 }

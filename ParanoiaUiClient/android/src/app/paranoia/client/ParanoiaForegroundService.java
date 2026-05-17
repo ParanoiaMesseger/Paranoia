@@ -2,76 +2,131 @@ package app.paranoia.client;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
 import android.os.Build;
-import android.os.Handler;
 import android.os.IBinder;
-import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.json.JSONTokener;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class ParanoiaForegroundService extends Service {
     private static final String CHANNEL_ID = "paranoia_polling";
     private static final String MESSAGE_CHANNEL_ID = "paranoia_messages";
     private static final String EXTRA_OPEN_PROFILE_ID = "app.paranoia.client.OPEN_PROFILE_ID";
     private static final String EXTRA_OPEN_PEER = "app.paranoia.client.OPEN_PEER";
+    private static final String ACTION_START = "app.paranoia.client.START_NOTIFICATION_SERVICE";
+    private static final String ACTION_SET_APP_FOREGROUND = "app.paranoia.client.SET_APP_FOREGROUND";
+    private static final String ACTION_POLL_NOW = "app.paranoia.client.POLL_NOW";
+    private static final String EXTRA_APP_FOREGROUND = "app.paranoia.client.APP_FOREGROUND";
+    private static final int POLL_ALARM_REQUEST = 2027;
+    private static final String PREFS = "paranoia_notifications";
+    private static final String PREF_APP_DATA_ROOT = "app_data_root";
+    private static final String PREF_APP_FOREGROUND = "app_foreground";
+    private static final String PREF_SERVICE_REQUESTED = "service_requested";
+    private static final String PREF_OPEN_PROFILE_ID = "open_profile_id";
+    private static final String PREF_OPEN_PEER = "open_peer";
     private static final String TAG = "ParanoiaService";
     private static final int FOREGROUND_NOTIFICATION_ID = 1001;
     private static final int MESSAGE_NOTIFICATION_ID = 1002;
     private static final long POLL_INTERVAL_MS = 60_000L;
+    // Если poll не завершился за это время — считаем его зависшим (несмотря на
+    // 60s request-timeout в Rust) и разрешаем стартовать новый. Зависший поток
+    // утечёт, но cached pool не даст ему заблокировать следующие опросы.
+    private static final long POLL_HARD_TIMEOUT_MS = 120_000L;
+
+    private static final ExecutorService POLL_EXECUTOR = Executors.newCachedThreadPool();
+    // Время старта текущего poll'а (мс), 0 = poll не идёт. Раньше тут был
+    // AtomicBoolean — но один зависший сетевой вызов оставлял его в true
+    // навсегда, и сервис переставал опрашивать совсем.
+    private static final AtomicLong pollStartedAtMs = new AtomicLong(0L);
     private static volatile boolean started = false;
+    private static volatile boolean appForeground = false;
+    private static volatile boolean nativeLibraryLoaded = false;
+    private static volatile boolean nativeLibraryLoadAttempted = false;
+    private static volatile boolean paranoiaInitialized = false;
 
-    private static volatile boolean nativeLibraryWarningLogged = false;
-
-    private final Handler pollHandler = new Handler(Looper.getMainLooper());
-    private final Runnable pollRunnable = new Runnable() {
-        @Override
-        public void run() {
-            Log.i(TAG, "poll tick: calling native callback");
-            try {
-                triggerBackgroundPollNative();
-            } catch (UnsatisfiedLinkError ignored) {
-                if (!nativeLibraryWarningLogged) {
-                    nativeLibraryWarningLogged = true;
-                    Log.i(TAG, "poll tick: native library is not loaded");
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "Background poll callback failed", t);
-            }
-            pollHandler.postDelayed(this, POLL_INTERVAL_MS);
-        }
-    };
-
-    private static native void triggerBackgroundPollNative();
+    // ── JNI (libParanoiaService_<abi>.so) ─────────────────────────────────
+    // Тонкая обёртка над paranoia_lib без Qt — см. android/jni/paranoia_service_jni.c.
+    private static native boolean paranoiaInit(Context context);
+    private static native long paranoiaClientNew(String serverUrl, String reserveUrlsJson, String serverId,
+                                                 String privateKeyB64, String dbPath);
+    private static native void paranoiaClientFree(long handle);
+    private static native long paranoiaNotifyCount(long handle, String userA, String userB, String keyringJson);
+    private static native String paranoiaLastError();
 
     public static void initialize(Context context) {
+        initialize(context, "");
+    }
+
+    public static void initialize(Context context, String appDataRoot) {
         ensureChannels(context);
         requestPostNotificationsIfNeeded(context);
+        if (appDataRoot != null && !appDataRoot.isEmpty()) {
+            prefs(context).edit().putString(PREF_APP_DATA_ROOT, appDataRoot).commit();
+        }
+    }
+
+    public static void setApplicationForeground(Context context, boolean foreground) {
+        appForeground = foreground;
+        prefs(context).edit().putBoolean(PREF_APP_FOREGROUND, foreground).commit();
+        if (foreground) {
+            cancelMessageNotification(context);
+        }
+        if (serviceRequested(context)) {
+            Intent intent = new Intent(context, ParanoiaForegroundService.class);
+            intent.setAction(ACTION_SET_APP_FOREGROUND);
+            intent.putExtra(EXTRA_APP_FOREGROUND, foreground);
+            try {
+                startServiceCompat(context, intent);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Cannot send foreground state to service", e);
+            }
+        }
     }
 
     public static void start(Context context) {
         Log.i(TAG, "start requested");
         ensureChannels(context);
         requestPostNotificationsIfNeeded(context);
-        if (started) {
-            return;
-        }
         Intent intent = new Intent(context, ParanoiaForegroundService.class);
+        intent.setAction(ACTION_START);
+        intent.putExtra(EXTRA_APP_FOREGROUND, isApplicationForeground(context));
         try {
             started = true;
+            prefs(context).edit().putBoolean(PREF_SERVICE_REQUESTED, true).commit();
             Log.i(TAG, "startForegroundService requested");
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent);
-            } else {
-                context.startService(intent);
-            }
+            startServiceCompat(context, intent);
         } catch (RuntimeException e) {
             started = false;
             Log.w(TAG, "Cannot start foreground service", e);
@@ -80,12 +135,18 @@ public final class ParanoiaForegroundService extends Service {
 
     public static void stop(Context context) {
         started = false;
+        prefs(context).edit().putBoolean(PREF_SERVICE_REQUESTED, false).commit();
         context.stopService(new Intent(context, ParanoiaForegroundService.class));
     }
 
     public static void showNewMessages(Context context, long count, String profileId, String peer) {
         Log.i(TAG, "showNewMessages requested: count=" + count);
         if (count <= 0) {
+            cancelMessageNotification(context);
+            return;
+        }
+        if (isApplicationForeground(context)) {
+            Log.i(TAG, "showNewMessages skipped: application is foreground");
             return;
         }
         requestPostNotificationsIfNeeded(context);
@@ -115,7 +176,14 @@ public final class ParanoiaForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Log.i(TAG, "onStartCommand");
+        final String action = intent != null ? intent.getAction() : null;
+        Log.i(TAG, "onStartCommand action=" + action);
+        if (intent != null && intent.hasExtra(EXTRA_APP_FOREGROUND)) {
+            appForeground = intent.getBooleanExtra(EXTRA_APP_FOREGROUND, appForeground);
+            prefs(this).edit().putBoolean(PREF_APP_FOREGROUND, appForeground).commit();
+        } else {
+            appForeground = isApplicationForeground(this);
+        }
         ensureChannels(this);
         Notification notification = buildForegroundNotification();
         try {
@@ -126,22 +194,31 @@ public final class ParanoiaForegroundService extends Service {
             }
             Log.i(TAG, "entered foreground");
             started = true;
-            startPollLoop();
+            triggerPollAndReschedule();
         } catch (RuntimeException e) {
             started = false;
             Log.w(TAG, "Cannot enter foreground", e);
             stopSelf();
             return START_NOT_STICKY;
         }
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        stopPollLoop();
+        cancelPollAlarm(this);
         started = false;
         stopForeground(true);
         super.onDestroy();
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        Log.i(TAG, "task removed: keep notification service running");
+        appForeground = false;
+        prefs(this).edit().putBoolean(PREF_APP_FOREGROUND, false).commit();
+        triggerPollAndReschedule();
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
@@ -160,14 +237,460 @@ public final class ParanoiaForegroundService extends Service {
         return buildNotification(builder);
     }
 
-    private void startPollLoop() {
-        pollHandler.removeCallbacks(pollRunnable);
-        Log.i(TAG, "poll loop scheduled: intervalMs=" + POLL_INTERVAL_MS);
-        pollHandler.postDelayed(pollRunnable, POLL_INTERVAL_MS);
+    private void triggerPollAndReschedule() {
+        runAutonomousPoll();
+        schedulePollAlarm(this, POLL_INTERVAL_MS);
     }
 
-    private void stopPollLoop() {
-        pollHandler.removeCallbacks(pollRunnable);
+    // ── Wake-locked polling через AlarmManager ───────────────────────────
+    // Handler.postDelayed на main looper'е сервиса замерзает, когда устройство
+    // уходит в Doze/light idle (на Transsion + старших Android'ах FGS не
+    // освобождает от этого). AlarmManager + BroadcastReceiver гарантирует, что
+    // система разбудит процесс и доставит PendingIntent даже из глубокого сна.
+    //
+    // Используем именно BroadcastReceiver, а не PendingIntent.getForegroundService:
+    // OEM-агрессивные battery saver'ы (Transsion Hiber, MIUI) часто блокируют
+    // запуск FGS из background даже для уже-запущенного сервиса, тогда как
+    // broadcast'ы с RTC_WAKEUP проходят через эти ограничения и временно
+    // снимают app standby. Получатель сам подтягивает CPU через wake lock и
+    // делегирует работу POLL_EXECUTOR'у.
+    private static PendingIntent pollAlarmIntent(Context context) {
+        Intent intent = new Intent(context, PollAlarmReceiver.class);
+        intent.setAction(ACTION_POLL_NOW);
+        intent.setPackage(context.getPackageName());
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
+        return PendingIntent.getBroadcast(context, POLL_ALARM_REQUEST, intent, flags);
+    }
+
+    public static final class PollAlarmReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            final Context appContext = context.getApplicationContext();
+            Log.i(TAG, "alarm received, dispatching poll");
+            // Сразу планируем следующий alarm, чтобы цикл не сломался, если
+            // текущий poll зависнет в сети или native-вызове.
+            schedulePollAlarm(appContext, POLL_INTERVAL_MS);
+
+            PowerManager pm = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
+            final PowerManager.WakeLock wakeLock = pm == null ? null
+                    : pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "paranoia:poll");
+            if (wakeLock != null) {
+                wakeLock.setReferenceCounted(false);
+                // Потолок чуть выше Rust request-timeout (60s) — на штатном
+                // завершении release в finally отпустит раньше.
+                wakeLock.acquire(75_000L);
+            }
+
+            if (!tryBeginPoll()) {
+                if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+                return;
+            }
+            // НЕ используем goAsync() / PendingResult: у broadcast-receiver жёсткий
+            // ~10-сек ANR-timeout даже в async-режиме, а notify_count в холодном
+            // service-процессе делает DNS + TLS handshake — легко выпадает за этот
+            // лимит. Процесс держит живым foreground-service, CPU — wake lock.
+            POLL_EXECUTOR.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        processPollResult(appContext, pollNotifications(appContext));
+                    } finally {
+                        endPoll();
+                        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+                    }
+                }
+            });
+        }
+    }
+
+    // Разрешает старт нового poll'а, если предыдущего нет либо он висит дольше
+    // POLL_HARD_TIMEOUT_MS (считаем мёртвым). Возвращает true, если право на
+    // poll получено.
+    private static boolean tryBeginPoll() {
+        final long now = System.currentTimeMillis();
+        while (true) {
+            final long started = pollStartedAtMs.get();
+            if (started != 0L && now - started < POLL_HARD_TIMEOUT_MS) {
+                return false;
+            }
+            if (pollStartedAtMs.compareAndSet(started, now)) {
+                if (started != 0L) {
+                    Log.w(TAG, "previous poll exceeded hard timeout; starting a fresh one");
+                }
+                return true;
+            }
+        }
+    }
+
+    private static void endPoll() {
+        pollStartedAtMs.set(0L);
+    }
+
+    private static void schedulePollAlarm(Context context, long delayMs) {
+        AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        if (manager == null) {
+            Log.w(TAG, "AlarmManager unavailable; cannot schedule next poll");
+            return;
+        }
+        long when = System.currentTimeMillis() + Math.max(1000L, delayMs);
+        PendingIntent pi = pollAlarmIntent(context);
+        try {
+            // Без exact-alarm'а app standby bucket откладывает срабатывание на минуты —
+            // см. dumpsys alarm: policyWhenElapsed app_standby=-2m48s. Exact-alarm
+            // обходит этот лимит, остаётся только doze (его покрывает …AllowWhileIdle).
+            boolean useExact = true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                useExact = manager.canScheduleExactAlarms();
+            }
+            if (useExact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
+                Log.i(TAG, "next poll scheduled in " + delayMs + "ms (exact, allow while idle)");
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
+                Log.i(TAG, "next poll scheduled in " + delayMs + "ms (inexact, allow while idle; exact not granted)");
+            } else {
+                manager.setExact(AlarmManager.RTC_WAKEUP, when, pi);
+                Log.i(TAG, "next poll scheduled in " + delayMs + "ms (legacy exact)");
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot schedule poll alarm", e);
+        }
+    }
+
+    private static void cancelPollAlarm(Context context) {
+        AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        if (manager == null) return;
+        try {
+            manager.cancel(pollAlarmIntent(context));
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot cancel poll alarm", e);
+        }
+    }
+
+    private void runAutonomousPoll() {
+        if (!tryBeginPoll()) {
+            return;
+        }
+        final Context appContext = getApplicationContext();
+        POLL_EXECUTOR.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    processPollResult(appContext, pollNotifications(appContext));
+                } finally {
+                    endPoll();
+                }
+            }
+        });
+    }
+
+    private static void processPollResult(Context context, PollResult result) {
+        if (!result.hasTargets) {
+            Log.i(TAG, "poll finished: no targets, stopping service");
+            stop(context);
+            return;
+        }
+        if (result.total > 0) {
+            showNewMessages(context, result.total, result.profileId, result.peer);
+        } else if (result.anySuccess) {
+            cancelMessageNotification(context);
+        }
+    }
+
+    // ── Опрос notify_count ──────────────────────────────────────────────
+    // Идём по всем профилям, для каждого открываем ParanoiaHandle и спрашиваем
+    // у сервера notify_count по каждому диалогу с usable keyring'ом. На
+    // отсутствие сети/profile'ов отвечаем "целей нет" — runAutonomousPoll
+    // тогда остановит сервис.
+    private static PollResult pollNotifications(Context context) {
+        if (isApplicationForeground(context)) {
+            Log.i(TAG, "poll skipped: application is foreground");
+            return PollResult.withTargets(false);
+        }
+        if (!networkAvailable(context)) {
+            Log.i(TAG, "poll skipped: no network");
+            return PollResult.withTargets(false);
+        }
+        if (!loadNativeLibrary()) {
+            return PollResult.withTargets(false);
+        }
+        if (!ensureParanoiaInitialized(context)) {
+            return PollResult.withTargets(false);
+        }
+
+        File root = appDataRoot(context);
+        File profilesDir = new File(root, "profiles");
+        PollResult result = new PollResult();
+
+        for (String profileId : profileIdsForRoot(root)) {
+            File profileDir = new File(profilesDir, profileId);
+            JSONObject client = readJsonObject(new File(profileDir, "client.json"));
+            String server = normalizeServerUrl(client.optString("server"));
+            String serverId = client.optString("server_id").trim();
+            String privateKey = client.optString("private_key").trim();
+            if (server.isEmpty() || serverId.isEmpty() || privateKey.isEmpty()) continue;
+
+            JSONArray dialogs = readJsonArray(new File(profileDir, "dialogs.json"));
+            if (dialogs.length() == 0) continue;
+
+            String reserveUrlsJson = buildReserveUrlsJson(client.optJSONArray("reserve_server_urls"), server);
+            String dbPath = new File(profileDir, "paranoia.db").getAbsolutePath();
+
+            long handle = paranoiaClientNew(server, reserveUrlsJson, serverId, privateKey, dbPath);
+            if (handle == 0) {
+                Log.w(TAG, "paranoia_client_new failed for profile=" + profileId + ": " + paranoiaLastError());
+                result.hasTargets = true;
+                continue;
+            }
+
+            try {
+                for (int i = 0; i < dialogs.length(); i++) {
+                    JSONObject dialog = dialogs.optJSONObject(i);
+                    if (dialog == null) continue;
+                    String peer = dialog.optString("peer");
+                    String peerServerId = dialog.optString("peerServerId").trim();
+                    JSONArray keyring = dialog.optJSONArray("keyring");
+                    if (peer.isEmpty() || peerServerId.isEmpty() || !hasUsableKeyring(keyring)) continue;
+
+                    result.hasTargets = true;
+                    long count = paranoiaNotifyCount(handle, serverId, peerServerId, keyring.toString());
+                    if (count < 0) {
+                        Log.w(TAG, "notify_count failed for profile=" + profileId + " peer=" + peer + ": "
+                                + paranoiaLastError());
+                        continue;
+                    }
+
+                    result.anySuccess = true;
+                    if (count == 0) continue;
+
+                    result.total += count;
+                    result.pendingPeers++;
+                    if (result.pendingPeers == 1) {
+                        result.profileId = profileId;
+                        result.peer = peer;
+                    } else {
+                        result.profileId = "";
+                        result.peer = "";
+                    }
+                }
+            } finally {
+                paranoiaClientFree(handle);
+            }
+        }
+        Log.i(TAG, "native notify poll finished: hasTargets=" + result.hasTargets
+                + " total=" + result.total + " pendingPeers=" + result.pendingPeers);
+        return result;
+    }
+
+    private static boolean ensureParanoiaInitialized(Context context) {
+        if (paranoiaInitialized) return true;
+        synchronized (ParanoiaForegroundService.class) {
+            if (paranoiaInitialized) return true;
+            if (!paranoiaInit(context.getApplicationContext())) {
+                Log.w(TAG, "paranoia_android_init failed: " + paranoiaLastError());
+                return false;
+            }
+            paranoiaInitialized = true;
+        }
+        return true;
+    }
+
+    private static boolean loadNativeLibrary() {
+        if (nativeLibraryLoaded) {
+            return true;
+        }
+        synchronized (ParanoiaForegroundService.class) {
+            if (nativeLibraryLoaded) {
+                return true;
+            }
+            if (nativeLibraryLoadAttempted) {
+                return false;
+            }
+            nativeLibraryLoadAttempted = true;
+            // Грузим маленькую .so без Qt-зависимостей. Перебираем supported
+            // ABIs для совместимости с multi-arch APK; первое имя, которое
+            // System.loadLibrary разрулит, — наше.
+            List<String> names = new ArrayList<>();
+            for (String abi : Build.SUPPORTED_ABIS) {
+                if (abi != null && !abi.isEmpty()) {
+                    names.add("ParanoiaService_" + abi);
+                }
+            }
+            names.add("ParanoiaService");
+            for (String name : names) {
+                try {
+                    System.loadLibrary(name);
+                    nativeLibraryLoaded = true;
+                    Log.i(TAG, "loaded native library: " + name);
+                    return true;
+                } catch (UnsatisfiedLinkError e) {
+                    Log.i(TAG, "cannot load native library " + name + ": " + e.getMessage());
+                }
+            }
+            Log.w(TAG, "ParanoiaService native library is not available for background polling");
+            return false;
+        }
+    }
+
+    private static File appDataRoot(Context context) {
+        String configured = prefs(context).getString(PREF_APP_DATA_ROOT, "");
+        if (configured != null && !configured.isEmpty()) {
+            return new File(configured);
+        }
+        File filesDir = context.getFilesDir();
+        File[] candidates = new File[] {
+                filesDir,
+                new File(filesDir, "ParanoiaUiClient"),
+                new File(filesDir, "Paranoia/ParanoiaUiClient"),
+                new File(filesDir, ".local/share/Paranoia/ParanoiaUiClient")
+        };
+        for (File candidate : candidates) {
+            if (new File(candidate, "profiles.json").isFile() || new File(candidate, "profiles").isDirectory()) {
+                return candidate;
+            }
+        }
+        return filesDir;
+    }
+
+    // ── JSON / профили ──────────────────────────────────────────────────
+    private static List<String> profileIdsForRoot(File root) {
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        JSONObject manifest = readJsonObject(new File(root, "profiles.json"));
+        JSONArray profiles = manifest.optJSONArray("profiles");
+        if (profiles != null) {
+            for (int i = 0; i < profiles.length(); i++) {
+                JSONObject entry = profiles.optJSONObject(i);
+                if (entry == null) continue;
+                addProfileId(ids, entry.optString("id"));
+            }
+        }
+        addProfileId(ids, manifest.optString("last_profile_id"));
+
+        File profilesDir = new File(root, "profiles");
+        File[] children = profilesDir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                if (child.isDirectory()) addProfileId(ids, child.getName());
+            }
+        }
+        return new ArrayList<>(ids);
+    }
+
+    private static void addProfileId(LinkedHashSet<String> ids, String id) {
+        if (id == null) return;
+        String trimmed = id.trim();
+        if (!trimmed.isEmpty()) ids.add(trimmed);
+    }
+
+    private static boolean hasUsableKeyring(JSONArray keyring) {
+        if (keyring == null) return false;
+        for (int i = 0; i < keyring.length(); i++) {
+            JSONObject entry = keyring.optJSONObject(i);
+            if (entry == null) continue;
+            long startSeq = readSeq(entry.opt("start_seq"));
+            String key = entry.optString("key");
+            if (startSeq > 0 && key != null && !key.isEmpty()) return true;
+        }
+        return false;
+    }
+
+    private static long readSeq(Object value) {
+        if (value == null) return 0;
+        try {
+            if (value instanceof Number) return ((Number) value).longValue();
+            String s = value.toString().trim();
+            if (s.isEmpty()) return 0;
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private static String normalizeServerUrl(String server) {
+        if (server == null) return "";
+        String url = server.trim();
+        if (url.isEmpty()) return "";
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            url = "https://" + url;
+        }
+        while (url.endsWith("/") && !url.endsWith("://")) {
+            url = url.substring(0, url.length() - 1);
+        }
+        return url;
+    }
+
+    private static String buildReserveUrlsJson(JSONArray rawReserveUrls, String primaryUrl) {
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        JSONArray out = new JSONArray();
+        if (rawReserveUrls != null) {
+            for (int i = 0; i < rawReserveUrls.length(); i++) {
+                String normalized = normalizeServerUrl(rawReserveUrls.optString(i));
+                if (normalized.isEmpty() || normalized.equals(primaryUrl) || !seen.add(normalized)) continue;
+                out.put(normalized);
+            }
+        }
+        return out.toString();
+    }
+
+    private static JSONObject readJsonObject(File file) {
+        Object value = readJsonValue(file);
+        return (value instanceof JSONObject) ? (JSONObject) value : new JSONObject();
+    }
+
+    private static JSONArray readJsonArray(File file) {
+        Object value = readJsonValue(file);
+        return (value instanceof JSONArray) ? (JSONArray) value : new JSONArray();
+    }
+
+    private static Object readJsonValue(File file) {
+        if (file == null || !file.isFile()) return null;
+        try (InputStream is = new FileInputStream(file)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = is.read(buffer)) != -1) out.write(buffer, 0, read);
+            String text = out.toString("UTF-8");
+            if (text.isEmpty()) return null;
+            return new JSONTokener(text).nextValue();
+        } catch (IOException | org.json.JSONException e) {
+            Log.w(TAG, "cannot read JSON file " + file + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static boolean networkAvailable(Context context) {
+        ConnectivityManager manager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (manager == null) {
+            return true;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Network network = manager.getActiveNetwork();
+            if (network == null) {
+                return false;
+            }
+            NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
+            return capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        }
+        NetworkInfo info = manager.getActiveNetworkInfo();
+        return info != null && info.isConnected();
+    }
+
+    private static void startServiceCompat(Context context, Intent intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent);
+        } else {
+            context.startService(intent);
+        }
+    }
+
+    private static boolean isApplicationForeground(Context context) {
+        appForeground = prefs(context).getBoolean(PREF_APP_FOREGROUND, appForeground);
+        return appForeground;
+    }
+
+    private static boolean serviceRequested(Context context) {
+        return prefs(context).getBoolean(PREF_SERVICE_REQUESTED, false);
     }
 
     private static Notification.Builder notificationBuilder(Context context, String channelId) {
@@ -208,16 +731,18 @@ public final class ParanoiaForegroundService extends Service {
         manager.createNotificationChannel(messages);
     }
 
+    // Уведомление открывает QtActivity напрямую — тем же интентом, что и иконка
+    // лаунчера (ACTION_MAIN + CATEGORY_LAUNCHER + NEW_TASK). Никакого activity-
+    // trampoline'а: отдельная LaunchActivity роняла QtActivity в собственную
+    // task, а Qt — singleton на процесс и второй QtActivity-инстанс приводил к
+    // зависанию. EXTRA_OPEN_* кладём в интент: при холодном старте QtActivity
+    // их видно через getIntent() (см. takeOpenTarget).
     private static PendingIntent openAppIntent(Context context, int requestCode, String profileId, String peer) {
-        Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-        if (launchIntent == null) {
-            launchIntent = new Intent();
-        }
-        launchIntent.setAction(Intent.ACTION_MAIN);
+        Intent launchIntent = new Intent(Intent.ACTION_MAIN);
         launchIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+        launchIntent.setClassName(context, "app.paranoia.client.ParanoiaActivity");
         launchIntent.setPackage(context.getPackageName());
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP |
-                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         if (profileId != null && !profileId.isEmpty()) {
             launchIntent.putExtra(EXTRA_OPEN_PROFILE_ID, profileId);
         }
@@ -232,21 +757,27 @@ public final class ParanoiaForegroundService extends Service {
     }
 
     public static String takeOpenTarget(Context context) {
-        if (!(context instanceof Activity)) {
-            return "";
+        String profileId = "";
+        String peer = "";
+        if (context instanceof Activity) {
+            Intent intent = ((Activity) context).getIntent();
+            if (intent != null) {
+                profileId = valueOrEmpty(intent.getStringExtra(EXTRA_OPEN_PROFILE_ID));
+                peer = valueOrEmpty(intent.getStringExtra(EXTRA_OPEN_PEER));
+                intent.removeExtra(EXTRA_OPEN_PROFILE_ID);
+                intent.removeExtra(EXTRA_OPEN_PEER);
+            }
         }
-        Intent intent = ((Activity) context).getIntent();
-        if (intent == null) {
-            return "";
+        if (peer.isEmpty()) {
+            SharedPreferences prefs = prefs(context);
+            profileId = prefs.getString(PREF_OPEN_PROFILE_ID, "");
+            peer = prefs.getString(PREF_OPEN_PEER, "");
+            prefs.edit().remove(PREF_OPEN_PROFILE_ID).remove(PREF_OPEN_PEER).apply();
         }
-        String profileId = intent.getStringExtra(EXTRA_OPEN_PROFILE_ID);
-        String peer = intent.getStringExtra(EXTRA_OPEN_PEER);
-        intent.removeExtra(EXTRA_OPEN_PROFILE_ID);
-        intent.removeExtra(EXTRA_OPEN_PEER);
         if (peer == null || peer.isEmpty()) {
             return "";
         }
-        return (profileId == null ? "" : profileId) + "\n" + peer;
+        return valueOrEmpty(profileId) + "\n" + peer;
     }
 
     public static String takeOpenPeer(Context context) {
@@ -271,5 +802,36 @@ public final class ParanoiaForegroundService extends Service {
             return true;
         }
         return context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static void cancelMessageNotification(Context context) {
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) {
+            manager.cancel(MESSAGE_NOTIFICATION_ID);
+        }
+    }
+
+    private static SharedPreferences prefs(Context context) {
+        return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    }
+
+    private static String valueOrEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static final class PollResult {
+        boolean hasTargets;
+        boolean anySuccess;
+        long total;
+        int pendingPeers;
+        String profileId = "";
+        String peer = "";
+
+        static PollResult withTargets(boolean anySuccess) {
+            PollResult result = new PollResult();
+            result.hasTargets = true;
+            result.anySuccess = anySuccess;
+            return result;
+        }
     }
 }

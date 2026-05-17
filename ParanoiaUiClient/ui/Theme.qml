@@ -30,6 +30,9 @@ QtObject {
     readonly property color textPrimary:   darkMode ? "#F7E8EA" : "#231209"
     readonly property color textSecondary: darkMode ? "#aa636c" : "#7A4A38"
     readonly property color textHint:      darkMode ? "#56323A" : "#B08570"
+    readonly property color messageMetaOutgoing: darkMode ? "#F0C8CE" : "#F7E8EA"
+    readonly property color messageMetaIncoming: darkMode ? "#C8929A" : "#6B4639"
+    readonly property color controlText: darkMode ? "#F2D8DD" : "#3D2217"
 
     // ── Accent ───────────────────────────────────────────
     readonly property color accent:      "#C91122"

@@ -4,14 +4,13 @@
   <desc id="desc">Animated symbol-only mark for the private messenger Paranoia with pulse, signal tear, jitter, corruption burst, split, and digital collapse motion hooks.</desc>
 
   <style><![CDATA[
-    .panel { fill: #08070a; }
+    .panel { fill: none; }
     .void { fill: #050406; }
     .red-deep { fill: #650710; }
     .red-dark { fill: #8f0b16; }
     .red-main { fill: #c91122; }
     .red-hot { fill: #ff2738; }
     .red-dim { fill: #4a060c; }
-
   ]]></style>
 
   <rect id="symbol-only-app-field" class="panel" width="320" height="320" rx="54"/>
