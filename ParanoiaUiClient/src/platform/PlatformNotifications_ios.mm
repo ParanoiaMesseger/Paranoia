@@ -7,10 +7,37 @@
 
 extern "C" void paranoia_platform_trigger_background_poll();
 
+@interface ParanoiaIosNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
+@end
+
+@implementation ParanoiaIosNotificationDelegate
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler
+{
+    (void)center;
+    (void)notification;
+    if (@available(iOS 14.0, *)) {
+        completionHandler(UNNotificationPresentationOptionBanner |
+                          UNNotificationPresentationOptionList |
+                          UNNotificationPresentationOptionSound);
+    } else {
+        completionHandler(UNNotificationPresentationOptionAlert |
+                          UNNotificationPresentationOptionSound);
+    }
+}
+@end
+
 namespace
 {
     NSString *const kPollingTaskIdentifier = @"com.paranoia.polling";
     NSString *const kWarningShownKey = @"paranoia.ios.background_warning_shown";
+
+    ParanoiaIosNotificationDelegate *notificationDelegate()
+    {
+        static ParanoiaIosNotificationDelegate *delegate = [ParanoiaIosNotificationDelegate new];
+        return delegate;
+    }
 
     bool supportsContinuedProcessing()
     {
@@ -47,11 +74,12 @@ namespace
         if (supportsContinuedProcessing()) return;
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         if ([defaults boolForKey:kWarningShownKey]) return;
-        [defaults setBool:YES forKey:kWarningShownKey];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             UIViewController *controller = topViewController();
             if (controller == nil) return;
+
+            [defaults setBool:YES forKey:kWarningShownKey];
 
             UIAlertController *alert = [UIAlertController
                 alertControllerWithTitle:@"Фоновые уведомления недоступны"
@@ -121,9 +149,26 @@ namespace
         Class requestClass = NSClassFromString(@"BGContinuedProcessingTaskRequest");
         if (requestClass == Nil) return;
 
-        id request = ((id (*)(id, SEL, NSString *))objc_msgSend)([requestClass alloc],
-                                                                  NSSelectorFromString(@"initWithIdentifier:"),
-                                                                  kPollingTaskIdentifier);
+        id allocatedRequest = [requestClass alloc];
+        id request = nil;
+        SEL visibleInitSelector = NSSelectorFromString(@"initWithIdentifier:title:subtitle:");
+        if ([allocatedRequest respondsToSelector:visibleInitSelector]) {
+            request = ((id (*)(id, SEL, NSString *, NSString *, NSString *))objc_msgSend)(
+                allocatedRequest,
+                visibleInitSelector,
+                kPollingTaskIdentifier,
+                @"Paranoia",
+                @"Проверка новых сообщений");
+        } else {
+            SEL legacyInitSelector = NSSelectorFromString(@"initWithIdentifier:");
+            if (![allocatedRequest respondsToSelector:legacyInitSelector]) {
+                NSLog(@"Paranoia: BGContinuedProcessingTaskRequest has no supported initializer");
+                return;
+            }
+            request = ((id (*)(id, SEL, NSString *))objc_msgSend)(allocatedRequest,
+                                                                   legacyInitSelector,
+                                                                   kPollingTaskIdentifier);
+        }
         if (request == nil) return;
 
         NSDate *earliest = [NSDate dateWithTimeIntervalSinceNow:10 + arc4random_uniform(231)];
@@ -155,10 +200,11 @@ namespace
 
     void requestLocalNotificationPermission()
     {
-        UNAuthorizationOptions options = UNAuthorizationOptionAlert | UNAuthorizationOptionSound;
+        UNUserNotificationCenter.currentNotificationCenter.delegate = notificationDelegate();
+        UNAuthorizationOptions options = UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge;
         [UNUserNotificationCenter.currentNotificationCenter requestAuthorizationWithOptions:options
-                                                                          completionHandler:^(__unused BOOL granted,
-                                                                                              __unused NSError *error) {}];
+                                                                           completionHandler:^(__unused BOOL granted,
+                                                                                               __unused NSError *error) {}];
     }
 }
 
@@ -186,11 +232,10 @@ extern "C" void paranoia_ios_show_message_count(unsigned long long count)
     content.title = @"Paranoia";
     content.body = [NSString stringWithFormat:@"Новых сообщений: %llu", count];
     content.sound = UNNotificationSound.defaultSound;
+    content.badge = @(count > NSIntegerMax ? NSIntegerMax : (NSInteger)count);
 
-    UNTimeIntervalNotificationTrigger *trigger = [UNTimeIntervalNotificationTrigger triggerWithTimeInterval:1
-                                                                                                    repeats:NO];
     UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:@"paranoia.new_messages"
-                                                                          content:content
-                                                                          trigger:trigger];
+                                                                           content:content
+                                                                           trigger:nil];
     [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
 }

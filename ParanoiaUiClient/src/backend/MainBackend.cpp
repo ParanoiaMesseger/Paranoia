@@ -16,13 +16,12 @@
 #include <QJsonParseError>
 #include <QGuiApplication>
 #include <QNetworkInformation>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QMutexLocker>
 #include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QThreadPool>
+#include <QtConcurrent>
+#include <QElapsedTimer>
 #include <QPointer>
 #include <QDebug>
 #include <QDir>
@@ -307,9 +306,9 @@ QVariantList MainBackend::getReserveDomains(const QString &targetType, const QSt
         QString primaryUrl    = obj.value("server").toString();
         if (primaryUrl.isEmpty() && session) primaryUrl = session->server;
         if (primaryUrl.isEmpty()) primaryUrl = primaryDomain;
-        urls = reserveUrlsFromObject(obj, primaryUrl);
-        if (session) urls.append(session->reserveServerUrls);
-        urls = Utils::normalizedServerUrls(urls, primaryUrl);
+        // Disk is authoritative: add/remove writes the new list via saveClientConfigForProfile
+        // synchronously before any signal fires, so the session's cached list can be stale.
+        urls = Utils::normalizedServerUrls(reserveUrlsFromObject(obj, primaryUrl), primaryUrl);
     } else {
         const QString primaryUrl = Utils::normalizedServerUrl(primaryDomain.isEmpty() ? targetId : primaryDomain);
         const auto found =
@@ -497,67 +496,51 @@ void MainBackend::checkReserveDomain(const QString &targetType, const QString &t
 {
     const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
     if (reserveUrl.isEmpty()) {
-        emit reserveDomainCheckFinished(targetType, targetId, reserveUrl, false, "Укажите резервный домен.");
+        emit reserveDomainCheckFinished(targetType, targetId, reserveUrl, false, "Укажите резервный домен.", -1);
         return;
     }
-
-    const QUrl notifyUrl(reserveUrl + QStringLiteral("/notify"));
-    if (!notifyUrl.isValid()) {
-        emit reserveDomainCheckFinished(targetType, targetId, reserveUrl, false, "Некорректный URL /notify.");
-        return;
-    }
-
-    auto *manager = new QNetworkAccessManager(this);
-    QNetworkRequest request(notifyUrl);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    request.setTransferTimeout(10'000);
-
-    const QByteArray body =
-        R"({"operation":"checkOrders","clientId":"availability-check","partnerId":"availability-check","cursor":0,"auth":""})";
-    auto *reply = manager->put(request, body);
-    reply->setProperty("paranoiaTimedOut", false);
-
-    auto *timer = new QTimer(reply);
-    timer->setSingleShot(true);
-    connect(timer, &QTimer::timeout, reply, [reply]() {
-        reply->setProperty("paranoiaTimedOut", true);
-        reply->abort();
-    });
-    timer->start(10'000);
 
     const QString normalizedTargetId =
         targetType == "client" ? targetId
                                : Utils::normalizedServerUrl(primaryDomain.isEmpty() ? targetId : primaryDomain);
-    connect(reply, &QNetworkReply::finished, this,
-            [this, reply, manager, timer, targetType, normalizedTargetId, reserveUrl]() {
-                timer->stop();
-                bool ok = false;
-                QString msg;
-                const bool timedOut = reply->property("paranoiaTimedOut").toBool();
-                if (timedOut) {
-                    msg = "Таймаут при обращении к /notify.";
-                } else if (reply->error() != QNetworkReply::NoError) {
-                    msg = "Ошибка /notify: " + reply->errorString();
-                } else {
-                    const int status              = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                    const QByteArray responseBody = reply->readAll();
-                    QJsonParseError parseError;
-                    const QJsonDocument doc = QJsonDocument::fromJson(responseBody, &parseError);
-                    if (status >= 200 && status < 300 && parseError.error == QJsonParseError::NoError &&
-                        doc.isObject()) {
-                        ok  = true;
-                        msg = "Endpoint /notify доступен.";
-                    } else if (status >= 200 && status < 300) {
-                        msg = "Endpoint /notify ответил невалидным JSON.";
-                    } else {
-                        msg = QStringLiteral("Endpoint /notify вернул HTTP %1.").arg(status);
-                    }
-                }
 
-                emit reserveDomainCheckFinished(targetType, normalizedTargetId, reserveUrl, ok, msg);
-                reply->deleteLater();
-                manager->deleteLater();
-            });
+    QPointer<MainBackend> self(this);
+    QThreadPool::globalInstance()->start([self, targetType, normalizedTargetId, reserveUrl]() {
+        QElapsedTimer timer;
+        timer.start();
+        const QString resultJson = ParanoiaFFI::check_reserve_url(reserveUrl);
+        const qint64 pingMs = timer.elapsed();
+
+        bool ok = false;
+        QString msg;
+        if (resultJson.isEmpty()) {
+            const QString err = ParanoiaFFI::last_error();
+            msg = err.isEmpty() ? QStringLiteral("Ошибка FFI") : QStringLiteral("Ошибка FFI: ") + err;
+        } else {
+            QJsonParseError parseError;
+            const auto doc = QJsonDocument::fromJson(resultJson.toUtf8(), &parseError);
+            if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+                msg = QStringLiteral("Невалидный ответ FFI");
+            } else {
+                const auto obj = doc.object();
+                ok = obj.value("ok").toBool();
+                if (ok) {
+                    msg = QStringLiteral("Endpoint /notify доступен.");
+                } else {
+                    const QString errText = obj.value("error").toString();
+                    msg = errText.isEmpty() ? QStringLiteral("Endpoint недоступен") : errText;
+                }
+            }
+        }
+
+        QMetaObject::invokeMethod(
+            self.data(),
+            [self, targetType, normalizedTargetId, reserveUrl, ok, msg, pingMs]() {
+                if (self)
+                    emit self->reserveDomainCheckFinished(targetType, normalizedTargetId, reserveUrl, ok, msg, pingMs);
+            },
+            Qt::QueuedConnection);
+    });
 }
 
 // ── Dialogs Management ────────────────────────────────────────────────────────

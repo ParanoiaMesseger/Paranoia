@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.4 LANGUAGES CXX)
+project(ParanoiaUiClient VERSION 0.2.5 LANGUAGES CXX)
 
 set(PARANOIA_APP_VERSION "${PROJECT_VERSION}")
 math(EXPR PARANOIA_ANDROID_VERSION_CODE
@@ -24,6 +24,8 @@ set(PARANOIA_REQUIRES_QT_VIRTUAL_KEYBOARD OFF)
 set(PARANOIA_REQUIRES_QT_MULTIMEDIA OFF)
 if(ANDROID OR IOS)
     set(PARANOIA_REQUIRES_QT_VIRTUAL_KEYBOARD ON)
+    set(PARANOIA_REQUIRES_QT_MULTIMEDIA ON)
+elseif(APPLE)
     set(PARANOIA_REQUIRES_QT_MULTIMEDIA ON)
 endif()
 if(PARANOIA_REQUIRES_QT_MULTIMEDIA)
@@ -121,6 +123,8 @@ qt_add_qml_module(Paranoia
     ui/Main.qml
     ui/Theme.qml
     ui/Components/ParaButton.qml
+    ui/Components/RefreshIconButton.qml
+    ui/Components/CheckMark.qml
     ui/Components/CopyablePublicKeyBlock.qml
     ui/Components/ParaHeader.qml
     ui/Components/ParaInput.qml
@@ -177,6 +181,15 @@ if(IOS)
         "-framework BackgroundTasks"
         "-framework UserNotifications"
         "-framework UIKit"
+    )
+elseif(APPLE)
+    target_sources(Paranoia PRIVATE src/platform/PlatformNotifications_macos.mm)
+    set_source_files_properties(src/platform/PlatformNotifications_macos.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    set_target_properties(Paranoia PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macos/Info.plist.in"
+    )
+    target_link_libraries(Paranoia PRIVATE
+        "-framework UserNotifications"
     )
 endif()
 
@@ -251,6 +264,16 @@ endif()
 
 if(TARGET Qt6::Multimedia)
     target_link_libraries(Paranoia PRIVATE Qt6::Multimedia)
+endif()
+
+if(IOS)
+    # На iOS используется native Darwin/AVFoundation backend для камеры.
+    # Ограничиваем multimedia plugins одним darwin-плагином — это исключает
+    # Qt6::QFFmpegMediaPlugin (и его impl), который тянет неразрешённые
+    # FFmpeg/VideoToolbox символы.
+    qt_import_plugins(Paranoia
+        INCLUDE_BY_TYPE multimedia Qt6::QDarwinMediaPlugin
+    )
 endif()
 
 if(WIN32 OR (UNIX AND NOT APPLE AND NOT ANDROID))

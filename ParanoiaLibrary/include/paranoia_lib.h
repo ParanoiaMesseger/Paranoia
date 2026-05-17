@@ -28,6 +28,13 @@ void paranoia_client_free(ParanoiaHandle *h);
 // Возвращает NULL при ошибке. Освободить через paranoia_free_string.
 char *paranoia_derive_server_id(CSTR signing_key_b64);
 
+// ── Проверка резервного URL
+// Выполняет PUT /notify через transport (rustls + cover-обёртка) и возвращает
+// JSON {"ok": true} или {"ok": false, "error": "..."}.
+// url — базовый URL сервера, БЕЗ хвостового /notify (путь добавит Transport).
+// NULL только при ошибке инициализации/панике. Освободить через paranoia_free_string.
+char *paranoia_check_reserve_url(CSTR url);
+
 // ── Admin
 void paranoia_generate_keypair(char **out_secret, char **out_pubkey);
 

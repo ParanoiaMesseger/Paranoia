@@ -70,32 +70,50 @@ Rectangle {
             }
 
             Rectangle {
+                id: copyBtn
                 implicitWidth: root.copyButtonWidth
                 implicitHeight: root.copyButtonHeight
                 width: root.copyButtonWidth
                 height: root.copyButtonHeight
                 radius: Theme.radiusSm
-                color: copyArea.containsMouse && root.keyText.length > 0 ? Theme.bgButton : "transparent"
+                color: "transparent"
                 opacity: root.keyText.length > 0 ? 1 : 0.5
 
+                property bool copied: false
+                property bool showCheck: false
+
                 Canvas {
+                    id: copyCanvas
                     anchors.centerIn: parent
                     width: 20
                     height: 20
                     antialiasing: true
 
                     property bool hovered: copyArea.containsMouse
+
                     onHoveredChanged: requestPaint()
+                    visible: !copyBtn.showCheck
+
+                    transform: Rotation {
+                        id: copyIconRotation
+                        origin.x: copyCanvas.width / 2
+                        origin.y: copyCanvas.height / 2
+                        axis { x: 0; y: 1; z: 0 }
+                        angle: 0
+                    }
 
                     onPaint: {
                         const ctx = getContext("2d");
                         ctx.clearRect(0, 0, width, height);
+
                         ctx.lineWidth = 1.5;
                         ctx.lineJoin = "round";
+                        ctx.lineCap = "round";
 
-                        // --- Задний лист (смещён вправо-вниз) ---
                         ctx.strokeStyle = Theme.accentHover;
                         ctx.fillStyle = hovered ? Theme.bgButton : "transparent";
+
+                        // Задний лист
                         ctx.beginPath();
                         ctx.moveTo(width * 0.36, height * 0.28);
                         ctx.lineTo(width * 0.72, height * 0.28);
@@ -105,16 +123,14 @@ Rectangle {
                         ctx.closePath();
                         ctx.fill();
                         ctx.stroke();
-                        // загнутый уголок заднего листа
                         ctx.beginPath();
                         ctx.moveTo(width * 0.72, height * 0.28);
                         ctx.lineTo(width * 0.72, height * 0.44);
                         ctx.lineTo(width * 0.86, height * 0.44);
                         ctx.stroke();
 
-                        // --- Передний лист (смещён влево-вверх) ---
-                        ctx.strokeStyle = Theme.accentHover;
-                        ctx.fillStyle = Theme.bgBase;   // фон мессенджера — перекрывает задний лист
+                        // Передний лист
+                        ctx.fillStyle = Theme.bgBase;
                         ctx.beginPath();
                         ctx.moveTo(width * 0.14, height * 0.08);
                         ctx.lineTo(width * 0.58, height * 0.08);
@@ -124,13 +140,88 @@ Rectangle {
                         ctx.closePath();
                         ctx.fill();
                         ctx.stroke();
-                        // загнутый уголок переднего листа
                         ctx.beginPath();
                         ctx.moveTo(width * 0.58, height * 0.08);
                         ctx.lineTo(width * 0.58, height * 0.24);
                         ctx.lineTo(width * 0.72, height * 0.24);
                         ctx.stroke();
                     }
+                }
+
+                CheckMark {
+                    id: copyCheckIcon
+                    anchors.centerIn: parent
+                    width: 20
+                    height: 20
+                    visible: copyBtn.showCheck
+                }
+
+                // Анимация: первый полуоборот (иконка копирования уходит)
+                SequentialAnimation {
+                    id: forwardRotation
+
+                    NumberAnimation {
+                        target: copyIconRotation
+                        property: "angle"
+                        from: 0
+                        to: 90
+                        duration: 150
+                        easing.type: Easing.InCubic
+                    }
+                    ScriptAction {
+                        script: {
+                            copyBtn.showCheck = true;
+                            copyCheckIcon.rotY = -90;
+                            resetTimer.start();
+                        }
+                    }
+                    NumberAnimation {
+                        target: copyCheckIcon
+                        property: "rotY"
+                        from: -90
+                        to: 0
+                        duration: 150
+                        easing.type: Easing.OutCubic
+                    }
+                }
+
+                // Анимация: возврат к иконке копирования
+                SequentialAnimation {
+                    id: returnRotation
+
+                    NumberAnimation {
+                        target: copyCheckIcon
+                        property: "rotY"
+                        from: 0
+                        to: 90
+                        duration: 150
+                        easing.type: Easing.InCubic
+                    }
+                    ScriptAction {
+                        script: {
+                            copyBtn.showCheck = false;
+                            copyIconRotation.angle = -90;
+                        }
+                    }
+                    NumberAnimation {
+                        target: copyIconRotation
+                        property: "angle"
+                        from: -90
+                        to: 0
+                        duration: 150
+                        easing.type: Easing.OutCubic
+                    }
+                    onStopped: {
+                        copyBtn.copied = false;
+                        copyCanvas.requestPaint();
+                    }
+                }
+
+                // Пауза перед обратным полуоборотом
+                Timer {
+                    id: resetTimer
+                    interval: 1200
+                    onTriggered: returnRotation.start()
                 }
 
                 MouseArea {
@@ -140,11 +231,16 @@ Rectangle {
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
+                        if (copyBtn.copied) return;
+
                         const toCopy = root.copyText.length > 0 ? root.copyText : root.keyText;
                         copyHelper.text = toCopy;
                         copyHelper.selectAll();
                         copyHelper.copy();
                         root.copied(toCopy);
+
+                        copyBtn.copied = true;
+                        forwardRotation.start();
                     }
                 }
             }

@@ -3,7 +3,7 @@ function Component() {}
 Component.prototype.createOperations = function() {
     component.createOperations();
 
-    if (systemInfo.productType !== "windows") {
+    if (systemInfo.kernelType === "linux") {
         component.addOperation("Mkdir", "@HomeDir@/.local/bin");
         component.addOperation(
             "CreateLink",

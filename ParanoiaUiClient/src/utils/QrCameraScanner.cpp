@@ -2,6 +2,7 @@
 
 #include <QDebug>
 #include <QImage>
+#include <QPointer>
 #include <QtConcurrent>
 #include <QVariant>
 
@@ -47,6 +48,14 @@ void QrCameraScanner::setActive(bool active)
 bool QrCameraScanner::supported() const
 {
 #if PARANOIA_HAS_QT_MULTIMEDIA
+#if QT_CONFIG(permissions)
+    QCameraPermission permission;
+    const auto status = qApp->checkPermission(permission);
+    if (status == Qt::PermissionStatus::Denied) return false;
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS) || defined(Q_OS_MACOS)
+    if (status == Qt::PermissionStatus::Undetermined) return true;
+#endif
+#endif
     return !QMediaDevices::videoInputs().isEmpty();
 #else
     return false;
@@ -82,32 +91,37 @@ void QrCameraScanner::setVideoOutput(QObject *videoOutput)
 void QrCameraScanner::start()
 {
 #if PARANOIA_HAS_QT_MULTIMEDIA
-    if (!supported()) {
-        setError("Камера не найдена или недоступна.");
-        return;
-    }
-
 #if QT_CONFIG(permissions)
     QCameraPermission permission;
     const auto status = qApp->checkPermission(permission);
     if (status == Qt::PermissionStatus::Undetermined) {
-        qApp->requestPermission(permission, this, [this](const QPermission &permission) {
-            if (permission.status() == Qt::PermissionStatus::Granted)
-                start();
-            else
-                setError("Нет доступа к камере.");
+        const QPointer<QrCameraScanner> self(this);
+        qApp->requestPermission(permission, this, [self](const QPermission &permission) {
+            if (!self) return;
+            emit self->supportedChanged();
+            if (permission.status() == Qt::PermissionStatus::Granted) {
+                self->start();
+            } else {
+                self->setError("Нет доступа к камере.");
+            }
         });
         return;
     }
     if (status == Qt::PermissionStatus::Denied) {
+        emit supportedChanged();
         setError("Нет доступа к камере.");
         return;
     }
 #endif
 
+    if (!supported()) {
+        setError("Камера не найдена или недоступна.");
+        return;
+    }
+
     ensureCamera();
     if (!m_camera) {
-        setError("Не удалось инициализировать камеру.");
+        setError("Камера не найдена или недоступна.");
         return;
     }
     clearError();

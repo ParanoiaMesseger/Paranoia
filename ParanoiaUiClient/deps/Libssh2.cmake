@@ -16,12 +16,21 @@ function(setup_libssh2 TARGET)
     if(WIN32)
         set(_crypto_backend "WinCNG")
         message(STATUS "[libssh2] Crypto backend: WinCNG (system)")
-    elseif(IOS OR ANDROID)
+    elseif(IOS)
         set(_crypto_backend "mbedTLS")
         message(STATUS "[libssh2] Crypto backend: mbedTLS (fetched)")
         _fetch_mbedtls()
-        # libssh2 uses its own FindMbedTLS.cmake (find_library style), not cmake targets.
-        # Point it at the FetchContent build tree so find_package(MbedTLS) succeeds.
+        # libssh2 uses its own FindMbedTLS.cmake. Use the fetched CMake targets here so
+        # multi-config generators like Xcode resolve Release-iphoneos archive paths correctly.
+        FetchContent_GetProperties(mbedtls)
+        set(MBEDTLS_INCLUDE_DIR "${mbedtls_SOURCE_DIR}/include" CACHE PATH "" FORCE)
+        set(MBEDCRYPTO_LIBRARY mbedcrypto CACHE STRING "" FORCE)
+    elseif(ANDROID)
+        set(_crypto_backend "mbedTLS")
+        message(STATUS "[libssh2] Crypto backend: mbedTLS (fetched)")
+        _fetch_mbedtls()
+        # Android uses the single-config Ninja generator, so keep the resolved archive paths
+        # that were already working for the Android CI job.
         FetchContent_GetProperties(mbedtls)
         set(MBEDTLS_INCLUDE_DIR "${mbedtls_SOURCE_DIR}/include"                 CACHE PATH     "" FORCE)
         set(MBEDCRYPTO_LIBRARY  "${mbedtls_BINARY_DIR}/library/libmbedcrypto.a" CACHE FILEPATH "" FORCE)
@@ -30,15 +39,19 @@ function(setup_libssh2 TARGET)
     else()
         # Linux / macOS
         set(_crypto_backend "OpenSSL")
+        set(OPENSSL_USE_STATIC_LIBS TRUE)
         set(OPENSSL_USE_STATIC_LIBS TRUE PARENT_SCOPE)
-        find_package(OpenSSL REQUIRED)
-        if(APPLE)
-            # Homebrew OpenSSL не в системных путях
-            if(NOT OPENSSL_FOUND)
-                set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
-                find_package(OpenSSL REQUIRED)
-            endif()
+        if(APPLE AND NOT OPENSSL_ROOT_DIR)
+            foreach(_openssl_prefix IN ITEMS
+                    "/opt/homebrew/opt/openssl@3"
+                    "/usr/local/opt/openssl@3")
+                if(EXISTS "${_openssl_prefix}/include/openssl/ssl.h")
+                    set(OPENSSL_ROOT_DIR "${_openssl_prefix}" CACHE PATH "OpenSSL root" FORCE)
+                    break()
+                endif()
+            endforeach()
         endif()
+        find_package(OpenSSL REQUIRED)
         message(STATUS "[libssh2] Crypto backend: OpenSSL ${OPENSSL_VERSION}")
     endif()
     message(STATUS "[libssh2] Will FetchContent_Declare")
@@ -49,6 +62,8 @@ function(setup_libssh2 TARGET)
         GIT_SHALLOW    TRUE
     )
     set(BUILD_SHARED_LIBS          OFF CACHE BOOL "" FORCE)
+    set(BUILD_STATIC_LIBS          ON CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES             OFF CACHE BOOL "" FORCE)
     set(BUILD_TESTING              OFF CACHE BOOL "" FORCE)
     set(LIBSSH2_BUILD_TESTS        OFF CACHE BOOL "" FORCE)
     set(LIBSSH2_BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
@@ -57,9 +72,23 @@ function(setup_libssh2 TARGET)
     set(CRYPTO_BACKEND "${_crypto_backend}" CACHE STRING "" FORCE)
     message(STATUS "[libssh2] Will FetchContent_MakeAvailable")
     FetchContent_MakeAvailable(libssh2)
+    if(IOS)
+        # Keep libssh2's generated export files independent from fetched mbedTLS targets.
+        # The application links mbedTLS explicitly below, preserving correct Xcode config paths.
+        foreach(_libssh2_property IN ITEMS INTERFACE_LINK_LIBRARIES LINK_LIBRARIES)
+            get_target_property(_libssh2_libraries libssh2_static ${_libssh2_property})
+            if(_libssh2_libraries)
+                foreach(_libssh2_mbedtls_target IN ITEMS mbedcrypto mbedx509 mbedtls)
+                    list(REMOVE_ITEM _libssh2_libraries
+                        "${_libssh2_mbedtls_target}"
+                        "$<LINK_ONLY:${_libssh2_mbedtls_target}>"
+                    )
+                endforeach()
+                set_property(TARGET libssh2_static PROPERTY ${_libssh2_property} "${_libssh2_libraries}")
+            endif()
+        endforeach()
+    endif()
     if(IOS OR ANDROID)
-        # libssh2_static links against IMPORTED MbedTLS targets (paths only, not cmake targets),
-        # so we must explicitly order the build.
         add_dependencies(libssh2_static mbedcrypto mbedx509 mbedtls)
     endif()
     # -- Линковка к переданному таргету ----------------------------------------
