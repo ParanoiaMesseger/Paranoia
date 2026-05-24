@@ -5,9 +5,15 @@
 /// исходных строк ошибок.
 use paranoia_lib::ffi::{
     paranoia_client_free, paranoia_client_new, paranoia_free_string, paranoia_last_error,
+    paranoia_vault_init, paranoia_vault_lock, paranoia_vault_set_pin,
 };
 use std::ffi::{CStr, CString};
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+// VAULT — process-global singleton; параллельные тесты, инициализирующие его,
+// гоняются последовательно через этот mutex.
+static VAULT_MUTEX: Mutex<()> = Mutex::new(());
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -67,8 +73,25 @@ fn invalid_key_returns_opaque_error_code() {
 
 #[test]
 fn valid_client_creation_succeeds() {
+    let _g = VAULT_MUTEX.lock().unwrap();
     let temp = TempDir::new().expect("tempdir");
     let db = temp.path().join("test.sqlite");
+
+    // SQLCipher тянет db_key из активного vault, поэтому без unlock'а клиент
+    // не создаётся. Инициализируем vault на временной директории и заводим
+    // тестовый PIN — этого достаточно, чтобы local_vault::with_db_key
+    // вернул ключ при открытии БД.
+    paranoia_vault_lock();
+    assert_eq!(
+        paranoia_vault_init(cs(temp.path().to_str().unwrap()).as_ptr()),
+        0,
+        "vault_init must succeed"
+    );
+    assert_eq!(
+        paranoia_vault_set_pin(cs("test-pin-12345").as_ptr()),
+        0,
+        "vault_set_pin must succeed (vault should be empty)"
+    );
 
     let handle = paranoia_client_new(
         cs("http://127.0.0.1:9999").as_ptr(),
@@ -80,6 +103,7 @@ fn valid_client_creation_succeeds() {
 
     assert!(!handle.is_null(), "valid client must succeed");
     paranoia_client_free(handle);
+    paranoia_vault_lock();
 }
 
 // ── Test 3: paranoia_free_string корректно работает с NULL ────────────────────

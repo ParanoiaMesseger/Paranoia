@@ -220,9 +220,13 @@ pub async fn discover_reflexive(
             Err(_) => bail!("STUN timeout"),
             Ok(Err(e)) => bail!("STUN recv error: {e}"),
             Ok(Ok((len, from))) => {
-                if from != server {
-                    continue;
-                }
+                // Не сверяем `from`:
+                // (1) сервера часто отвечают с отдельного binding'а — порт != 3478;
+                // (2) при NAT64 (LTE IPv6-only) запрос идёт на v4-mapped
+                //     64:ff9b::/96, ответ возвращается IPv6-маппингом,
+                //     отличающимся от IPv4 server.
+                // От подмены защищает transaction_id в parse_xor_mapped_address.
+                let _ = from;
                 if let Some(addr) = parse_xor_mapped_address(&buf[..len], &tid) {
                     return Ok(addr);
                 }

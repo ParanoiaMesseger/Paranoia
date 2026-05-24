@@ -1,4 +1,5 @@
 #include "platform/DesktopTray.hpp"
+#include "platform/OrientationLock.hpp"
 #include "utils/Logging.hpp"
 
 #include <QByteArray>
@@ -24,11 +25,13 @@
 #endif
 #include "utils/adminStorage.hpp"
 #include "backend/ChatBackend.hpp"
+#include "backend/EncryptedImageProvider.hpp"
 #include "backend/MainBackend.hpp"
 #include "backend/NotificationCoordinator.hpp"
 #include "backend/VersionInfoBackend.hpp"
 #include "platform/PlatformNotifications.hpp"
 #include "spell/SpellChecker.hpp"
+#include <QPixmapCache>
 
 #if PARANOIA_HAS_VOIP
 #include "voip/VoipSystem.hpp"
@@ -89,7 +92,7 @@ int main(int argc, char *argv[])
         const QByteArray existing = qgetenv("QT_VIRTUALKEYBOARD_HUNSPELL_DATA_PATH");
         if (!existing.isEmpty() && existing != envValue) {
 #if defined(OS_WIN)
-            envValue += envValue + ";" + existing;
+            envValue = envValue + ";" + existing;
 #else
             envValue = envValue + ":" + existing;
 #endif
@@ -99,7 +102,8 @@ int main(int argc, char *argv[])
 #endif
 
     Logging logging;
-    admin::Admin::initAdmins();
+    // admin::Admin::initAdmins() перенесён в MainBackend::onVaultUnlocked():
+    // admins.crypt теперь под vault-шифрованием, требует master_key в RAM.
     PlatformNotifications::registerBackgroundTasks();
     NotificationCoordinator notifications;
     MainBackend backend(notifications);
@@ -119,7 +123,21 @@ int main(int argc, char *argv[])
     QObject::connect(&backend, &MainBackend::dialogRemoved, &chatBackend, &ChatBackend::onDialogRemoved);
     QObject::connect(&backend, &MainBackend::sessionReset, &chatBackend, &ChatBackend::onSessionReset);
 
+    // Глобально отключаем дисковый QPixmapCache: расшифрованные превью идут
+    // через EncryptedImageProvider и не должны попадать в системный кеш.
+    QPixmapCache::setCacheLimit(0);
+
     QQmlApplicationEngine engine;
+    auto *imageProvider = new EncryptedImageProvider();
+    engine.addImageProvider(QStringLiteral("secure"), imageProvider);
+    chatBackend.setImageProvider(imageProvider);
+    // Зануляем кеш плейн-байтов при vault_lock и при выходе приложения.
+    // aboutToQuit срабатывает ДО деструкции engine — imageProvider ещё жив.
+    QObject::connect(&backend, &MainBackend::vaultLocked, &chatBackend,
+                     [imageProvider]() { imageProvider->clear(); });
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     [imageProvider]() { imageProvider->clear(); });
+
     engine.rootContext()->setContextProperty("Backend", &backend);
     engine.rootContext()->setContextProperty("Chat", &chatBackend);
     engine.rootContext()->setContextProperty("Notifications", &notifications);
@@ -129,6 +147,8 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("VoIPAvailable", PARANOIA_HAS_VOIP != 0);
     engine.rootContext()->setContextProperty("VideoAvailable", PARANOIA_HAS_VIDEO != 0);
     engine.rootContext()->setContextProperty("DesktopTrayEnabled", DesktopTray::desktopTrayEnabled());
+    paranoia::platform::OrientationLock orientationLock;
+    engine.rootContext()->setContextProperty("OrientationLock", &orientationLock);
 #if PARANOIA_HAS_VOIP
     paranoia::voip::VoipSystem voipSystem(engine, backend);
 #endif
@@ -140,5 +160,7 @@ int main(int argc, char *argv[])
     DesktopTray desktopTray(engine);
     QObject::connect(&notifications, &NotificationCoordinator::notificationAvailable, &desktopTray,
                      &DesktopTray::notificationAvailable);
+    QObject::connect(&notifications, &NotificationCoordinator::notificationsCleared, &desktopTray,
+                     &DesktopTray::clearAccumulatedNotifications);
     return app.exec();
 }

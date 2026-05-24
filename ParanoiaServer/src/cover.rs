@@ -8,6 +8,10 @@ pub trait Cover: Send + Sync + 'static {
         &self,
         body: &serde_json::Value,
     ) -> anyhow::Result<crate::routes::pull::PullRequest>;
+    fn unwrap_map(
+        &self,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<crate::routes::map::MapRequest>;
     fn unwrap_notify(
         &self,
         body: &serde_json::Value,
@@ -27,6 +31,7 @@ pub trait Cover: Send + Sync + 'static {
 
     fn wrap_push_response(&self, resp: &crate::routes::push::ApiResponse) -> serde_json::Value;
     fn wrap_pull_response(&self, resp: &crate::routes::pull::ApiResponse) -> serde_json::Value;
+    fn wrap_map_response(&self, resp: &crate::routes::map::ApiResponse) -> serde_json::Value;
     fn wrap_notify_response(&self, resp: &crate::routes::notify::ApiResponse) -> serde_json::Value;
     fn wrap_determinate_response(
         &self,

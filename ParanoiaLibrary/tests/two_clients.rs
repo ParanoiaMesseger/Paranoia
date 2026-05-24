@@ -2,7 +2,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::SigningKey;
 use paranoia_lib::{
     AdminKeyPair, ClientConfig, DialogueConfig, DialogueKey, DialogueKeyEntry, MessageContent,
-    ParanoiaClient,
+    ParanoiaClient, local_vault,
 };
 use rand::RngCore;
 use std::{
@@ -10,11 +10,27 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::OnceLock,
     time::Duration,
 };
 use tempfile::TempDir;
 
 static SERVER_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// Vault — глобальный singleton на процесс. ParanoiaClient::new требует
+// Unlocked vault. Инициализируем один раз на весь тестовый бинарь: общий
+// app_data_root в отдельном tempdir и фиксированный PIN. db_path у каждого
+// теста свой, vault-ключ шифрует их всех одинаково.
+static VAULT_ROOT: OnceLock<TempDir> = OnceLock::new();
+
+fn ensure_vault_unlocked() {
+    VAULT_ROOT.get_or_init(|| {
+        let tmp = tempfile::tempdir().expect("vault root tempdir");
+        local_vault::vault::set_app_data_root(tmp.path().to_path_buf());
+        local_vault::set_pin("test-pin").expect("init vault for tests");
+        tmp
+    });
+}
 
 // ── helper: клиент с явным путём к БД ────────────────────────────────────────
 fn build_client_db(
@@ -23,6 +39,7 @@ fn build_client_db(
     username: &str,
     signing_key: SigningKey,
 ) -> ParanoiaClient {
+    ensure_vault_unlocked();
     ParanoiaClient::new(ClientConfig {
         server_url: server_url.to_string(),
         reserve_server_urls: Vec::new(),
@@ -256,7 +273,9 @@ async fn file_header_skips_body_until_explicit_download() {
         other => panic!("expected file in history, got {other:?}"),
     };
     assert!(file.downloaded);
-    assert_eq!(file.data.len(), data.len());
+    // Inline-байты в Message после скачивания намеренно сбрасываются:
+    // plaintext живёт только в целевом пути либо в attachment-cache/<id>.enc.
+    assert!(file.data.is_empty());
 
     server.kill().ok();
     server.wait().ok();
@@ -346,6 +365,7 @@ fn build_client(
     username: &str,
     signing_key: SigningKey,
 ) -> ParanoiaClient {
+    ensure_vault_unlocked();
     ParanoiaClient::new(ClientConfig {
         server_url: server_url.to_string(),
         reserve_server_urls: Vec::new(),
@@ -501,6 +521,81 @@ async fn determinate_clears_server_history() {
         0,
         "server history should be empty after determinate"
     );
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
+#[tokio::test]
+async fn fresh_device_receives_history_after_partial_determinate() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    let alice_key = signing_key();
+    let bob_key = signing_key();
+    let alice_pub = B64.encode(alice_key.verifying_key().to_bytes());
+    let bob_pub = B64.encode(bob_key.verifying_key().to_bytes());
+
+    let alice = build_client(temp.path(), &server_url, "alice", alice_key.clone());
+    let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
+    alice
+        .transport()
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
+        .await
+        .expect("register alice");
+    bob.transport()
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
+        .await
+        .expect("register bob");
+
+    let session_key = [7u8; 32];
+    let alice_dialogue = alice.open_dialogue(dialogue_config("alice", "bob", session_key));
+    alice_dialogue
+        .send_text("deleted one")
+        .await
+        .expect("send 1");
+    alice_dialogue
+        .send_text("deleted two")
+        .await
+        .expect("send 2");
+    alice_dialogue.send_text("remaining").await.expect("send 3");
+    alice_dialogue
+        .clear_server_history(2)
+        .await
+        .expect("partial determinate");
+
+    let fresh_bob_db = temp.path().join("bob_after_partial_delete.sqlite");
+    let fresh_bob = build_client_db(&fresh_bob_db.to_string_lossy(), &server_url, "bob", bob_key);
+    let fresh_dialogue = fresh_bob.open_dialogue(dialogue_config("bob", "alice", session_key));
+
+    let (msgs, errs) = fresh_dialogue
+        .receive()
+        .await
+        .expect("fresh bob receives after deleted prefix");
+    assert_eq!(errs, 0, "decrypt errors unexpected");
+    assert_eq!(msgs.len(), 1);
+    assert!(matches!(&msgs[0].content, MessageContent::Text(text) if text == "remaining"));
+
+    let sent = fresh_dialogue
+        .send_text("reply after gap")
+        .await
+        .expect("fresh bob sends after gap recovery");
+    assert_eq!(sent.server_seq, Some(4));
 
     server.kill().ok();
     server.wait().ok();

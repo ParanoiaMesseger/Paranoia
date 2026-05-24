@@ -8,11 +8,12 @@
 //!   через `paranoia_call_session_stop`.
 
 use std::ffi::{CStr, CString};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -22,10 +23,44 @@ use tokio::runtime::Runtime;
 
 use crate::ParanoiaClient;
 use crate::transport::{CallEnvelopeIn, CoreCallPoll, CoreCallSignal};
-use crate::voip::crypto::{Role, StreamId, StreamKeys};
+use crate::voip::crypto::{Role, StreamKeys};
 use crate::voip::signaling::{CallSignalKind, open as signaling_open, seal as signaling_seal};
 use crate::voip::stun::discover_reflexive;
 use crate::voip::transport::{SessionParams, VideoOutboundPacket, spawn_session};
+
+/// Создать UdpSocket для VoIP сессии. Если `bind_addr` это IPv4-wildcard
+/// (`0.0.0.0:port`), биндим вместо него IPv6 dual-stack (`[::]:port` с
+/// `IPV6_V6ONLY=false`). Тогда сокет:
+///   • слушает на обоих стэках одновременно;
+///   • может слать `send_to` и на IPv4-адреса, и на IPv6 (в т. ч. NAT64-
+///     синтезированные `64:ff9b::/96` маппинги, которые отдаёт DNS64 у мобильных
+///     операторов с IPv6-only сетью).
+/// Без этого LTE-устройства, где `getaddrinfo("paranoia.example.com")` возвращает
+/// только AAAA → `[64:ff9b::5d64:cf97]`, фейлятся с EAFNOSUPPORT на любой
+/// `send_to` через IPv4-сокет — STUN/TURN не запускаются вообще.
+fn bind_call_socket(bind_addr: SocketAddr) -> std::io::Result<UdpSocket> {
+    let need_dualstack = matches!(bind_addr.ip(), IpAddr::V4(v4) if v4.is_unspecified());
+    if !need_dualstack {
+        return std::net::UdpSocket::bind(bind_addr)
+            .and_then(|s| {
+                s.set_nonblocking(true)?;
+                Ok(s)
+            })
+            .and_then(UdpSocket::from_std);
+    }
+    let v6_bind = SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), bind_addr.port());
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    // Главное: разрешить v4-mapped адреса через тот же сокет.
+    sock.set_only_v6(false)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&v6_bind.into())?;
+    let std_sock: std::net::UdpSocket = sock.into();
+    UdpSocket::from_std(std_sock)
+}
 
 // Эти символы определены в `ffi.rs`. Чтобы не дублировать их thread_local
 // хранилище ошибки, дёргаем уже имеющийся `paranoia_last_error`-инфраструктура
@@ -40,6 +75,36 @@ use crate::voip::transport::{SessionParams, VideoOutboundPacket, spawn_session};
 // потому что `voip_ffi` лежит в том же крейте.
 
 use crate::ffi::{set_last_error, string_to_c};
+
+/// Единый Tokio-runtime для всех VoIP-сессий процесса. Раньше каждая сессия
+/// поднимала свой `Runtime::new()`, что давало 4..N worker-потоков на каждый
+/// звонок — расточительно на мобильных. Теперь сессии переиспользуют один
+/// общий runtime, инициализируемый лениво при первом старте сессии и живущий
+/// до выхода процесса. На завершение звонка runtime НЕ дропается, только
+/// останавливается соответствующий task — это убирает блокирующий
+/// `Runtime::drop` (synchronous join всех threads) из `paranoia_call_session_stop`.
+static VOIP_RUNTIME: OnceLock<Arc<tokio::runtime::Runtime>> = OnceLock::new();
+
+fn voip_runtime() -> Option<Arc<tokio::runtime::Runtime>> {
+    // get_or_try_init не стабилизирован в OnceLock; делаем вручную.
+    if let Some(rt) = VOIP_RUNTIME.get() {
+        return Some(Arc::clone(rt));
+    }
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("paranoia-voip")
+        .build()
+    {
+        Ok(r) => Arc::new(r),
+        Err(_) => return None,
+    };
+    // race-friendly: если кто-то параллельно инициализировал, set() вернёт Err,
+    // и мы используем уже сохранённый. Дополнительный `rt` будет дропнут.
+    match VOIP_RUNTIME.set(rt) {
+        Ok(()) => VOIP_RUNTIME.get().cloned(),
+        Err(_) => VOIP_RUNTIME.get().cloned(),
+    }
+}
 
 // ── Хелперы ────────────────────────────────────────────────────────────
 
@@ -208,6 +273,144 @@ pub extern "C" fn paranoia_call_signal_send(
     })
 }
 
+/// Тип callback'а для async-варианта `paranoia_call_signal_send`.
+/// `status == 0` — успех, `status != 0` — ошибка; `error_message` валиден
+/// только во время вызова, после возврата указатель использовать нельзя
+/// (caller обязан скопировать строку при необходимости). Callback вызывается
+/// из фонового tokio-потока — caller обязан переключиться на свой поток сам.
+pub type ParanoiaCallSignalCb =
+    extern "C" fn(userdata: *mut std::ffi::c_void, status: i32, error_message: *const c_char);
+
+/// Асинхронный вариант [`paranoia_call_signal_send`]: сразу возвращает
+/// управление, фактическая HTTP-отправка выполняется в tokio-runtime, по
+/// завершении вызывается `cb(userdata, status, err_msg)`.
+///
+/// Параметры идентичны синхронному варианту, добавлены только `cb` и `userdata`.
+/// `cb` может быть NULL — тогда результат отправки никому не сообщается
+/// (fire-and-forget).
+///
+/// Возвращает 0 если задача поставлена в очередь, -1 если входы невалидны
+/// (например, handle null) или произошёл panic при подготовке.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_call_signal_send_async(
+    handle: *mut crate::ffi::ParanoiaHandle,
+    from_user: *const c_char,
+    to_user: *const c_char,
+    master_key_b64: *const c_char,
+    kind: u8,
+    payload_json: *const c_char,
+    cb: Option<ParanoiaCallSignalCb>,
+    userdata: *mut std::ffi::c_void,
+) -> i32 {
+    // Захват входов в данные, которые можно безопасно перенести в задачу.
+    // ParanoiaHandle, к сожалению, нельзя просто переместить — handle живёт у
+    // вызывающего. Поэтому работаем по сырому указателю, но только пока он
+    // валиден; вызывающий обязан не освобождать handle до завершения cb.
+    let userdata_addr = userdata as usize; // *mut c_void — не Send, оборачиваем как usize.
+    ffi_catch_i32("call_signal_async_panic", || {
+        let from = match unsafe { cstr(from_user) } {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                set_last_error("invalid_from_user");
+                return -1;
+            }
+        };
+        let to = match unsafe { cstr(to_user) } {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                set_last_error("invalid_to_user");
+                return -1;
+            }
+        };
+        let key = match unsafe { cstr(master_key_b64) }
+            .as_deref()
+            .and_then(decode_b64_32)
+        {
+            Some(k) => k,
+            None => {
+                set_last_error("invalid_master_key");
+                return -1;
+            }
+        };
+        if CallSignalKind::from_byte(kind).is_none() {
+            set_last_error("invalid_signal_kind");
+            return -1;
+        }
+        let payload = match unsafe { cstr(payload_json) } {
+            Some(s) => s,
+            None => {
+                set_last_error("invalid_payload");
+                return -1;
+            }
+        };
+        let client = match unsafe { client_ref(handle) } {
+            Some(c) => c,
+            None => {
+                set_last_error("invalid_handle");
+                return -1;
+            }
+        };
+        let rt = match unsafe { runtime_ref(handle) } {
+            Some(r) => r,
+            None => {
+                set_last_error("invalid_handle");
+                return -1;
+            }
+        };
+
+        // Запечатываем и подписываем СИНХРОННО (это быстро), сетевой вызов идёт async.
+        let sealed = match signaling_seal(&key, payload.as_bytes()) {
+            Ok(v) => v,
+            Err(_) => {
+                set_last_error("signaling_seal_failed");
+                return -1;
+            }
+        };
+        let payload_b64 = B64.encode(&sealed);
+        let ts_ms = now_ms();
+        let signed = format!("{from}{to}{kind}{ts_ms}{payload_b64}");
+        let sig = crate::crypto::sign(&client.config().signing_key, signed.as_bytes());
+
+        let core = CoreCallSignal {
+            sender: from,
+            recver: to,
+            kind,
+            payload: sealed,
+            ts_ms,
+            sig,
+        };
+
+        // Берём Arc'и на transport — он переживёт async задачу даже если
+        // вызывающий освободит handle (handle хранит client, client держит
+        // транспорт). Но handle сам по себе освобождать раньше callback'а
+        // нельзя — это договорённость API.
+        let transport = client.transport().clone();
+        let future = async move {
+            let result = transport.call_signal(&core).await;
+            if let Some(callback) = cb {
+                let ud = userdata_addr as *mut std::ffi::c_void;
+                match result {
+                    Ok(()) => callback(ud, 0, ptr::null()),
+                    Err(e) => {
+                        let msg = format!("call_signal_failed: {e}");
+                        // CString для гарантии 0-терминатора.
+                        if let Ok(cmsg) = CString::new(msg) {
+                            callback(ud, -1, cmsg.as_ptr());
+                            // cmsg дропается тут — после возврата из callback.
+                            // Если callback скопировал строку, всё ок.
+                        } else {
+                            callback(ud, -1, ptr::null());
+                        }
+                    }
+                }
+            }
+        };
+
+        rt.spawn(future);
+        0
+    })
+}
+
 // ── /call/poll ─────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -282,11 +485,18 @@ pub extern "C" fn paranoia_call_poll(
             }
         };
 
-        // nonce = unix ms — анти-replay; clamp под u32.
-        let nonce_full = SystemTime::now()
+        // nonce = (unix_ms << 16) | monotonic_counter_low16. Время даёт грубый
+        // ts для логов сервера, счётчик гарантирует strict-monotonic в пределах
+        // процесса даже при двух poll'ах в одну миллисекунду (быстрый retry
+        // после ошибки). Сервер сам по содержимому nonce не проверяет — только
+        // включает его в проверку подписи (см. routes/call_poll.rs).
+        static POLL_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let ctr = POLL_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFFFF;
+        let nonce_full = (ms << 16) | ctr;
         let signed = format!("{user_s}{nonce_full}{long_poll_ms}");
         let sig = crate::crypto::sign(&client.config().signing_key, signed.as_bytes());
 
@@ -394,8 +604,12 @@ pub type StateCallback =
 pub struct ParanoiaCallSession {
     rt: Arc<Runtime>,
     handle: Mutex<Option<crate::voip::transport::SessionHandle>>,
-    /// Фоновый task, читающий inbound и вызывающий callback.
-    inbound_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Фоновые task'и, читающие inbound и вызывающие callback'и: один для
+    /// voice, один для video — раздельно, чтобы медленный video-callback
+    /// (декодер, реассемблер на Qt) не блокировал доставку voice. См.
+    /// SessionHandle::take_voice_inbound / take_video_inbound.
+    voice_inbound_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    video_inbound_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Чтобы userdata можно было свободно отдать в task — обернём в struct.
     /// Хранится для гарантий времени жизни, явно не используется после spawn.
     _cb_anchor: Arc<CallbackAnchor>,
@@ -480,9 +694,9 @@ fn start_session_impl(
         }
     };
 
-    let rt = match Runtime::new() {
-        Ok(r) => Arc::new(r),
-        Err(_) => {
+    let rt = match voip_runtime() {
+        Some(r) => r,
+        None => {
             set_last_error("runtime_error");
             return ptr::null_mut();
         }
@@ -495,7 +709,7 @@ fn start_session_impl(
             return ptr::null_mut();
         }
     };
-    let socket = match rt.block_on(UdpSocket::bind(bind_addr)) {
+    let socket = match rt.block_on(async { bind_call_socket(bind_addr) }) {
         Ok(s) => s,
         Err(e) => {
             set_last_error(&format!("udp_bind_failed: {e}"));
@@ -515,41 +729,48 @@ fn start_session_impl(
         state_cb,
         userdata: userdata as usize,
     });
-    let mut inbound = match session.take_inbound() {
+    let mut voice_inbound = match session.take_voice_inbound() {
         Some(rx) => rx,
         None => {
             set_last_error("internal_no_inbound");
             return ptr::null_mut();
         }
     };
-    let anchor_clone = Arc::clone(&anchor);
-    let inbound_task = rt.spawn(async move {
-        while let Some(frame) = inbound.recv().await {
-            let userdata = anchor_clone.userdata as *mut std::ffi::c_void;
-            match frame.stream {
-                StreamId::Voice => {
-                    if let Some(cb) = anchor_clone.frame_cb {
-                        let opus = frame.opus;
-                        // SAFETY: cb signed as unsafe extern "C"; pointers valid for call duration.
-                        unsafe {
-                            cb(userdata, opus.as_ptr(), opus.len(), frame.sequence);
-                        }
-                    }
+    let mut video_inbound = match session.take_video_inbound() {
+        Some(rx) => rx,
+        None => {
+            set_last_error("internal_no_inbound");
+            return ptr::null_mut();
+        }
+    };
+    let voice_anchor = Arc::clone(&anchor);
+    let voice_inbound_task = rt.spawn(async move {
+        while let Some(frame) = voice_inbound.recv().await {
+            let userdata = voice_anchor.userdata as *mut std::ffi::c_void;
+            if let Some(cb) = voice_anchor.frame_cb {
+                let opus = frame.opus;
+                // SAFETY: cb signed as unsafe extern "C"; pointers valid for call duration.
+                unsafe {
+                    cb(userdata, opus.as_ptr(), opus.len(), frame.sequence);
                 }
-                StreamId::Video => {
-                    if let Some(cb) = anchor_clone.video_cb {
-                        let nal = frame.opus; // field reused — переименование лишний шум
-                        unsafe {
-                            cb(
-                                userdata,
-                                nal.as_ptr(),
-                                nal.len(),
-                                frame.sequence,
-                                frame.rtp_timestamp,
-                                frame.flags,
-                            );
-                        }
-                    }
+            }
+        }
+    });
+    let video_anchor = Arc::clone(&anchor);
+    let video_inbound_task = rt.spawn(async move {
+        while let Some(frame) = video_inbound.recv().await {
+            let userdata = video_anchor.userdata as *mut std::ffi::c_void;
+            if let Some(cb) = video_anchor.video_cb {
+                let nal = frame.opus; // поле имени из voice — историческое, переименование шум
+                unsafe {
+                    cb(
+                        userdata,
+                        nal.as_ptr(),
+                        nal.len(),
+                        frame.sequence,
+                        frame.rtp_timestamp,
+                        frame.flags,
+                    );
                 }
             }
         }
@@ -564,7 +785,8 @@ fn start_session_impl(
     let session = ParanoiaCallSession {
         rt,
         handle: Mutex::new(Some(session)),
-        inbound_task: Mutex::new(Some(inbound_task)),
+        voice_inbound_task: Mutex::new(Some(voice_inbound_task)),
+        video_inbound_task: Mutex::new(Some(video_inbound_task)),
         _cb_anchor: anchor,
     };
     Box::into_raw(Box::new(session))
@@ -721,9 +943,13 @@ pub extern "C" fn paranoia_call_session_stun_discover(
                 return ptr::null_mut();
             }
         };
-        // Возьмём ссылку на handle под локом и сразу освободим — чтобы не
-        // держать Mutex во время block_on.
-        let result = {
+        // Берём owned future ПОД локом (клонирует stun_tx), сразу
+        // отпускаем mutex (он защищает Mutex<Option<SessionHandle>>), и только
+        // потом block_on. Если оставить лок захваченным на 2с — все остальные
+        // FFI-вызовы (push_opus каждые 20мс, set_peer и пр.) замораживаются,
+        // что давало периодические подвисания при periodic re-probe из
+        // CallController.
+        let future = {
             let guard = match session_ref.handle.lock() {
                 Ok(g) => g,
                 Err(_) => {
@@ -738,10 +964,10 @@ pub extern "C" fn paranoia_call_session_stun_discover(
                     return ptr::null_mut();
                 }
             };
-            session_ref.rt.block_on(
-                h.stun_discover(server, std::time::Duration::from_millis(timeout_ms as u64)),
-            )
+            h.stun_discover_owned(server, std::time::Duration::from_millis(timeout_ms as u64))
+            // guard уходит из scope здесь → mutex освобождён
         };
+        let result = session_ref.rt.block_on(future);
         match result {
             Ok(addr) => string_to_c(addr.to_string()),
             Err(e) => {
@@ -782,7 +1008,8 @@ pub extern "C" fn paranoia_call_session_turn_allocate(
                 return ptr::null_mut();
             }
         };
-        let result = {
+        // Так же как и в stun_discover — не держать mutex во время block_on.
+        let future = {
             let guard = match session_ref.handle.lock() {
                 Ok(g) => g,
                 Err(_) => {
@@ -797,10 +1024,9 @@ pub extern "C" fn paranoia_call_session_turn_allocate(
                     return ptr::null_mut();
                 }
             };
-            session_ref.rt.block_on(
-                h.turn_allocate(server, std::time::Duration::from_millis(timeout_ms as u64)),
-            )
+            h.turn_allocate_owned(server, std::time::Duration::from_millis(timeout_ms as u64))
         };
+        let result = session_ref.rt.block_on(future);
         match result {
             Ok(addr) => string_to_c(addr.to_string()),
             Err(e) => {
@@ -854,7 +1080,8 @@ pub extern "C" fn paranoia_call_session_set_turn_peer(
                 return -1;
             }
         };
-        let result = {
+        // Не держать mutex во время block_on (см. stun_discover).
+        let future = {
             let guard = match session_ref.handle.lock() {
                 Ok(g) => g,
                 Err(_) => {
@@ -869,8 +1096,9 @@ pub extern "C" fn paranoia_call_session_set_turn_peer(
                     return -1;
                 }
             };
-            session_ref.rt.block_on(h.set_turn_peer(server, peer))
+            h.set_turn_peer_owned(server, peer)
         };
+        let result = session_ref.rt.block_on(future);
         match result {
             Ok(()) => 0,
             Err(e) => {
@@ -902,6 +1130,44 @@ pub extern "C" fn paranoia_call_session_local_addr(
         };
         match guard.as_ref() {
             Some(h) => string_to_c(h.local_addr().to_string()),
+            None => {
+                set_last_error("session_stopped");
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Вернуть текущий peer-адрес сессии в формате `"ip:port"`, либо пустую
+/// строку если peer ещё не определён. Это эффективный rx-источник: Rust
+/// auto-discover в `voip::transport::process_media_datagram` обновляет это
+/// поле при каждом валидном AEAD-пакете → значение отражает, **откуда
+/// фактически приходит media сейчас** (direct UDP source или TURN relay-адрес,
+/// в зависимости от пути). Qt-сторона использует это для определения
+/// rx-направления в индикаторе пути (см. CallController). NULL при ошибке.
+/// Освобождать через `paranoia_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_call_session_get_peer(
+    session: *mut ParanoiaCallSession,
+) -> *mut c_char {
+    ffi_catch_ptr("call_session_get_peer_panic", || {
+        if session.is_null() {
+            set_last_error("invalid_argument");
+            return ptr::null_mut();
+        }
+        let session = unsafe { &*session };
+        let guard = match session.handle.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                set_last_error("session_lock_poisoned");
+                return ptr::null_mut();
+            }
+        };
+        match guard.as_ref() {
+            Some(h) => match h.peer() {
+                Some(addr) => string_to_c(addr.to_string()),
+                None => string_to_c(String::new()),
+            },
             None => {
                 set_last_error("session_stopped");
                 ptr::null_mut()
@@ -1023,7 +1289,8 @@ pub extern "C" fn paranoia_call_session_stop(session: *mut ParanoiaCallSession) 
         let ParanoiaCallSession {
             rt,
             handle,
-            inbound_task,
+            voice_inbound_task,
+            video_inbound_task,
             _cb_anchor,
         } = *boxed;
 
@@ -1034,7 +1301,17 @@ pub extern "C" fn paranoia_call_session_stop(session: *mut ParanoiaCallSession) 
                 });
             }
         }
-        if let Ok(mut t) = inbound_task.lock() {
+        // Дожидаемся обоих inbound task'ов. После join'а run_session, оба
+        // senders (voice_inbound_tx, video_inbound_tx) дропнуты → recv() в task'ах
+        // вернёт None → task'и завершатся почти сразу.
+        if let Ok(mut t) = voice_inbound_task.lock() {
+            if let Some(jh) = t.take() {
+                rt.block_on(async {
+                    let _ = jh.await;
+                });
+            }
+        }
+        if let Ok(mut t) = video_inbound_task.lock() {
             if let Some(jh) = t.take() {
                 rt.block_on(async {
                     let _ = jh.await;
@@ -1095,15 +1372,15 @@ pub extern "C" fn paranoia_stun_discover(
             }
         };
 
-        let rt = match Runtime::new() {
-            Ok(r) => r,
-            Err(_) => {
+        let rt = match voip_runtime() {
+            Some(r) => r,
+            None => {
                 set_last_error("runtime_error");
                 return ptr::null_mut();
             }
         };
         let result = rt.block_on(async move {
-            let sock = UdpSocket::bind(bind_addr).await?;
+            let sock = bind_call_socket(bind_addr)?;
             let reflexive = discover_reflexive(
                 &sock,
                 server,

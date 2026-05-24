@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
     let port = config.port;
     let stun_bind_str = config.stun_bind.clone();
     let turn_public_ip = config.turn_public_ip.clone();
+    let turn_relay_port_range = config.turn_relay_port_range.clone();
 
     let call_signals = Arc::new(CallSignalStore::new());
     let _gc = call_signal::spawn_gc(Arc::clone(&call_signals));
@@ -63,8 +64,40 @@ async fn main() -> anyhow::Result<()> {
                     },
                     _ => None,
                 };
+                let parsed_relay_port_range: Option<(u16, u16)> =
+                    match turn_relay_port_range.as_deref() {
+                        Some(s) if !s.trim().is_empty() => {
+                            let parts: Vec<&str> = s.split('-').collect();
+                            match parts.as_slice() {
+                                [a, b] => match (a.trim().parse::<u16>(), b.trim().parse::<u16>()) {
+                                    (Ok(start), Ok(end)) if start > 0 && start <= end => {
+                                        Some((start, end))
+                                    }
+                                    _ => {
+                                        tracing::warn!(
+                                            "invalid turn_relay_port_range {s:?} — expected \"start-end\" with 1<=start<=end; using ephemeral"
+                                        );
+                                        None
+                                    }
+                                },
+                                _ => {
+                                    tracing::warn!(
+                                        "invalid turn_relay_port_range {s:?} — expected \"start-end\"; using ephemeral"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    };
                 tokio::spawn(async move {
-                    if let Err(e) = voip_stun::run(bind, parsed_turn_public_ip).await {
+                    if let Err(e) = voip_stun::run(
+                        bind,
+                        parsed_turn_public_ip,
+                        parsed_relay_port_range,
+                    )
+                    .await
+                    {
                         tracing::warn!("STUN/TURN listener exited: {e}");
                     }
                 });
@@ -86,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/reg", put(routes::reg::handle))
         .route("/push", put(routes::push::handle))
         .route("/pull", put(routes::pull::handle))
+        .route("/map", put(routes::map::handle))
         .route("/notify", put(routes::notify::handle))
         .route("/determinate", put(routes::determinate::handle))
         .route(

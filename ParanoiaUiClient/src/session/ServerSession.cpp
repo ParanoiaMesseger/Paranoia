@@ -7,9 +7,10 @@
 
 ServerSession::ServerSession(std::shared_ptr<ParanoiaFFI> ffi, const QString &server, const QString &username,
                              const QString &serverId, const QString &privateKey, const QString &profileId,
-                             const QStringList &reserveServerUrls)
+                             const QStringList &reserveServerUrls, const QStringList &turnServerUrls)
     : server(server), username(username), serverId(serverId), private_key(privateKey), profileId(profileId),
-      reserveServerUrls(Utils::normalizedServerUrls(reserveServerUrls, server)), ffi(std::move(ffi))
+      reserveServerUrls(Utils::normalizedServerUrls(reserveServerUrls, server)),
+      turnServerUrls(turnServerUrls), ffi(std::move(ffi))
 {
 }
 
@@ -44,13 +45,14 @@ void ServerSession::saveClientConfig() const
 {
     if (server.isEmpty() || private_key.isEmpty()) return;
     const QString pid = profileId.isEmpty() ? Utils::profileIdFor(server, serverId) : profileId;
-    saveClientConfigForProfile(pid, server, username, serverId, private_key, reserveServerUrls);
+    saveClientConfigForProfile(pid, server, username, serverId, private_key, reserveServerUrls, turnServerUrls);
     Utils::upsertProfileManifest(pid, server, username, true);
 }
 
 void ServerSession::saveClientConfigForProfile(const QString &profileId, const QString &server, const QString &username,
                                                const QString &serverId, const QString &privateKey,
-                                               const QStringList &reserveServerUrls)
+                                               const QStringList &reserveServerUrls,
+                                               const QStringList &turnServerUrls)
 {
     if (profileId.isEmpty() || server.isEmpty() || privateKey.isEmpty()) return;
     if (!Paths::ensureProfileDir(profileId)) return;
@@ -59,6 +61,7 @@ void ServerSession::saveClientConfigForProfile(const QString &profileId, const Q
     obj["server"] = normalizedServer;
     obj["reserve_server_urls"] =
         Utils::stringListToJsonArray(Utils::normalizedServerUrls(reserveServerUrls, normalizedServer));
+    obj["turn_server_urls"] = Utils::stringListToJsonArray(turnServerUrls);
     obj["username"]    = username;
     obj["server_id"]   = serverId;
     obj["private_key"] = privateKey;

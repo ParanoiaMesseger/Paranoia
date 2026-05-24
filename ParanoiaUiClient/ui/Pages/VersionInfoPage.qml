@@ -34,11 +34,13 @@ Rectangle {
                     height: 40
                     radius: Theme.radiusSm
                     color: backArea.containsMouse ? Theme.bgCard : "transparent"
-                    Text {
+                    AppIcon {
                         anchors.centerIn: parent
-                        text: "‹"
-                        color: Theme.accentHover
-                        font.pixelSize: 24
+                        width: 24
+                        height: 24
+                        name: "chevronLeft"
+                        iconColor: Theme.accentHover
+                        strokeWidth: 2.2
                     }
                     MouseArea {
                         id: backArea

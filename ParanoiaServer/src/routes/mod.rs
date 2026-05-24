@@ -2,6 +2,7 @@ pub mod arrived;
 pub mod call_poll;
 pub mod call_signal;
 pub mod determinate;
+pub mod map;
 pub mod notify;
 pub mod pull;
 pub mod push;

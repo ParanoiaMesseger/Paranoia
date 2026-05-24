@@ -11,19 +11,12 @@ Rectangle {
     signal back()
     signal profileImported()
 
-    function localFilePath(fileUrl) {
-        let value = decodeURIComponent(String(fileUrl))
-        if (value.startsWith("file://"))
-            value = value.substring(7)
-        return value
-    }
-
     FileDialog {
         id: importOpenDialog
         title: "Выбрать export-файл"
         fileMode: FileDialog.OpenFile
         nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
-        onAccepted: importFilePath = root.localFilePath(selectedFile)
+        onAccepted: importFilePath = Backend.urlToLocalPath(selectedFile)
     }
 
     ColumnLayout {

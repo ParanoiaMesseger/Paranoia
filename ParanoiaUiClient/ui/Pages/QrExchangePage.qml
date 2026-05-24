@@ -24,12 +24,6 @@ Rectangle {
     property var cameraScanTargetField: null
     readonly property bool cameraQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
 
-    function localFilePath(fileUrl) {
-        let value = decodeURIComponent(String(fileUrl))
-        if (value.startsWith("file://")) value = value.substring(7)
-        return value
-    }
-
     function openCameraScanner(targetField) {
         root.cameraScanTargetField = targetField
         cameraScanLoader.active = true
@@ -51,7 +45,7 @@ Rectangle {
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
         property var targetField: null
         onAccepted: {
-            const decoded = QrCodeUtils.decodeFromImage(root.localFilePath(selectedFile))
+            const decoded = QrCodeUtils.decodeFromImage(Backend.urlToLocalPath(selectedFile))
             if (!decoded.ok) {
                 root.feedback = decoded.error || "QR-код не прочитан."
                 return

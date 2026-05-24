@@ -195,17 +195,19 @@ Column {
                     Behavior on color { ColorAnimation { duration: 100 } }
                 }
 
-                // Иконка вставки (Canvas)
-                Canvas {
+                AppIcon {
                     id: pasteIcon
                     anchors.centerIn: parent
                     width: 20
                     height: 20
-                    antialiasing: true
+                    name: "paste"
+                    iconColor: Theme.accentHover
+                    fillColor: hovered ? Theme.bgButton : "transparent"
+                    secondaryColor: Theme.bgInput
+                    strokeWidth: 1.5
                     visible: !parent.showCheck
 
                     property bool hovered: pasteArea.containsMouse
-                    onHoveredChanged: requestPaint()
 
                     transform: Rotation {
                         id: pasteIconRotation
@@ -213,54 +215,6 @@ Column {
                         origin.y: pasteIcon.height / 2
                         axis { x: 0; y: 1; z: 0 }
                         angle: 0
-                    }
-
-                    onPaint: {
-                        const ctx = getContext("2d")
-                        ctx.clearRect(0, 0, width, height)
-                        ctx.lineWidth = 1.5
-                        ctx.lineJoin = "round"
-                        ctx.lineCap = "round"
-                        ctx.strokeStyle = Theme.accentHover
-
-                        ctx.fillStyle = hovered ? Theme.bgButton : "transparent"
-                        ctx.beginPath()
-                        ctx.moveTo(width * 0.22, height * 0.22)
-                        ctx.lineTo(width * 0.22, height * 0.92)
-                        ctx.lineTo(width * 0.78, height * 0.92)
-                        ctx.lineTo(width * 0.78, height * 0.22)
-                        ctx.lineTo(width * 0.64, height * 0.22)
-                        ctx.lineTo(width * 0.64, height * 0.14)
-                        ctx.lineTo(width * 0.36, height * 0.14)
-                        ctx.lineTo(width * 0.36, height * 0.22)
-                        ctx.closePath()
-                        ctx.fill()
-                        ctx.stroke()
-
-                        ctx.fillStyle = Theme.bgInput
-                        ctx.beginPath()
-                        ctx.moveTo(width * 0.38, height * 0.08)
-                        ctx.lineTo(width * 0.62, height * 0.08)
-                        ctx.lineTo(width * 0.62, height * 0.28)
-                        ctx.lineTo(width * 0.38, height * 0.28)
-                        ctx.closePath()
-                        ctx.fill()
-                        ctx.stroke()
-
-                        ctx.beginPath()
-                        ctx.moveTo(width * 0.34, height * 0.50)
-                        ctx.lineTo(width * 0.66, height * 0.50)
-                        ctx.stroke()
-
-                        ctx.beginPath()
-                        ctx.moveTo(width * 0.34, height * 0.65)
-                        ctx.lineTo(width * 0.66, height * 0.65)
-                        ctx.stroke()
-
-                        ctx.beginPath()
-                        ctx.moveTo(width * 0.34, height * 0.80)
-                        ctx.lineTo(width * 0.54, height * 0.80)
-                        ctx.stroke()
                     }
                 }
 

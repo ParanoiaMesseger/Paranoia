@@ -23,10 +23,19 @@ namespace paranoia::voip
                     return true;
                 }
                 case QAbstractSocket::IPv6Protocol: {
-                    // CallEngine binds an IPv4 socket (`0.0.0.0:0`). Advertising IPv6
-                    // addresses makes the peer select an endpoint this socket cannot
-                    // send to, so keep candidates aligned with the actual bind family.
-                    return false;
+                    // Сокет звонка биндится как IPv6 dual-stack (`[::]:0`) — см.
+                    // bind_call_socket в Rust. Это значит мы можем и отправлять,
+                    // и принимать UDP по обоим стэкам. Раньше IPv6-кандидаты
+                    // фильтровались целиком: на LTE/5G с IPv6-only и DNS64 это
+                    // делало P2P невозможным, всё ехало через TURN/сервер. Теперь
+                    // отдаём IPv6 как кандидаты, но с пониженным приоритетом
+                    // (см. candidateRank), чтобы IPv4 всё ещё предпочитался когда
+                    // он доступен (NAT-traversal у IPv4 проще и предсказуемее).
+                    if (addr.isLinkLocal()) return false; // fe80::/10 — бесполезно за пределами интерфейса
+                    // 6to4/Teredo/документационные префиксы — пропускать тоже
+                    // не имеет смысла, но Qt не различает их легко; полагаемся
+                    // на peer'а отфильтровать недостижимые.
+                    return true;
                 }
                 default: return false;
             }
@@ -57,6 +66,17 @@ namespace paranoia::voip
         // сетями.
         int candidateRank(const QHostAddress &addr)
         {
+            if (addr.protocol() == QAbstractSocket::IPv6Protocol) {
+                // IPv6: глобальные unicast (2000::/3) — годятся для cross-network
+                // P2P (особенно LTE IPv6-only); ULA (fc00::/7) — только если обе
+                // стороны в одной сети. Ставим после всех IPv4, потому что
+                // IPv4 NAT traversal проще и быстрее проходит у большинства
+                // peer'ов, но раньше IPv6-only-фолбэка.
+                const Q_IPV6ADDR v6 = addr.toIPv6Address();
+                const bool gua      = (v6[0] & 0xE0) == 0x20; // 2000::/3
+                if (gua) return 50;                            // лучший IPv6: глобальный
+                return 60;                                     // ULA / прочие IPv6
+            }
             if (addr.protocol() != QAbstractSocket::IPv4Protocol) return 100;
             const quint32 ip = addr.toIPv4Address();
             // 192.168.0.0/16 — типичные домашние Wi-Fi сети.

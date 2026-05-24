@@ -6,6 +6,7 @@ pub mod dialogue;
 mod error_classify;
 pub mod export;
 pub mod ffi;
+pub mod local_vault;
 pub mod packet;
 pub mod qr_exchange;
 pub mod store;
@@ -42,7 +43,10 @@ impl ParanoiaClient {
             config.reserve_server_urls.iter().map(String::as_str),
             cover,
         ));
-        let store = Arc::new(LocalStore::open(&config.db_path)?);
+        // SQLCipher: ключ берём из активного vault. Если vault locked —
+        // ошибка пробрасывается наверх (UI обязан unlock'нуть до создания клиента).
+        let db_path = config.db_path.clone();
+        let store = Arc::new(local_vault::with_db_key(|k| LocalStore::open(&db_path, k))??);
         Ok(Self {
             config: Arc::new(config),
             transport,

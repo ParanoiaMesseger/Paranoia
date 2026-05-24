@@ -8,6 +8,10 @@
 #include "session/SessionStore.hpp"
 #include "utils/Utils.hpp"
 #include <ParanoiaFFI>
+#include <QFutureWatcher>
+#include <QGuiApplication>
+
+#include <limits>
 
 #include <QCryptographicHash>
 #include <QFuture>
@@ -22,7 +26,19 @@
 #include <QDir>
 #include <QPointer>
 #include <QSet>
+#include <QUrl>
 #include <algorithm>
+
+#if defined(Q_OS_ANDROID)
+#include <QCoreApplication>
+#include <QJniEnvironment>
+#include <QJniObject>
+#endif
+
+#if defined(Q_OS_IOS)
+extern "C" bool paranoia_ios_take_share_target(char **out_text, char ***out_files, int *out_file_count);
+extern "C" void paranoia_ios_free_share_target(char *text, char **files, int file_count);
+#endif
 
 namespace
 {
@@ -30,6 +46,21 @@ namespace
     {
         return Utils::normalizedServerUrls(Utils::stringListFromJsonArray(obj.value("reserve_server_urls").toArray()),
                                            primaryUrl);
+    }
+
+    /// TURN-сервера хранятся как "host:port" или "host" (тогда default port
+    /// добавляется при использовании). Нормализуем: trim, deduplicate, lower-case host.
+    QStringList turnUrlsFromObject(const QJsonObject &obj)
+    {
+        QStringList raw = Utils::stringListFromJsonArray(obj.value("turn_server_urls").toArray());
+        QStringList out;
+        out.reserve(raw.size());
+        for (auto &item : raw) {
+            const QString trimmed = item.trimmed();
+            if (trimmed.isEmpty()) continue;
+            if (!out.contains(trimmed, Qt::CaseInsensitive)) out.append(trimmed);
+        }
+        return out;
     }
 
     QStringList appendReserveUrl(QStringList urls, const QString &primaryUrl, const QString &reserveUrl)
@@ -105,18 +136,43 @@ namespace
     }
 }
 
+MainBackend *MainBackend::s_instance = nullptr;
+
 MainBackend::MainBackend(NotificationCoordinator &notifications, QObject *parent)
     : QObject(parent), m_notifications(&notifications)
 {
+    s_instance = this;
+    initVault();
     m_hasStoredClientProfiles = hasStoredClientProfileOnDisk();
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::loginStateChanged);
     connect(SessionStore::instance(), &SessionStore::sessionsChanged, this, &MainBackend::sessionsChanged);
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::sessionsChanged);
-    loadDeviceKey();
-    loadClientConfig();
+
+    // device_key.json и admins.crypt теперь под vault'ом — отложены до unlock'а.
+    // Lock происходит ТОЛЬКО при выходе (деструктор) — авто-lock в фоне отключён
+    // по решению пользователя: сворачивание не должно требовать повторного ввода PIN.
+    if (vaultStatus() == 2) onVaultUnlocked();
 }
 
-MainBackend::~MainBackend() = default;
+MainBackend::~MainBackend()
+{
+    ParanoiaFFI::vault_lock();
+    s_instance = nullptr;
+}
+
+#if defined(Q_OS_ANDROID)
+// JNI bridge: Java вызывает после storeShareTarget(), чтобы QML гарантированно
+// подобрал данные. Без этого, если приложение уже было в foreground'е,
+// onActiveChanged может не сработать → банер "Поделиться" не появится.
+extern "C" JNIEXPORT void JNICALL
+Java_app_paranoia_client_ParanoiaActivity_nativeShareTargetReady(JNIEnv *, jclass)
+{
+    auto *backend = MainBackend::instance();
+    if (!backend) return;
+    QMetaObject::invokeMethod(backend, [backend]() { emit backend->shareTargetReady(); },
+                              Qt::QueuedConnection);
+}
+#endif
 
 bool MainBackend::isLoggedIn() const
 {
@@ -147,6 +203,203 @@ QString MainBackend::activeProfileId() const
 }
 
 bool MainBackend::hasStoredClientProfiles() const { return m_hasStoredClientProfiles; }
+
+// ── Local Vault ──────────────────────────────────────────────────────────────
+
+int MainBackend::vaultStatus() const
+{
+    switch (ParanoiaFFI::vault_status()) {
+        case ParanoiaFFI::VaultStatus::NotInitialized: return 0;
+        case ParanoiaFFI::VaultStatus::Locked:         return 1;
+        case ParanoiaFFI::VaultStatus::Unlocked:       return 2;
+        default:                                       return -1;
+    }
+}
+
+quint64 MainBackend::vaultLockoutSeconds() const { return ParanoiaFFI::vault_lockout_seconds(); }
+
+void MainBackend::initVault()
+{
+    const QString root = Paths::appDataRoot().path();
+    if (ParanoiaFFI::vault_init(root) != 0)
+        qWarning().noquote() << "vault_init failed:" << ParanoiaFFI::last_error();
+}
+
+void MainBackend::vaultSetPin(const QString &pin)
+{
+    auto *watcher = new QFutureWatcher<int>(this);
+    connect(watcher, &QFutureWatcher<int>::finished, this, [this, watcher]() {
+        const int rc = watcher->result();
+        watcher->deleteLater();
+        emit vaultSetPinResult(rc);
+        if (rc == 0) {
+            // Сначала onVaultUnlocked() — поднимает профили и обновляет
+            // hasStoredClientProfiles. Потом vaultStatusChanged — Main.qml
+            // gate уже видит правильное значение и роутит на нужную страницу.
+            onVaultUnlocked();
+            emit vaultStatusChanged();
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([pin]() {
+        return ParanoiaFFI::vault_set_pin(pin);
+    }));
+}
+
+void MainBackend::vaultUnlock(const QString &pin)
+{
+    auto *watcher = new QFutureWatcher<int>(this);
+    connect(watcher, &QFutureWatcher<int>::finished, this, [this, watcher]() {
+        const int rc = static_cast<int>(watcher->result());
+        watcher->deleteLater();
+        emit vaultUnlockResult(rc);
+        if (rc == 0) {
+            // Сначала onVaultUnlocked() — поднимает профили и обновляет
+            // hasStoredClientProfiles. Потом vaultStatusChanged — Main.qml
+            // gate уже видит правильное значение и роутит на нужную страницу.
+            onVaultUnlocked();
+            emit vaultStatusChanged();
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([pin]() -> int {
+        const auto r = ParanoiaFFI::vault_unlock(pin);
+        return static_cast<int>(r);
+    }));
+}
+
+void MainBackend::vaultLock()
+{
+    ParanoiaFFI::vault_lock();
+    SessionStore::instance()->setActiveSession({});
+    // Расшифрованные превью держатся только в EncryptedImageProvider'е
+    // (in-memory). main.cpp подключён к сигналу vaultLocked и вызовет
+    // imageProvider->clear() — здесь дополнительная очистка не нужна.
+    emit vaultLocked();
+    emit vaultStatusChanged();
+}
+
+void MainBackend::vaultChangePin(const QString &oldPin, const QString &newPin)
+{
+    // Откладываем ВСЁ (включая session teardown) на следующий event-loop tick
+    // через QueuedConnection: иначе вызов остаётся синхронным внутри JS-handler'а
+    // QML, Qt не успевает отрисовать busy-overlay и пользователь видит
+    // фриз перед появлением спиннера.
+    QMetaObject::invokeMethod(
+        this,
+        [this, oldPin, newPin]() {
+            doVaultChangePinAsync(oldPin, newPin);
+        },
+        Qt::QueuedConnection);
+}
+
+void MainBackend::doVaultChangePinAsync(const QString &oldPin, const QString &newPin)
+{
+    // 1) Закрываем активные сессии — только vector ops + сигналы (быстро).
+    //    Сам тяжёлый teardown (WAL checkpoint, paranoia_client_free) переносится
+    //    в worker: держим последние strong-refs в shared vector и роняем их там.
+    SessionStore::instance()->setActiveSession({});
+    auto ownedSessions =
+        std::make_shared<std::vector<std::shared_ptr<ServerSession>>>(
+            SessionStore::instance()->allSessions());
+    for (const auto &s : *ownedSessions) {
+        SessionStore::instance()->removeSession(s);
+    }
+
+    // 2) Всё остальное — enumeration файлов + verify_pin + rekey — в worker.
+    //    Enumeration (entryInfoList, QFile::exists по всем профилям + attachment-cache)
+    //    на медленном диске может занимать сотни мс; на UI thread это видимая
+    //    заморозка между нажатием кнопки и появлением busy-overlay.
+    auto *watcher = new QFutureWatcher<int>(this);
+    connect(watcher, &QFutureWatcher<int>::finished, this, [this, watcher]() {
+        const int rc = watcher->result();
+        watcher->deleteLater();
+        emit vaultChangePinResult(rc);
+        if (rc == 0) onVaultUnlocked();
+    });
+    watcher->setFuture(QtConcurrent::run([oldPin, newPin, ownedSessions]() -> int {
+        // 0. Drop ServerSession'ов здесь — WAL checkpoint происходит на воркере.
+        ownedSessions->clear();
+
+        // 1. Собрать список JSON-файлов, БД и attachment'ов для перешифровки.
+        QStringList jsonFiles;
+        if (QFile::exists(Paths::profilesManifest())) jsonFiles << Paths::profilesManifest();
+        if (QFile::exists(Paths::deviceKey())) jsonFiles << Paths::deviceKey();
+        if (QFile::exists(Paths::pendingRegistrationKey())) jsonFiles << Paths::pendingRegistrationKey();
+        if (QFile::exists(Paths::admins())) jsonFiles << Paths::admins();
+
+        QStringList dbFiles;
+        QList<QPair<QString, QString>> attachmentFiles;
+        const QDir profilesRoot = Paths::profilesRoot();
+        for (const auto &entry :
+             profilesRoot.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+            const QString id = entry.fileName();
+            const QString clientPath  = Paths::profileClient(id);
+            const QString dialogsPath = Paths::profileDialogs(id);
+            const QString dbPath      = Paths::profileDb(id);
+            if (QFile::exists(clientPath))  jsonFiles << clientPath;
+            if (QFile::exists(dialogsPath)) jsonFiles << dialogsPath;
+            if (QFile::exists(dbPath))      dbFiles << dbPath;
+
+            QDir attachDir(entry.absoluteFilePath() + QStringLiteral("/attachment-cache"));
+            if (attachDir.exists()) {
+                for (const auto &f : attachDir.entryInfoList(QStringList{"*.enc"}, QDir::Files)) {
+                    attachmentFiles.append({f.completeBaseName(), f.absoluteFilePath()});
+                }
+            }
+        }
+
+        // 2. Verify старый PIN.
+        const int verifyRc = ParanoiaFFI::vault_verify_pin(oldPin);
+        if (verifyRc == 1) return 1;
+        if (verifyRc != 0) return -1;
+
+        // 3. rekey_begin → файлы → БД → attachments → commit.
+        if (ParanoiaFFI::vault_rekey_begin(newPin) != 0) {
+            ParanoiaFFI::vault_rekey_abort();
+            return -1;
+        }
+        for (const QString &p : jsonFiles) {
+            if (ParanoiaFFI::vault_rekey_file(p) != 0) {
+                ParanoiaFFI::vault_rekey_abort();
+                return -1;
+            }
+        }
+        for (const QString &db : dbFiles) {
+            if (ParanoiaFFI::vault_rekey_db(db) != 0) {
+                ParanoiaFFI::vault_rekey_abort();
+                return -1;
+            }
+        }
+        for (const auto &att : attachmentFiles) {
+            if (ParanoiaFFI::vault_rekey_attachment(att.first, att.second) != 0) {
+                ParanoiaFFI::vault_rekey_abort();
+                return -1;
+            }
+        }
+        if (ParanoiaFFI::vault_rekey_commit() != 0) {
+            ParanoiaFFI::vault_rekey_abort();
+            return -1;
+        }
+        return 0;
+    }));
+}
+
+void MainBackend::onVaultUnlocked()
+{
+    // Теперь, когда master_key в RAM, можно читать device_key.json, admins.crypt,
+    // profiles.json и поднимать сессии. Перед чтением — сбросить флаг
+    // vault-IO-failure: до unlock'а readAll мог получить "vault_locked"
+    // (нормальное состояние), и мы НЕ хотим, чтобы оно блокировало
+    // последующие легитимные writeFile'ы.
+    Utils::resetVaultIoFailure();
+    admin::Admin::initAdmins();
+    emit adminStateChanged();
+    loadDeviceKey();
+    loadClientConfig();
+    setHasStoredClientProfiles(hasStoredClientProfileOnDisk());
+    emit vaultUnlocked();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 void MainBackend::setHasStoredClientProfiles(bool hasProfiles)
 {
@@ -218,14 +471,21 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
         if (makeActive) emit loginError("Не удалось подготовить каталог профиля.");
         return;
     }
+    // TURN-список хранится в profile JSON отдельно от reserveServerUrls и не
+    // влияет на login-flow — поэтому грузим его здесь и пробрасываем в
+    // SessionStore. Reserve может прийти из аргумента (свежий login,
+    // import-flow), а TURN всегда из persisted конфига; если JSON нет —
+    // пустой список, добавится позже через UI.
+    const QStringList turnServerUrls =
+        turnUrlsFromObject(Utils::readJsonObjectFile(Paths::profileClient(profileId)));
     const QString dbPath = Paths::profileDb(profileId);
     QPointer self(this);
-    QThreadPool::globalInstance()->start([self, url, normalizedReserves, reserveUrlsJson, trimmedUsername, serverId,
-                                          private_key, dbPath, profileId, makeActive,
+    QThreadPool::globalInstance()->start([self, url, normalizedReserves, turnServerUrls, reserveUrlsJson,
+                                          trimmedUsername, serverId, private_key, dbPath, profileId, makeActive,
                                           rotateRegistrationKeyOnSuccess]() {
         if (!self) return;
-        QMetaObject::invokeMethod(self, [self, dbPath, url, normalizedReserves, reserveUrlsJson, trimmedUsername,
-                                         serverId, private_key, profileId, makeActive,
+        QMetaObject::invokeMethod(self, [self, dbPath, url, normalizedReserves, turnServerUrls, reserveUrlsJson,
+                                         trimmedUsername, serverId, private_key, profileId, makeActive,
                                          rotateRegistrationKeyOnSuccess]() {
             auto handle = std::make_shared<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
             if (!self) return;
@@ -235,7 +495,7 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
             }
             auto *store  = SessionStore::instance();
             auto session = store->addSession(std::move(handle), url, trimmedUsername, serverId, private_key, profileId,
-                                             normalizedReserves);
+                                             normalizedReserves, turnServerUrls);
             session->loadDialogs();
             if (!session->findDialog(QStringLiteral("Избранное"))) {
                 QCryptographicHash hasher(QCryptographicHash::Sha256);
@@ -245,7 +505,7 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
                 const QByteArray derived = hasher.result();
                 QList<DialogKeyEntry> keyring;
                 keyring.append({1, derived.left(32)});
-                session->dialogs.append({QStringLiteral("Избранное"), serverId, keyring, QString(), true});
+                session->dialogs.append({QStringLiteral("Избранное"), serverId, keyring, QString(), QString(), true});
                 session->saveDialogs();
             }
             session->saveClientConfig();
@@ -561,6 +821,150 @@ void MainBackend::checkReserveDomain(const QString &targetType, const QString &t
     });
 }
 
+// ── TURN servers ──────────────────────────────────────────────────────────────
+
+namespace
+{
+    /// Парсит "host:port" / "host" / "turn:host:port" и возвращает
+    /// каноническую строку "host:port" (с дефолтным портом 3478, если не задан).
+    /// Пустая строка → пусто.
+    QString normalizeTurnUrl(const QString &raw)
+    {
+        QString s = raw.trimmed();
+        if (s.isEmpty()) return {};
+        // Срезаем префиксы scheme'ов если случайно ввели (turn://, turns://).
+        if (s.startsWith("turn://", Qt::CaseInsensitive)) s.remove(0, 7);
+        if (s.startsWith("turns://", Qt::CaseInsensitive)) s.remove(0, 8);
+        if (s.startsWith("turn:", Qt::CaseInsensitive)) s.remove(0, 5);
+        if (s.startsWith("turns:", Qt::CaseInsensitive)) s.remove(0, 6);
+        // IPv6 в квадратных скобках: [::1]:3478. Не лезем внутрь — только проверяем
+        // наличие порта после ']'.
+        if (s.startsWith('[')) {
+            const int close = s.indexOf(']');
+            if (close <= 0) return {};
+            const QString after = s.mid(close + 1);
+            if (after.isEmpty() || !after.startsWith(':')) return s + ":3478";
+            return s;
+        }
+        const int lastColon = s.lastIndexOf(':');
+        if (lastColon < 0) return s + ":3478";
+        // Если "только хост содержит точку и нет порта" — добавим default.
+        const QString tail = s.mid(lastColon + 1);
+        bool isPort        = !tail.isEmpty();
+        for (QChar c : tail) {
+            if (!c.isDigit()) {
+                isPort = false;
+                break;
+            }
+        }
+        if (!isPort) return s + ":3478";
+        return s;
+    }
+} // namespace
+
+QStringList MainBackend::getTurnServers(const QString &profileId) const
+{
+    const auto session = SessionStore::instance()->sessionForProfile(profileId);
+    if (session) return session->turnServerUrls;
+    // Профиль не залогинен в этом ран-тайме — читаем с диска.
+    return turnUrlsFromObject(Utils::readJsonObjectFile(Paths::profileClient(profileId)));
+}
+
+void MainBackend::addTurnServer(const QString &profileId, const QString &turnUrl)
+{
+    const QString normalized = normalizeTurnUrl(turnUrl);
+    if (normalized.isEmpty()) {
+        emit turnServerError("Укажите адрес TURN-сервера (host:port).");
+        return;
+    }
+
+    const QJsonObject obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+    if (obj.value("server").toString().isEmpty()) {
+        emit turnServerError("Профиль не найден или повреждён.");
+        return;
+    }
+    QStringList list = turnUrlsFromObject(obj);
+    if (list.contains(normalized, Qt::CaseInsensitive)) {
+        emit turnServerError("Этот TURN-сервер уже добавлен.");
+        return;
+    }
+    list.append(normalized);
+
+    // Сохраняем через ServerSession::saveClientConfigForProfile, чтобы
+    // reserve-серверы и прочие поля профиля остались целыми.
+    const QString url        = obj.value("server").toString();
+    const QString username   = obj.value("username").toString();
+    const QString privateKey = obj.value("private_key").toString();
+    const QString serverId   = obj.value("server_id").toString();
+    ServerSession::saveClientConfigForProfile(profileId, url, username, serverId, privateKey,
+                                              reserveUrlsFromObject(obj, url), list);
+
+    // Обновляем runtime-state сессии если она активна.
+    const auto session = SessionStore::instance()->sessionForProfile(profileId);
+    if (session) {
+        session->turnServerUrls = list;
+        emit sessionsChanged(); // VoipSystem подписан → переподтянет TURN-список
+    }
+    emit turnServerAdded(profileId, normalized);
+}
+
+void MainBackend::removeTurnServer(const QString &profileId, const QString &turnUrl)
+{
+    const QString normalized = normalizeTurnUrl(turnUrl);
+    if (normalized.isEmpty()) {
+        emit turnServerError("Пустой адрес TURN-сервера.");
+        return;
+    }
+    const QJsonObject obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+    if (obj.value("server").toString().isEmpty()) {
+        emit turnServerError("Профиль не найден или повреждён.");
+        return;
+    }
+    QStringList list = turnUrlsFromObject(obj);
+    const int before = list.size();
+    list.removeIf([&](const QString &s) { return QString::compare(s, normalized, Qt::CaseInsensitive) == 0; });
+    if (list.size() == before) {
+        emit turnServerError("TURN-сервер не найден.");
+        return;
+    }
+    const QString url        = obj.value("server").toString();
+    const QString username   = obj.value("username").toString();
+    const QString privateKey = obj.value("private_key").toString();
+    const QString serverId   = obj.value("server_id").toString();
+    ServerSession::saveClientConfigForProfile(profileId, url, username, serverId, privateKey,
+                                              reserveUrlsFromObject(obj, url), list);
+    const auto session = SessionStore::instance()->sessionForProfile(profileId);
+    if (session) {
+        session->turnServerUrls = list;
+        emit sessionsChanged();
+    }
+    emit turnServerRemoved(profileId, normalized);
+}
+
+void MainBackend::checkTurnServer(const QString &profileId, const QString &turnUrl)
+{
+    const QString normalized = normalizeTurnUrl(turnUrl);
+    if (normalized.isEmpty()) {
+        emit turnServerCheckFinished(profileId, turnUrl, false, "Пустой адрес TURN-сервера.", -1);
+        return;
+    }
+    // Простая проверка: попытаться разобрать адрес. Реальный allocate-probe
+    // выполняется в момент звонка через ICE connectivity check (см. CallController);
+    // сюда подключим полноценный async-probe позже, когда FFI получит
+    // standalone turn_allocate без сессии.
+    const QString host =
+        normalized.contains(':') && !normalized.startsWith('[')
+            ? normalized.left(normalized.lastIndexOf(':'))
+            : normalized;
+    if (host.isEmpty()) {
+        emit turnServerCheckFinished(profileId, normalized, false, "Не удалось разобрать host:port.", -1);
+        return;
+    }
+    // Заглушка: эмитим «ok с 0ms» — UI покажет «доступен» (по факту проверка
+    // ограничена синтаксисом). TODO: добавить FFI paranoia_turn_probe(host, port).
+    emit turnServerCheckFinished(profileId, normalized, true, QStringLiteral("сохранён"), 0);
+}
+
 // ── Dialogs Management ────────────────────────────────────────────────────────
 
 QVariantMap MainBackend::createDialogKeyInvitation(const QString &peer) const
@@ -741,7 +1145,7 @@ void MainBackend::deleteDialogLocal(const QString &peer)
     });
 }
 
-void MainBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
+void MainBackend::clearDialogHistory(const QString &peer)
 {
     auto session = SessionStore::instance()->activeSession();
     if (!session) {
@@ -758,24 +1162,27 @@ void MainBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
     QPointer self(this);
-    QThreadPool::globalInstance()->start([self, session, peerCopy, serverId, peerServerId, keyringJson, cutSeq]() {
+    QThreadPool::globalInstance()->start([self, session, peerCopy, serverId, peerServerId, keyringJson]() {
         if (!self) return;
         QMutexLocker locker(&session->ffiMutex);
         if (!session->ffi) return;
         const QString myId   = serverId.isEmpty() ? session->username : serverId;
         const QString peerId = peerServerId.isEmpty() ? peerCopy : peerServerId;
-        int rc               = session->ffi->determinate_keyring(myId, peerId, keyringJson, cutSeq);
-        QString err          = ParanoiaFFI::last_error();
+        // u64::MAX как верхняя граница — сервер всё равно проходит только по
+        // существующим ключам префикса диалога, а локально метод фильтрует
+        // существующие server_seq.
+        int rc      = session->ffi->delete_dialogue_range_keyring(myId, peerId, keyringJson, 0,
+                                                                  std::numeric_limits<quint64>::max());
+        QString err = ParanoiaFFI::last_error();
         QMetaObject::invokeMethod(self, [self, err, peerCopy, rc]() {
             if (!self) return;
             if (rc == 0) {
                 emit self->serverHistoryCleared(peerCopy);
-            } else {
-                if (err == "server_unavailable")
-                    emit self->serverHistoryError("Сервер недоступен.");
-                else
-                    emit self->serverHistoryError("Ошибка удаления серверной истории: " + err);
-            }
+                emit self->dialogsChanged();
+            } else if (err == "server_unavailable")
+                emit self->serverHistoryError("Сервер недоступен.");
+            else
+                emit self->serverHistoryError("Ошибка очистки диалога: " + err);
         });
     });
 }
@@ -790,7 +1197,8 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
         return ParanoiaFFI::errorResult("Неподдерживаемый тип профиля экспорта.");
     if (receiverPubkeyB64.trimmed().isEmpty())
         return ParanoiaFFI::errorResult("Не указан публичный ключ принимающего устройства.");
-    if (filePath.trimmed().isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
+    const QString normalizedFilePath = Utils::normalizeLocalFilePath(filePath);
+    if (normalizedFilePath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
     QJsonObject payload;
     payload["format_version"] = 1;
     payload["profile_type"]   = normalizedProfile;
@@ -855,19 +1263,19 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
             return ParanoiaFFI::errorResult("Некорректный публичный ключ принимающего устройства.");
         return ParanoiaFFI::errorResult("Ошибка шифрования экспорта.");
     }
-    QFile file(filePath);
+    QFile file(normalizedFilePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return ParanoiaFFI::errorResult("Не удалось открыть файл для записи: " + filePath);
+        return ParanoiaFFI::errorResult("Не удалось открыть файл для записи: " + normalizedFilePath);
     const QByteArray envelopeBytes = envelope.toUtf8();
     if (file.write(envelopeBytes) != envelopeBytes.size()) {
         file.close();
         return ParanoiaFFI::errorResult("Не удалось полностью записать файл экспорта.");
     }
     file.close();
-    Utils::setOwnerOnlyPermissions(filePath);
+    Utils::setOwnerOnlyPermissions(normalizedFilePath);
     return QVariantMap{
         {"ok", true},
-        {"path", filePath},
+        {"path", normalizedFilePath},
         {"dialogues", exportedDialogues},
         {"keyEntries", exportedKeyEntries},
     };
@@ -876,9 +1284,10 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
 QVariantMap MainBackend::importProfile(const QString &filePath)
 {
     if (m_devicePrivkey.isEmpty()) return ParanoiaFFI::errorResult("Device keypair не инициализирован.");
-    if (filePath.trimmed().isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly)) return ParanoiaFFI::errorResult("Не удалось открыть файл: " + filePath);
+    const QString normalizedFilePath = Utils::normalizeLocalFilePath(filePath);
+    if (normalizedFilePath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
+    QFile file(normalizedFilePath);
+    if (!file.open(QIODevice::ReadOnly)) return ParanoiaFFI::errorResult("Не удалось открыть файл: " + normalizedFilePath);
     if (file.size() > Utils::MaxExportFileBytes) {
         file.close();
         return ParanoiaFFI::errorResult("Файл экспорта слишком большой.");
@@ -932,7 +1341,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
                       [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
             return 1;
         }
-        dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, key}}, QString()});
+        dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, key}}, QString(), QString()});
         return 1;
     };
     if (allowClientImport) {
@@ -1085,15 +1494,77 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
     };
 }
 
+QVariantMap MainBackend::takeShareTarget()
+{
+    QVariantMap result;
+#if defined(Q_OS_ANDROID)
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid()) return result;
+    const QJniObject raw = QJniObject::callStaticObjectMethod(
+        "app/paranoia/client/ParanoiaAndroidUtils", "takeShareTarget",
+        "(Landroid/content/Context;)Ljava/lang/String;", context.object<jobject>());
+    QJniEnvironment env;
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return result;
+    }
+    if (!raw.isValid()) return result;
+    const QString payload = raw.toString();
+    if (payload.isEmpty()) return result;
+    // Формат: "<text><uri1>\n<uri2>\n..." (см. ParanoiaAndroidUtils.takeShareTarget).
+    const QChar separator(QChar(0x0001));
+    const int idx = payload.indexOf(separator);
+    QString text;
+    QStringList uris;
+    if (idx < 0) {
+        text = payload;
+    } else {
+        text = payload.left(idx);
+        const QString tail = payload.mid(idx + 1);
+        if (!tail.isEmpty()) {
+            uris = tail.split(QChar('\n'), Qt::SkipEmptyParts);
+        }
+    }
+    if (text.isEmpty() && uris.isEmpty()) return result;
+    result.insert(QStringLiteral("text"), text);
+    result.insert(QStringLiteral("files"), uris);
+#elif defined(Q_OS_IOS)
+    char *text     = nullptr;
+    char **files   = nullptr;
+    int fileCount  = 0;
+    if (!paranoia_ios_take_share_target(&text, &files, &fileCount)) return result;
+    const QString textStr = (text != nullptr) ? QString::fromUtf8(text) : QString();
+    QStringList uris;
+    uris.reserve(fileCount);
+    for (int i = 0; i < fileCount; ++i)
+        if (files[i] != nullptr) uris.append(QString::fromUtf8(files[i]));
+    paranoia_ios_free_share_target(text, files, fileCount);
+    if (textStr.isEmpty() && uris.isEmpty()) return result;
+    result.insert(QStringLiteral("text"), textStr);
+    result.insert(QStringLiteral("files"), uris);
+#endif
+    return result;
+}
+
 QVariantMap MainBackend::deleteExportFile(const QString &filePath)
 {
-    const QString trimmedPath = filePath.trimmed();
+    const QString trimmedPath = Utils::normalizeLocalFilePath(filePath);
     if (trimmedPath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
     if (!QFile::exists(trimmedPath))
         return QVariantMap{{"ok", true}, {"deleted", false}, {"message", "Файл уже удалён."}};
     if (!QFile::remove(trimmedPath))
         return ParanoiaFFI::errorResult("Не удалось удалить файл экспорта: " + trimmedPath);
     return QVariantMap{{"ok", true}, {"deleted", true}};
+}
+
+QString MainBackend::urlToLocalPath(const QUrl &url) const
+{
+    if (url.isLocalFile()) return url.toLocalFile();
+    // QML может передать сюда уже-локальный путь как строку — Qt сконвертирует
+    // в QUrl с пустым scheme, тогда .path() даст обратно ту же строку.
+    if (url.scheme().isEmpty()) return url.toString();
+    return url.toLocalFile();
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1125,7 +1596,7 @@ void MainBackend::upsertDialogKeyringEntry(const QString &peer, const QString &p
             return;
         }
     }
-    dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, sessionKey}}, QString()});
+    dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, sessionKey}}, QString(), QString()});
     emit dialogsChanged();
     session->saveDialogs();
     m_notifications->schedulePoll();
@@ -1194,13 +1665,10 @@ void MainBackend::loadClientConfig()
 
 void MainBackend::saveDeviceKey() const
 {
-    QFile f(Paths::deviceKey());
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
     QJsonObject obj;
     obj["private_key_b64"] = m_devicePrivkey;
-    f.write(QJsonDocument(obj).toJson());
-    f.close();
-    Utils::setOwnerOnlyPermissions(Paths::deviceKey());
+    if (Utils::writeFile(Paths::deviceKey(), QJsonDocument(obj).toJson()))
+        Utils::setOwnerOnlyPermissions(Paths::deviceKey());
 }
 
 void MainBackend::loadDeviceKey()

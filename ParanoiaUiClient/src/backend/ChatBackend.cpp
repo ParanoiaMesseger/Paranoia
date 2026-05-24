@@ -1,7 +1,10 @@
 #include "ChatBackend.hpp"
 
+#include "EncryptedImageProvider.hpp"
+
 #include "session/Dialog.hpp"
 #include "session/SessionStore.hpp"
+#include "utils/Utils.hpp"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -27,12 +30,25 @@
 
 namespace
 {
-    QString localPathFromUrlOrPath(const QString &urlOrPath)
+    struct ProgressCtx
     {
-        const QUrl url(urlOrPath);
-        if (url.isValid() && url.isLocalFile()) return url.toLocalFile();
-        if (urlOrPath.startsWith(QStringLiteral("file://"))) return QUrl(urlOrPath).toLocalFile();
-        return urlOrPath;
+        ChatBackend *backend;
+        QString sendKey;
+    };
+
+    // C-функция с extern "C" linkage — для корректной передачи как
+    // paranoia_progress_callback в Rust FFI. Маршалит вызов на ChatBackend-thread
+    // через invokeMethod (QueuedConnection).
+    extern "C" void paranoia_chat_progress_trampoline(uint32_t chunkIndex, uint32_t total, void *userData)
+    {
+        auto *ctx = static_cast<ProgressCtx *>(userData);
+        if (!ctx || !ctx->backend) return;
+        ChatBackend *backend = ctx->backend;
+        const QString key    = ctx->sendKey;
+        QMetaObject::invokeMethod(
+            backend,
+            [backend, key, chunkIndex, total]() { emit backend->fileProgress(key, chunkIndex, total); },
+            Qt::QueuedConnection);
     }
 
     bool isContentUri(const QString &urlOrPath)
@@ -130,9 +146,8 @@ namespace
                               const QString &myUsername, const QMap<QString, QString> &peerIdToUsername)
     {
         const QString targetId = reaction.value(QStringLiteral("target_id")).toString();
-        const QString emoji =
-            reaction.value(QStringLiteral("emoji"), reaction.value(QStringLiteral("text"))).toString();
-        const QString sender = reaction.value(QStringLiteral("sender")).toString();
+        const QString emoji    = reaction.value(QStringLiteral("emoji")).toString();
+        const QString sender   = reaction.value(QStringLiteral("sender")).toString();
         if (targetId.isEmpty() || emoji.isEmpty() || sender.isEmpty()) return;
 
         for (auto &messageValue : cache) {
@@ -157,7 +172,6 @@ namespace
             }
             const QVariantList reactionsList           = reactionsForEvents(events, myId, myUsername, peerIdToUsername);
             message[QStringLiteral("reaction_events")] = events;
-            message[QStringLiteral("reactions")]       = reactionsList;
             message[QStringLiteral("reactions_json")]  = QString::fromUtf8(
                 QJsonDocument(QJsonArray::fromVariantList(reactionsList)).toJson(QJsonDocument::Compact));
             messageValue = message;
@@ -281,6 +295,18 @@ void ChatBackend::stopChat()
 
 void ChatBackend::sendText(const QString &text)
 {
+    sendTextMessage(text);
+}
+
+void ChatBackend::sendTextReply(const QString &text, const QString &replyToId, const QString &replySender,
+                                const QString &replyText)
+{
+    sendTextMessage(text, replyToId, replySender, replyText);
+}
+
+void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId, const QString &replySender,
+                                  const QString &replyText)
+{
     if (m_activePeer.isEmpty()) {
         emit sendError("Нет активного диалога.");
         return;
@@ -299,7 +325,9 @@ void ChatBackend::sendText(const QString &text)
     const QString serverId     = session->serverId;
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
-    const QString sendKey      = peer + QChar('\n') + text;
+    const bool hasReply        = !replyToId.trimmed().isEmpty();
+    const QString replySummary = replyText.simplified().left(180);
+    const QString sendKey      = peer + QChar('\n') + text + QChar('\n') + replyToId + QChar('\n') + replySender;
     const qint64 nowMs         = QDateTime::currentMSecsSinceEpoch();
     for (auto it = m_recentSendAtMs.begin(); it != m_recentSendAtMs.end();) {
         if (nowMs - it.value() > 10'000)
@@ -313,7 +341,8 @@ void ChatBackend::sendText(const QString &text)
     m_recentSendAtMs[sendKey] = nowMs;
 
     QPointer self(this);
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, text, keyringJson, sendKey]() {
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, text, keyringJson, sendKey,
+                                          hasReply, replyToId, replySender, replySummary]() {
         if (!self) return;
         QString json;
         QString err;
@@ -323,7 +352,11 @@ void ChatBackend::sendText(const QString &text)
                 err = "client_not_ready";
             } else {
                 const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                json                 = session->ffi->send_text_json_keyring(serverId, peerId, keyringJson, text);
+                if (hasReply)
+                    json = session->ffi->send_text_reply_json_keyring(serverId, peerId, keyringJson, text, replyToId,
+                                                                      replySender, replySummary);
+                else
+                    json = session->ffi->send_text_json_keyring(serverId, peerId, keyringJson, text);
                 if (json.isEmpty()) err = ParanoiaFFI::last_error();
             }
         }
@@ -440,12 +473,15 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
 
     const QString source       = fileUrlOrPath.trimmed();
     const bool sourceIsContent = isContentUri(source);
-    const QString originalPath = sourceIsContent ? QString() : localPathFromUrlOrPath(source);
+    const QString originalPath = sourceIsContent ? QString() : Utils::normalizeLocalFilePath(source);
     qint64 originalSize        = -1;
     QString originalMimeType;
     if (!sourceIsContent) {
         const QFileInfo info(originalPath);
         if (!info.exists() || !info.isFile() || !info.isReadable()) {
+            qWarning().noquote() << "ChatBackend::sendFile file not readable; size=" << info.size()
+                                 << "exists=" << info.exists() << "isFile=" << info.isFile()
+                                 << "isReadable=" << info.isReadable();
             emit sendError("Файл недоступен для чтения.");
             return;
         }
@@ -461,6 +497,7 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
         peer + QChar('\n') + (sourceIsContent ? source : originalPath) + QChar('\n') + QString::number(originalSize);
     if (m_sendInFlightKeys.contains(sendKey)) return;
     m_sendInFlightKeys.insert(sendKey);
+    incrementFilesInFlight();
 
     QPointer self(this);
     QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, source,
@@ -477,6 +514,13 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
         if (err.isEmpty() && (!info.exists() || !info.isFile() || !info.isReadable())) err = "file_read_error";
         const QString mimeType =
             originalMimeType.isEmpty() ? QMimeDatabase().mimeTypeForFile(info).name() : originalMimeType;
+
+        // Контекст для прогресс-callback'а из Tokio-потока FFI. Backend живёт
+        // от main() до выхода процесса, поэтому raw-указатель безопасен;
+        // QMetaObject::invokeMethod внутри trampoline маршалит вызов на
+        // ChatBackend-thread.
+        std::unique_ptr<ProgressCtx> ctx(new ProgressCtx{self.data(), sendKey});
+
         {
             QMutexLocker locker(&session->ffiMutex);
             if (!err.isEmpty()) {
@@ -485,14 +529,20 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
                 err = "client_not_ready";
             } else {
                 const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                json = session->ffi->send_file_json_keyring(serverId, peerId, keyringJson, path, mimeType);
+                json = session->ffi->send_file_json_keyring_with_progress(
+                    serverId, peerId, keyringJson, path, mimeType,
+                    &paranoia_chat_progress_trampoline, ctx.get());
                 if (json.isEmpty()) err = ParanoiaFFI::last_error();
             }
         }
+        // ctx живёт до конца блока — выйдем за пределы lambda → unique_ptr
+        // удалит его. К этому моменту все progress-вызовы уже закончились (FFI
+        // вызвал callback синхронно из своего потока перед возвратом).
         if (json.isEmpty()) {
             QMetaObject::invokeMethod(self, [self, err, sendKey]() {
                 if (!self) return;
                 self->m_sendInFlightKeys.remove(sendKey);
+                self->decrementFilesInFlight();
                 if (err == "file_read_error")
                     emit self->sendError("Не удалось прочитать файл.");
                 else if (err == "server_unavailable")
@@ -505,6 +555,7 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
         QMetaObject::invokeMethod(self, [self, peer, json, sendKey]() {
             if (!self) return;
             self->m_sendInFlightKeys.remove(sendKey);
+            self->decrementFilesInFlight();
             self->appendMessages(peer, self->parseMessages(json));
             if (peer == self->m_activePeer) {
                 self->fetchMessages();
@@ -513,6 +564,20 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
             }
         });
     });
+}
+
+void ChatBackend::incrementFilesInFlight()
+{
+    ++m_filesInFlight;
+    emit filesInFlightChanged();
+}
+
+void ChatBackend::decrementFilesInFlight()
+{
+    if (m_filesInFlight > 0) {
+        --m_filesInFlight;
+        emit filesInFlightChanged();
+    }
 }
 
 void ChatBackend::saveAttachment(const QString &messageId, const QString &targetUrlOrPath)
@@ -542,7 +607,7 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
     if (targetIsContent) {
         path = temporaryAttachmentPath();
     } else {
-        const QString localTarget = localPathFromUrlOrPath(target);
+        const QString localTarget = Utils::normalizeLocalFilePath(target);
         const QFileInfo targetInfo(localTarget);
         path = targetInfo.exists() && targetInfo.isDir() ? uniqueFilePath(localTarget, filename) : localTarget;
     }
@@ -577,10 +642,11 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
         if (targetIsContent) QFile::remove(path);
 #endif
         const QString savedPath = targetIsContent ? target + QStringLiteral("/") + filename : path;
-        QMetaObject::invokeMethod(self, [self, peer, savedPath, rc, err]() {
+        QMetaObject::invokeMethod(self, [self, peer, savedPath, messageId, filename, rc, err]() {
             if (!self) return;
             if (rc == 0) {
                 emit self->attachmentSaved(savedPath);
+                emit self->attachmentDownloaded(messageId, filename);
                 if (peer == self->m_activePeer) self->loadHistory(peer);
             } else {
                 emit self->receiveError("Не удалось сохранить файл: " + userFacingAttachmentError(err));
@@ -620,7 +686,7 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
     QThreadPool::globalInstance()->start(
         [self, session, peer, serverId, peerServerId, keyringJson, messageId, requestKey]() {
             if (!self) return;
-            QString path;
+            QByteArray bytes;
             QString err;
             {
                 QMutexLocker locker(&session->ffiMutex);
@@ -628,14 +694,15 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
                     err = QStringLiteral("client_not_ready");
                 } else {
                     const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                    path = session->ffi->cache_attachment_keyring(serverId, peerId, keyringJson, messageId);
-                    if (path.isEmpty()) err = ParanoiaFFI::last_error();
+                    bytes = session->ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
+                    if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
                 }
             }
-            QMetaObject::invokeMethod(self, [self, peer, requestKey, path, err]() {
+            QMetaObject::invokeMethod(self, [self, peer, requestKey, messageId, bytes, err]() {
                 if (!self) return;
                 self->m_previewInFlightIds.remove(requestKey);
-                if (!path.isEmpty()) {
+                if (!bytes.isEmpty() && self->m_imageProvider) {
+                    self->m_imageProvider->setBytes(messageId, bytes);
                     if (peer == self->m_activePeer) self->loadHistory(peer);
                     return;
                 }
@@ -707,6 +774,166 @@ void ChatBackend::deleteMessagesUntil(quint64 cutSeq)
             } else {
                 emit self->serverHistoryCleared(peer);
             }
+        });
+    });
+}
+
+namespace {
+    struct SeqRange { quint64 from; quint64 to; };
+
+    // Склейка отсортированных диапазонов [from, to] в непрерывные.
+    QList<SeqRange> mergeRanges(QList<SeqRange> ranges) {
+        if (ranges.size() < 2) return ranges;
+        std::sort(ranges.begin(), ranges.end(),
+                  [](const SeqRange &a, const SeqRange &b) { return a.from < b.from; });
+        QList<SeqRange> merged;
+        merged.reserve(ranges.size());
+        merged.append(ranges.first());
+        for (int i = 1; i < ranges.size(); ++i) {
+            const auto &cur = ranges[i];
+            auto &last      = merged.last();
+            if (cur.from <= last.to + 1) {
+                last.to = std::max(last.to, cur.to);
+            } else {
+                merged.append(cur);
+            }
+        }
+        return merged;
+    }
+}
+
+void ChatBackend::deleteMessages(const QStringList &messageIds)
+{
+    if (m_activePeer.isEmpty() || messageIds.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) return;
+
+    // Собираем диапазоны: один основной seq на сообщение + body-диапазон для
+    // вложений (чанки автоматически чистятся вместе с заголовком).
+    QList<SeqRange> ranges;
+    const QSet<QString> idSet(messageIds.begin(), messageIds.end());
+    QStringList missing;
+    for (const auto &cached : m_messageCache.value(m_activePeer)) {
+        const QVariantMap msg = cached.toMap();
+        const QString id      = msg.value("id").toString();
+        if (!idSet.contains(id)) continue;
+        bool hasSeq       = false;
+        const quint64 seq = msg.value("seq").toULongLong(&hasSeq);
+        if (!hasSeq || seq == 0) {
+            missing.append(id);
+            continue;
+        }
+        ranges.append({seq, seq});
+        const quint64 bodyFrom = msg.value("body_from_seq").toULongLong();
+        const quint64 bodyTo   = msg.value("body_to_seq").toULongLong();
+        if (bodyFrom > 0 && bodyTo >= bodyFrom) ranges.append({bodyFrom, bodyTo});
+    }
+    if (ranges.isEmpty()) {
+        if (!missing.isEmpty())
+            emit receiveError(QStringLiteral("Не удалось определить seq у %1 сообщений.").arg(missing.size()));
+        return;
+    }
+    ranges = mergeRanges(ranges);
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    const QSet<QString> idsToDelete = idSet;
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, ranges,
+                                          idsToDelete]() {
+        if (!self) return;
+        QString err;
+        int failed = 0;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (!session->ffi) {
+                err = "client_not_ready";
+                failed = ranges.size();
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                for (const auto &r : ranges) {
+                    const int rc =
+                        session->ffi->delete_dialogue_range_keyring(serverId, peerId, keyringJson, r.from, r.to);
+                    if (rc != 0) {
+                        ++failed;
+                        if (err.isEmpty()) err = ParanoiaFFI::last_error();
+                    }
+                }
+            }
+        }
+        QMetaObject::invokeMethod(self, [self, peer, idsToDelete, failed, err]() {
+            if (!self) return;
+            if (failed == 0) {
+                auto &cache = self->m_messageCache[peer];
+                QVariantList kept;
+                QSet<QString> keptIds;
+                for (const auto &msg : cache) {
+                    const QVariantMap map = msg.toMap();
+                    const QString id      = map.value("id").toString();
+                    if (idsToDelete.contains(id)) continue;
+                    kept.append(msg);
+                    if (!id.isEmpty()) keptIds.insert(id);
+                }
+                cache                 = kept;
+                self->m_seenIds[peer] = keptIds;
+                emit self->messagesReceived(peer, cache);
+                emit self->messagesDeleted(peer);
+                emit self->dialogsChanged();
+            } else if (err == "server_unavailable")
+                emit self->serverHistoryError("Сервер недоступен.");
+            else
+                emit self->serverHistoryError("Не удалось удалить часть сообщений: " + err);
+        });
+    });
+}
+
+void ChatBackend::removeAttachmentChunksFromServer(const QString &messageId)
+{
+    if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) return;
+
+    quint64 bodyFrom = 0;
+    quint64 bodyTo   = 0;
+    for (const auto &cached : m_messageCache.value(m_activePeer)) {
+        const QVariantMap msg = cached.toMap();
+        if (msg.value("id").toString() != messageId) continue;
+        bodyFrom = msg.value("body_from_seq").toULongLong();
+        bodyTo   = msg.value("body_to_seq").toULongLong();
+        break;
+    }
+    if (bodyFrom == 0 || bodyTo < bodyFrom) return;
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, bodyFrom, bodyTo]() {
+        if (!self) return;
+        int rc      = -1;
+        QString err;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (!session->ffi) {
+                err = "client_not_ready";
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                rc                   = session->ffi->remove_server_range_keyring(serverId, peerId, keyringJson,
+                                                                                 bodyFrom, bodyTo);
+                if (rc != 0) err = ParanoiaFFI::last_error();
+            }
+        }
+        QMetaObject::invokeMethod(self, [self, rc, err]() {
+            if (!self) return;
+            if (rc != 0 && err != "server_unavailable")
+                emit self->serverHistoryError("Не удалось удалить файл с сервера: " + err);
         });
     });
 }
@@ -836,6 +1063,73 @@ void ChatBackend::fetchMessages()
 
 void ChatBackend::requestFileAccessPermissions() { requestAndroidFileAccessIfNeeded(); }
 
+QString ChatBackend::getDraft(const QString &peer) const
+{
+    if (peer.isEmpty()) return {};
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const Dialog *dlg = session->findDialog(peer);
+    return dlg ? dlg->draft : QString();
+}
+
+void ChatBackend::setDraft(const QString &peer, const QString &text)
+{
+    if (peer.isEmpty()) return;
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    Dialog *dlg = session->findDialog(peer);
+    if (!dlg) return;
+    if (dlg->draft == text) return;
+    dlg->draft = text;
+    session->saveDialogs();
+}
+
+void ChatBackend::clearDraft(const QString &peer)
+{
+    setDraft(peer, QString());
+}
+
+void ChatBackend::pickPhotoFromGallery()
+{
+#if defined(Q_OS_ANDROID)
+    const QJniObject context = androidContext();
+    if (!context.isValid()) return;
+    QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaAndroidUtils", "pickMediaFromGallery",
+                                       "(Landroid/content/Context;Z)V", context.object<jobject>(),
+                                       static_cast<jboolean>(true));
+    clearPendingAndroidException();
+#endif
+}
+
+void ChatBackend::pickVideoFromGallery()
+{
+#if defined(Q_OS_ANDROID)
+    const QJniObject context = androidContext();
+    if (!context.isValid()) return;
+    QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaAndroidUtils", "pickMediaFromGallery",
+                                       "(Landroid/content/Context;Z)V", context.object<jobject>(),
+                                       static_cast<jboolean>(false));
+    clearPendingAndroidException();
+#endif
+}
+
+void ChatBackend::consumePickedAttachment()
+{
+#if defined(Q_OS_ANDROID)
+    if (m_activePeer.isEmpty()) return;
+    const QJniObject context = androidContext();
+    if (!context.isValid()) return;
+    const QJniObject result = QJniObject::callStaticObjectMethod(
+        "app/paranoia/client/ParanoiaAndroidUtils", "takePickedAttachment",
+        "(Landroid/content/Context;)Ljava/lang/String;", context.object<jobject>());
+    clearPendingAndroidException();
+    if (!result.isValid()) return;
+    const QString uri = result.toString();
+    if (uri.isEmpty()) return;
+    sendFile(uri);
+#endif
+}
+
 void ChatBackend::commitInputMethod()
 {
     if (auto *inputMethod = QGuiApplication::inputMethod()) inputMethod->commit();
@@ -877,6 +1171,9 @@ void ChatBackend::onApplicationStateChanged(Qt::ApplicationState state)
     if (state == Qt::ApplicationActive) {
         m_activePollRetryCount = 0;
         scheduleActiveChatPoll(0);
+        // Возвращаемся из системного photo/video picker'а — забираем результат
+        // (если он был) и шлём как обычное вложение.
+        consumePickedAttachment();
     } else {
         m_activePollTimer->stop();
     }
@@ -1110,8 +1407,6 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
             const QVariantMap existing = found->toMap();
             if (existing.contains(QStringLiteral("reaction_events")))
                 updated[QStringLiteral("reaction_events")] = existing.value(QStringLiteral("reaction_events"));
-            if (existing.contains(QStringLiteral("reactions")))
-                updated[QStringLiteral("reactions")] = existing.value(QStringLiteral("reactions"));
             if (existing.contains(QStringLiteral("reactions_json")))
                 updated[QStringLiteral("reactions_json")] = existing.value(QStringLiteral("reactions_json"));
             *found = updated;
@@ -1155,10 +1450,24 @@ void ChatBackend::endMessagesLoading()
     if (wasLoading && !messagesLoading()) emit messagesLoadingChanged();
 }
 
-QVariantList ChatBackend::parseMessages(const QString &json)
+QVariantList ChatBackend::parseMessages(const QString &json) const
 {
     const auto session = SessionStore::instance()->activeSession();
     const QString myId = session ? (session->serverId.isEmpty() ? session->username : session->serverId) : QString();
+    const QString myUsername = session ? session->username : QString();
+    QMap<QString, QString> peerIdToUsername;
+    if (session) {
+        for (const auto &d : session->dialogs) {
+            if (!d.peerServerId.isEmpty()) peerIdToUsername.insert(d.peerServerId, d.peer);
+            if (!d.peer.isEmpty()) peerIdToUsername.insert(d.peer, d.peer);
+        }
+    }
+    const auto displayNameForSender = [&](const QString &sender, bool selfAsYou) {
+        if (sender.isEmpty()) return QString();
+        if ((!myId.isEmpty() && sender == myId) || (!myUsername.isEmpty() && sender == myUsername))
+            return selfAsYou ? QStringLiteral("Вы") : myUsername;
+        return peerIdToUsername.value(sender, sender);
+    };
     auto doc           = QJsonDocument::fromJson(json.toUtf8());
     if (!doc.isArray()) return {};
     QVariantList result;
@@ -1167,10 +1476,18 @@ QVariantList ChatBackend::parseMessages(const QString &json)
         QVariantMap msg;
         const QString kind          = obj["kind"].toString(QStringLiteral("text"));
         const QString mimeType      = obj["mime_type"].toString();
-        const QString cachePath     = obj["cache_path"].toString();
-        const QString previewSource = isImageAttachment(kind, mimeType) ? localFileUrlIfReadable(cachePath) : QString();
+        const QString messageId     = obj["id"].toString();
+        // Превью image: путь через EncryptedImageProvider, plaintext только в RAM.
+        // Доступно когда мы уже расшифровали байты (ensureImagePreview залил их).
+        const bool isImage          = isImageAttachment(kind, mimeType);
+        const bool providerHas      = isImage && m_imageProvider && !messageId.isEmpty()
+                                  && m_imageProvider->contains(messageId);
+        const QString previewSource = providerHas
+                                          ? QStringLiteral("image://secure/") + messageId
+                                          : QString();
         msg["id"]                   = obj["id"].toString();
         msg["sender"]               = obj["sender"].toString();
+        msg["sender_name"]          = displayNameForSender(msg["sender"].toString(), false);
         msg["status"]               = obj["status"].toString(QStringLiteral("pending"));
         msg["kind"]                 = kind;
         msg["filename"]             = obj["filename"].toString();
@@ -1181,18 +1498,31 @@ QVariantList ChatBackend::parseMessages(const QString &json)
         msg["transfer_id"]          = obj.value("transfer_id").toString();
         msg["body_from_seq"]        = obj.value("body_from_seq").toVariant().toULongLong();
         msg["body_to_seq"]          = obj.value("body_to_seq").toVariant().toULongLong();
-        msg["cache_path"]           = cachePath;
+        // cache_path в QML больше не используется — все превью идут через
+        // image://secure/<id>. Не отдаём наружу.
         msg["preview_source"]       = previewSource;
         if (kind == "text")
-            msg["text"] = obj.contains("text") ? obj["text"].toString() : extractText(obj["content"].toString());
+            msg["text"] = obj["text"].toString();
         else if (kind == "file" || kind == "image" || kind == "voice")
             msg["text"] = obj["filename"].toString(obj["text"].toString("Файл"));
         else if (kind == "reaction") {
-            msg["text"]      = obj["text"].toString();
-            msg["emoji"]     = obj["emoji"].toString(obj["text"].toString());
+            msg["emoji"]     = obj["emoji"].toString();
             msg["target_id"] = obj["target_id"].toString();
         } else
             msg["text"] = obj["text"].toString();
+        const QString replyToId = obj.value(QStringLiteral("reply_to_id")).toString();
+        QString resolvedReplyId;
+        QString resolvedReplySender;
+        QString resolvedReplyText;
+        if (!replyToId.isEmpty()) {
+            resolvedReplyId     = replyToId;
+            resolvedReplySender = obj.value(QStringLiteral("reply_sender")).toString();
+            resolvedReplyText   = obj.value(QStringLiteral("reply_text")).toString();
+        }
+        msg["reply_to_id"]       = resolvedReplyId;
+        msg["reply_sender"]      = resolvedReplySender;
+        msg["reply_sender_name"] = resolvedReplySender.isEmpty() ? QString() : displayNameForSender(resolvedReplySender, true);
+        msg["reply_text"]        = resolvedReplyText;
         msg["ts"]                = obj.value("ts").toVariant().toLongLong();
         msg["seq"]               = obj.value("seq").toVariant().toULongLong();
         msg["isMe"]              = (obj["sender"].toString() == myId);
@@ -1204,13 +1534,3 @@ QVariantList ChatBackend::parseMessages(const QString &json)
     return result;
 }
 
-QString ChatBackend::extractText(const QString &raw)
-{
-    // Parse Rust Debug format: Text("hello") → hello
-    if (raw.startsWith("Text(\"") && raw.endsWith("\")")) return raw.mid(6, raw.length() - 8);
-    if (raw.startsWith("Image(")) return "[Изображение]";
-    if (raw.startsWith("File(")) return "[Файл]";
-    if (raw.startsWith("Voice(")) return "[Голосовое]";
-    if (raw.startsWith("ReadReceipt(") || raw.startsWith("Delete(")) return QString();
-    return raw;
-}

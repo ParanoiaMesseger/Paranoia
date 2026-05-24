@@ -55,3 +55,10 @@ extern "C" void paranoia_macos_show_message_count(unsigned long long count)
                                                                           trigger:nil];
     [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
 }
+
+extern "C" void paranoia_macos_clear_delivered_notifications()
+{
+    UNUserNotificationCenter *center = UNUserNotificationCenter.currentNotificationCenter;
+    [center removeAllDeliveredNotifications];
+    [center removeAllPendingNotificationRequests];
+}

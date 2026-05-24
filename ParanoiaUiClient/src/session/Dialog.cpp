@@ -37,6 +37,7 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
         QString peer         = obj["peer"].toString();
         QString peerServerId = obj["peerServerId"].toString();
         QString lastMsg      = obj["lastMsg"].toString();
+        QString draft        = obj["draft"].toString();
         bool receiptsEnabled = obj["receiptsEnabled"].toBool(true);
         QList<DialogKeyEntry> keyring;
 
@@ -51,7 +52,7 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
 
         std::sort(keyring.begin(), keyring.end(),
                   [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
-        if (!peer.isEmpty()) dialogs.append({peer, peerServerId, keyring, lastMsg, receiptsEnabled});
+        if (!peer.isEmpty()) dialogs.append({peer, peerServerId, keyring, lastMsg, draft, receiptsEnabled});
     }
     return dialogs;
 }
@@ -75,12 +76,13 @@ void Dialog::saveToPath(const QString &path, const QList<Dialog> &dialogs)
         }
         o["keyring"]         = keyring;
         o["lastMsg"]         = d.lastMsg;
+        if (!d.draft.isEmpty()) o["draft"] = d.draft;
         o["receiptsEnabled"] = d.receiptsEnabled;
         arr.append(QJsonValue(o));
     }
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-    f.write(QJsonDocument(arr).toJson());
-    f.close();
-    Utils::setOwnerOnlyPermissions(path);
+    // Через Utils::writeFile — для путей внутри profiles/ это уйдёт в
+    // paranoia_vault_encrypt_json и ляжет на диск зашифрованным.
+    // Прямая запись через QFile сломает следующее чтение (нет magic PVL1).
+    if (Utils::writeFile(path, QJsonDocument(arr).toJson()))
+        Utils::setOwnerOnlyPermissions(path);
 }

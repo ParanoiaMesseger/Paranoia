@@ -15,8 +15,8 @@ use crate::{
     packet::PacketInner,
     store::LocalStore,
     transport::{
-        CoreArrivedGet, CoreArrivedSet, CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket,
-        Transport,
+        CoreArrivedGet, CoreArrivedSet, CoreDeterminate, CoreMap, CoreNotify, CorePull, CorePush,
+        MapResponse, RawPacket, Transport,
     },
     types::{
         AttachmentKind, CHUNK_SIZE_MAX, CHUNK_SIZE_MIN, ClientConfig, DialogueConfig, DialogueKey,
@@ -25,6 +25,10 @@ use crate::{
 };
 
 const FILE_PULL_CHUNKS_PER_REQUEST: u32 = 4;
+
+/// Сколько подряд идущих живых seq тянуть одним bounded /pull в receive().
+/// Худший случай — 16 чанков по 192 KB ≈ 3 MB на один HTTPS-ответ.
+const RECEIVE_PULL_BATCH: u64 = 16;
 
 pub struct Dialogue {
     pub key: DialogueKey,
@@ -61,6 +65,22 @@ impl Dialogue {
         self.send(MessageContent::Text(text.into())).await
     }
 
+    pub async fn send_text_reply(
+        &self,
+        text: impl Into<String>,
+        reply_to_id: impl Into<String>,
+        reply_sender: impl Into<String>,
+        reply_text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send(MessageContent::TextReply {
+            text: text.into(),
+            reply_to_id: reply_to_id.into(),
+            reply_sender: reply_sender.into(),
+            reply_text: reply_text.into(),
+        })
+        .await
+    }
+
     pub async fn send_file(
         &self,
         filename: impl Into<String>,
@@ -82,13 +102,27 @@ impl Dialogue {
         mime_type: impl Into<String>,
         path: impl AsRef<Path>,
     ) -> Result<Vec<Message>> {
+        self.send_file_path_with_progress(filename, mime_type, path, |_, _| {})
+            .await
+    }
+
+    pub async fn send_file_path_with_progress<F>(
+        &self,
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        path: impl AsRef<Path>,
+        on_progress: F,
+    ) -> Result<Vec<Message>>
+    where
+        F: FnMut(u32, u32),
+    {
         let mime_type = mime_type.into();
         let kind = if mime_type.starts_with("image/") {
             AttachmentKind::Image
         } else {
             AttachmentKind::File
         };
-        self.send_path_chunked(kind, filename.into(), mime_type, path.as_ref())
+        self.send_path_chunked(kind, filename.into(), mime_type, path.as_ref(), on_progress)
             .await
     }
 
@@ -121,14 +155,6 @@ impl Dialogue {
         Ok(())
     }
 
-    pub async fn delete_message(&self, target_id: &str) -> Result<()> {
-        self.send(MessageContent::Delete {
-            target_id: target_id.to_string(),
-        })
-        .await?;
-        Ok(())
-    }
-
     pub async fn send_reaction(&self, target_id: &str, emoji: &str) -> Result<Message> {
         self.send(MessageContent::Reaction {
             target_id: target_id.to_string(),
@@ -139,66 +165,133 @@ impl Dialogue {
 
     /// Получить новые сообщения с сервера.
     /// Возвращает (сообщения, кол-во ошибок расшифровки).
-    /// Ошибки расшифровки означают несовпадение ключа диалога.
+    ///
+    /// Алгоритм:
+    /// 1. `/map(0, 0)` с пагинацией → полная карта живых seq.
+    /// 2. Forward-pull: тянем seq'ы > cursor небольшими bounded-батчами,
+    ///    перепрыгивая чанки за `FileHeader` (тела файлов качаются лениво).
+    /// 3. Tombstone sweep: локальные сообщения, чьих server_seq нет в карте,
+    ///    удаляются — это синхронизация ranged-delete'ов с других устройств
+    ///    и от пира.
     pub async fn receive(&self) -> Result<(Vec<Message>, usize)> {
         let username = &self.client_cfg.username;
         let mut messages = Vec::new();
         let mut decrypt_errors: usize = 0;
-        let mut cursor = self.store.get_last_pulled_seq(&self.key)?;
 
+        // 1. Полная карта живых seq.
+        let mut all_runs: Vec<(u64, u64)> = Vec::new();
+        let mut last_seq_total = 0u64;
+        let mut after = 0u64;
         loop {
-            let Some(to_seq) = cursor.checked_add(1) else {
+            let m = self.fetch_map(after, 0).await?;
+            last_seq_total = last_seq_total.max(m.last_seq);
+            let Some(last_end) = m.runs.last().map(|(_, e)| *e) else {
                 break;
             };
-            let raw_packets = self.pull_packets(cursor, to_seq).await?;
-            if raw_packets.is_empty() {
-                self.store.set_last_pulled_seq(&self.key, cursor)?;
+            all_runs.extend(m.runs.into_iter());
+            if !m.truncated {
                 break;
             }
+            after = last_end;
+        }
+        all_runs.sort_by_key(|r| r.0);
 
-            for pkt in raw_packets {
-                let mut next_cursor = pkt.seq;
-                let inner = match self.decrypt_packet(pkt.seq, &pkt.payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("Cannot decrypt seq={}: {e}", pkt.seq);
-                        decrypt_errors += 1;
-                        cursor = next_cursor;
-                        self.store.set_last_pulled_seq(&self.key, cursor)?;
-                        continue;
-                    }
-                };
-
-                if let MessageContent::FileHeader { chunks, .. } = &inner.content {
-                    next_cursor = pkt
-                        .seq
-                        .checked_add(*chunks as u64)
-                        .ok_or_else(|| anyhow::anyhow!("file range overflow"))?;
-                }
-
-                // Собственные пакеты из локальной БД — обновляем статус до Delivered.
-                // Если seq неизвестен локально, это история другого устройства того же пользователя.
-                if inner.sender == *username {
-                    if let Some(msg_id) = self.store.get_message_by_seq(&self.key, pkt.seq)? {
-                        self.store
-                            .update_status(&msg_id, MessageStatus::Delivered)?;
-                        cursor = next_cursor;
-                        self.store.set_last_pulled_seq(&self.key, cursor)?;
-                        // Возвращаем обновлённое сообщение, чтобы UI сразу обновил статус.
-                        if let Some(updated) = self.store.get_message_by_id(&self.key, &msg_id)? {
-                            messages.push(updated);
-                        }
-                        continue;
-                    }
-                }
-
-                // Обрабатываем входящий пакет
-                if let Some(msg) = self.process_incoming(inner, pkt.seq)? {
-                    messages.push(msg);
-                }
-                cursor = next_cursor;
-                self.store.set_last_pulled_seq(&self.key, cursor)?;
+        // 2. Forward-pull новых пакетов.
+        let mut cursor = self.store.get_last_pulled_seq(&self.key)?;
+        for (begin, end) in &all_runs {
+            if *end <= cursor {
+                continue;
             }
+            let run_start = (*begin).max(cursor.saturating_add(1));
+            let mut seq = run_start;
+            while seq <= *end {
+                let batch_end = seq.saturating_add(RECEIVE_PULL_BATCH - 1).min(*end);
+                let after = seq.saturating_sub(1);
+                let raw_packets = self.pull_packets(after, batch_end).await?;
+                if raw_packets.is_empty() {
+                    cursor = batch_end;
+                    self.store.set_last_pulled_seq(&self.key, cursor)?;
+                    seq = batch_end.saturating_add(1);
+                    continue;
+                }
+                let mut sorted = raw_packets;
+                sorted.sort_by_key(|p| p.seq);
+
+                let mut skip_until: Option<u64> = None;
+                for pkt in sorted {
+                    if matches!(skip_until, Some(until) if pkt.seq <= until) {
+                        continue;
+                    }
+                    skip_until = None;
+
+                    let inner = match self.decrypt_packet(pkt.seq, &pkt.payload) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("Cannot decrypt seq={}: {e}", pkt.seq);
+                            decrypt_errors += 1;
+                            cursor = pkt.seq;
+                            self.store.set_last_pulled_seq(&self.key, cursor)?;
+                            continue;
+                        }
+                    };
+
+                    let advance_to =
+                        if let MessageContent::FileHeader { chunks, .. } = &inner.content {
+                            let body_end = pkt
+                                .seq
+                                .checked_add(*chunks as u64)
+                                .ok_or_else(|| anyhow::anyhow!("file range overflow"))?;
+                            if *chunks > 0 {
+                                skip_until = Some(body_end);
+                            }
+                            body_end
+                        } else {
+                            pkt.seq
+                        };
+
+                    if inner.sender == *username {
+                        if let Some(msg_id) =
+                            self.store.get_message_by_seq(&self.key, pkt.seq)?
+                        {
+                            self.store
+                                .update_status(&msg_id, MessageStatus::Delivered)?;
+                            cursor = advance_to;
+                            self.store.set_last_pulled_seq(&self.key, cursor)?;
+                            if let Some(updated) =
+                                self.store.get_message_by_id(&self.key, &msg_id)?
+                            {
+                                messages.push(updated);
+                            }
+                            continue;
+                        }
+                    }
+                    if let Some(msg) = self.process_incoming(inner, pkt.seq)? {
+                        messages.push(msg);
+                    }
+                    cursor = advance_to;
+                    self.store.set_last_pulled_seq(&self.key, cursor)?;
+                }
+
+                seq = cursor.saturating_add(1).max(batch_end.saturating_add(1));
+            }
+        }
+
+        // Подтянуть cursor к last_seq, если хвостовые seq были удалены.
+        if last_seq_total > cursor {
+            cursor = last_seq_total;
+            self.store.set_last_pulled_seq(&self.key, cursor)?;
+        }
+
+        // 3. Tombstone sweep.
+        let local_seqs = self.store.get_delivered_server_seqs(&self.key)?;
+        let tombstones: Vec<u64> = local_seqs
+            .into_iter()
+            .filter(|s| !seq_in_runs(&all_runs, *s))
+            .collect();
+        if !tombstones.is_empty() {
+            debug!("Tombstone sweep: removing {} local messages", tombstones.len());
+            self.store
+                .delete_messages_by_seqs(&self.key, &tombstones)?;
         }
 
         Ok((messages, decrypt_errors))
@@ -285,42 +378,74 @@ impl Dialogue {
             anyhow::bail!("attachment_not_found");
         };
         let file = match message.content {
-            MessageContent::File(file)
-            | MessageContent::Image(file)
-            | MessageContent::Voice(file) => {
-                if file.data.is_empty() && readable_path(&file).is_none() && file.size > 0 {
-                    anyhow::bail!("attachment_not_downloaded");
-                }
-                file
-            }
+            MessageContent::File(f) | MessageContent::Image(f) | MessageContent::Voice(f) => f,
             _ => anyhow::bail!("message_has_no_attachment"),
         };
-        if let Some(source) = readable_path(&file) {
-            copy_file(&source, Path::new(path))?;
-        } else {
-            write_bytes_atomic(Path::new(path), &file.data)?;
+        // 1) Зашифрованный persistent кеш → расшифровать в указанный target.
+        let enc_path = self.attachment_enc_path(message_id)?;
+        if enc_path.exists() {
+            let sealed = fs::read(&enc_path)?;
+            let plaintext =
+                crate::local_vault::decrypt_attachment(message_id.as_bytes(), &sealed)?;
+            write_bytes_atomic(Path::new(path), &plaintext)?;
+            return Ok(());
         }
-        Ok(())
+        // 2) Inline data в самом сообщении (мелкие вложения, не ушедшие в кэш).
+        if !file.data.is_empty() {
+            write_bytes_atomic(Path::new(path), &file.data)?;
+            return Ok(());
+        }
+        anyhow::bail!("attachment_not_downloaded")
     }
 
     pub fn delete_local_until(&self, cut_seq: u64) -> Result<()> {
-        self.store.delete_messages_until(&self.key, cut_seq)
+        self.store.delete_messages_until(&self.key, cut_seq)?;
+        self.store.set_last_pulled_seq(&self.key, cut_seq)
     }
 
-    pub async fn clear_server_history(&self, cut_seq: u64) -> Result<()> {
+    /// Удалить локальные сообщения с server_seq в `[from_seq, to_seq]`
+    /// (включительно). `from_seq == 0` интерпретируется как «с начала».
+    pub fn delete_local_range(&self, from_seq: u64, to_seq: u64) -> Result<()> {
+        if to_seq == 0 || (from_seq != 0 && from_seq > to_seq) {
+            return Ok(());
+        }
+        let start = from_seq.max(1);
+        let seqs: Vec<u64> = self
+            .store
+            .get_delivered_server_seqs(&self.key)?
+            .into_iter()
+            .filter(|s| *s >= start && *s <= to_seq)
+            .collect();
+        self.store.delete_messages_by_seqs(&self.key, &seqs)
+    }
+
+    /// Удалить пакеты на сервере в диапазоне `[from_seq, to_seq]` (включительно).
+    /// `from_seq == 0` означает «с начала диалога».
+    pub async fn remove_server_range(&self, from_seq: u64, to_seq: u64) -> Result<()> {
+        if to_seq == 0 {
+            anyhow::bail!("to_seq must be > 0");
+        }
         let username = &self.client_cfg.username;
         let partner = self.partner();
 
-        let msg = format!("{username}{partner}{cut_seq}");
+        let msg = format!("{username}{partner}{from_seq}{to_seq}");
         let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
         let core = CoreDeterminate {
             sender: username.clone(),
             recver: partner.to_string(),
-            cut_seq,
+            from_seq,
+            to_seq,
             sig,
         };
 
         self.transport.determinate(&core).await
+    }
+
+    /// Удалить всё с начала диалога до `cut_seq` включительно (обёртка над
+    /// [`remove_server_range`] для совместимости с существующим вызовом
+    /// «очистить серверную историю»).
+    pub async fn clear_server_history(&self, cut_seq: u64) -> Result<()> {
+        self.remove_server_range(0, cut_seq).await
     }
 
     pub async fn download_attachment(&self, message_id: &str, path: &str) -> Result<()> {
@@ -328,7 +453,11 @@ impl Dialogue {
             .await
     }
 
-    pub async fn cache_attachment(&self, message_id: &str) -> Result<String> {
+    /// Получить расшифрованные байты вложения в память. Plaintext НЕ кладётся
+    /// на диск — вызывающая сторона (Qt) сама держит их в RAM (например, в
+    /// `QQuickImageProvider`). Persistent на диске — только зашифрованный
+    /// `attachment-cache/<msg_id>.enc`.
+    pub async fn cache_attachment_bytes(&self, message_id: &str) -> Result<Vec<u8>> {
         let Some(message) = self.store.get_message_by_id(&self.key, message_id)? else {
             anyhow::bail!("attachment_not_found");
         };
@@ -338,18 +467,81 @@ impl Dialogue {
             | MessageContent::Voice(file) => file,
             _ => anyhow::bail!("message_has_no_attachment"),
         };
-        if let Some(path) = readable_path(file) {
-            return Ok(path.to_string_lossy().into_owned());
+
+        let enc_path = self.attachment_enc_path(message_id)?;
+
+        // 1) Persistent encrypted cache → decrypt в память.
+        if enc_path.exists() {
+            let sealed = fs::read(&enc_path)?;
+            let plaintext =
+                crate::local_vault::decrypt_attachment(message_id.as_bytes(), &sealed)?;
+            return Ok(plaintext);
         }
 
-        let cache_path = self.attachment_cache_path(message_id, &file.filename)?;
-        let cache_path_string = cache_path.to_string_lossy().into_owned();
-        self.write_attachment_to_path(message_id, &cache_path, Some(cache_path_string.clone()))
+        // 2) Inline data в самом сообщении (мелкие/локальные).
+        if !file.data.is_empty() {
+            return Ok(file.data.clone());
+        }
+
+        // 3) Скачать с сервера прямо в RAM (никаких plaintext-файлов на диске).
+        //    На диск уходит ТОЛЬКО зашифрованный enc_path.
+        let transfer_id = file
+            .transfer_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("attachment_not_downloaded"))?;
+        let header_seq = message
+            .server_seq
+            .ok_or_else(|| anyhow::anyhow!("attachment_not_downloaded"))?;
+        if file.chunk_count == 0 || file.body_to_seq < header_seq {
+            anyhow::bail!("attachment_not_downloaded");
+        }
+        let plaintext = self
+            .collect_remote_attachment_chunks(
+                header_seq,
+                &transfer_id,
+                file.chunk_count,
+                file.size,
+            )
             .await?;
-        Ok(cache_path_string)
+
+        // Шифруем и пишем persistent enc_path.
+        let sealed = crate::local_vault::encrypt_attachment(message_id.as_bytes(), &plaintext)?;
+        ensure_parent_dir(&enc_path)?;
+        write_bytes_atomic(&enc_path, &sealed)?;
+
+        // Обновляем message: downloaded=true, data clear (если был).
+        // Это симметрично с write_attachment_to_path и нужно UI чтобы знать,
+        // что вложение скачано (downloadable=true в JSON).
+        let mut message_mut = message;
+        if let MessageContent::File(ref mut f) | MessageContent::Image(ref mut f)
+            | MessageContent::Voice(ref mut f) = message_mut.content
+        {
+            f.downloaded = true;
+            f.data.clear();
+            // cache_path НЕ ставим: единственный источник истины — enc_path
+            // на диске. Plain байты живут в провайдере (Qt-сторона).
+        }
+        self.store.save_message(&message_mut)?;
+
+        Ok(plaintext)
     }
 
     // ── внутренняя логика ─────────────────────────────────────────────────
+
+    async fn fetch_map(&self, after_seq: u64, to_seq: u64) -> Result<MapResponse> {
+        let username = &self.client_cfg.username;
+        let partner = self.partner();
+        let msg = format!("{username}{partner}{after_seq}{to_seq}");
+        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
+        let core_map = CoreMap {
+            sender: username.clone(),
+            recver: partner.to_string(),
+            after_seq,
+            to_seq,
+            sig,
+        };
+        self.transport.map(&core_map).await
+    }
 
     async fn pull_packets(&self, after_seq: u64, to_seq: u64) -> Result<Vec<RawPacket>> {
         let username = &self.client_cfg.username;
@@ -369,7 +561,10 @@ impl Dialogue {
 
     /// Отправить одиночный пакет любого типа.
     async fn send(&self, content: MessageContent) -> Result<Message> {
-        self.receive().await?;
+        // Сначала дешёвый /notify — если новых пакетов нет, пропускаем receive().
+        if self.notify_count().await.unwrap_or(0) > 0 {
+            self.receive().await?;
+        }
 
         let username = &self.client_cfg.username;
         let id = Uuid::new_v4().to_string();
@@ -434,7 +629,9 @@ impl Dialogue {
         mime_type: String,
         data: Vec<u8>,
     ) -> Result<Vec<Message>> {
-        self.receive().await?;
+        if self.notify_count().await.unwrap_or(0) > 0 {
+            self.receive().await?;
+        }
 
         let transfer_id = Uuid::new_v4().to_string();
         let total_size = data.len();
@@ -515,13 +712,17 @@ impl Dialogue {
         Ok(vec![display_msg])
     }
 
-    async fn send_path_chunked(
+    async fn send_path_chunked<F>(
         &self,
         kind: AttachmentKind,
         filename: String,
         mime_type: String,
         path: &Path,
-    ) -> Result<Vec<Message>> {
+        mut on_progress: F,
+    ) -> Result<Vec<Message>>
+    where
+        F: FnMut(u32, u32),
+    {
         self.receive().await?;
 
         let metadata = fs::metadata(path).map_err(|_| anyhow::anyhow!("file_read_error"))?;
@@ -584,6 +785,9 @@ impl Dialogue {
                 total,
                 transfer_id
             );
+            // Сообщаем подписчику о прогрессе ПОСЛЕ успешного push'а — callback
+            // получает уже отосланные индексы.
+            on_progress(i as u32 + 1, total);
         }
 
         let display_msg = Message {
@@ -754,14 +958,81 @@ impl Dialogue {
         result
     }
 
-    fn attachment_cache_path(&self, message_id: &str, filename: &str) -> Result<PathBuf> {
-        let profile_dir = Path::new(&self.client_cfg.db_path)
+    /// Вариант скачивания chunked attachment'а целиком в RAM (Vec<u8>).
+    /// Используется для encrypted-cache flow: plaintext не пишется на диск,
+    /// только зашифрованный результат уходит в `<msg_id>.enc`.
+    async fn collect_remote_attachment_chunks(
+        &self,
+        header_seq: u64,
+        transfer_id: &str,
+        chunk_count: u32,
+        total_size: usize,
+    ) -> Result<Vec<u8>> {
+        let mut buf: Vec<u8> = Vec::with_capacity(total_size);
+        let mut expected_index = 0_u32;
+        let mut after_seq = header_seq;
+        let mut written = 0_usize;
+
+        while expected_index < chunk_count {
+            let batch_end = expected_index
+                .saturating_add(FILE_PULL_CHUNKS_PER_REQUEST)
+                .min(chunk_count);
+            let to_seq = header_seq
+                .checked_add(batch_end as u64)
+                .ok_or_else(|| anyhow::anyhow!("file range overflow"))?;
+            let mut raw_packets = self.pull_packets(after_seq, to_seq).await?;
+            raw_packets.sort_by_key(|pkt| pkt.seq);
+            if raw_packets.len() != (batch_end - expected_index) as usize {
+                anyhow::bail!("attachment_incomplete");
+            }
+
+            for pkt in raw_packets {
+                let inner = self.decrypt_packet(pkt.seq, &pkt.payload)?;
+                match inner.content {
+                    MessageContent::FileChunk {
+                        transfer_id: chunk_transfer_id,
+                        index,
+                        total,
+                        total_size: chunk_total_size,
+                        data,
+                        ..
+                    } if chunk_transfer_id == transfer_id
+                        && total == chunk_count
+                        && index == expected_index
+                        && chunk_total_size == total_size =>
+                    {
+                        written = written
+                            .checked_add(data.len())
+                            .ok_or_else(|| anyhow::anyhow!("attachment_bad_size"))?;
+                        buf.extend_from_slice(&data);
+                        after_seq = pkt.seq;
+                        expected_index += 1;
+                    }
+                    _ => anyhow::bail!("attachment_bad_chunk"),
+                }
+            }
+        }
+        if written != total_size {
+            anyhow::bail!("attachment_bad_size");
+        }
+        Ok(buf)
+    }
+
+    /// Profile dir of currently configured client.
+    fn profile_dir(&self) -> PathBuf {
+        Path::new(&self.client_cfg.db_path)
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let cache_dir = profile_dir.join("attachment-cache");
-        fs::create_dir_all(&cache_dir)?;
-        Ok(cache_dir.join(format!("{}-{}", message_id, safe_filename(filename))))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Постоянное место зашифрованного вложения.
+    /// Формат имени — только message_id, без оригинального filename:
+    /// filename остаётся в БД и не должен раскрываться через listing файлов.
+    fn attachment_enc_path(&self, message_id: &str) -> Result<PathBuf> {
+        let dir = self.profile_dir().join("attachment-cache");
+        fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("{message_id}.enc")))
     }
 
     fn decrypt_packet(&self, seq: u64, data: &[u8]) -> Result<PacketInner> {
@@ -781,9 +1052,10 @@ impl Dialogue {
                 debug!("Read receipt: {count} messages marked Read up to seq={up_to_seq}");
                 Ok(None)
             }
-            MessageContent::Delete { target_id } => {
-                self.store.update_status(target_id, MessageStatus::Failed)?;
-                debug!("Delete receipt for message id={target_id}");
+            MessageContent::Delete { .. } => {
+                // Legacy: реальное удаление теперь обнаруживается через /map
+                // tombstone-sweep в receive(). Игнорируем старые Delete-пакеты,
+                // если ещё придут от обновляющихся клиентов.
                 Ok(None)
             }
             MessageContent::FileHeader {
@@ -1020,27 +1292,19 @@ fn replace_file(temp_path: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn safe_filename(filename: &str) -> String {
-    let mut value = filename.trim().to_string();
-    if value.is_empty() {
-        value = "attachment.bin".to_string();
-    }
-    value = value
-        .chars()
-        .map(|ch| match ch {
-            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            ch if ch.is_control() => '_',
-            ch => ch,
-        })
-        .collect::<String>();
-    while value.ends_with('.') || value.ends_with(' ') {
-        value.pop();
-    }
-    if value.is_empty() {
-        "attachment.bin".to_string()
-    } else {
-        value
-    }
+
+/// Бинпоиск seq в сортированном списке непересекающихся runs `[(begin, end)]`.
+fn seq_in_runs(runs: &[(u64, u64)], seq: u64) -> bool {
+    runs.binary_search_by(|(begin, end)| {
+        if seq < *begin {
+            std::cmp::Ordering::Greater
+        } else if seq > *end {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    })
+    .is_ok()
 }
 
 fn attachment_content(kind: AttachmentKind, file: FileAttachment) -> MessageContent {

@@ -14,7 +14,32 @@ Rectangle {
     property string pendingDownloadName: "attachment.bin"
     property string downloadingAttachmentId: ""
     property bool sendLocked: false
-    property string draftSettingsKey: "draft/" + (Backend.activeProfileId || "") + "/" + (root.peer || "")
+    property bool messagesLoaded: false
+    property string pendingReplyId: ""
+    property string pendingReplySender: ""
+    property string pendingReplyAuthor: ""
+    property string pendingReplyText: ""
+    readonly property bool hasPendingReply: pendingReplyId.length > 0
+    property bool searchActive: false
+    property string searchQuery: ""
+    property int searchCurrentIndex: -1
+    property var searchMatchIndices: []
+    // Режим множественного выбора (ranged-delete).
+    property bool selectionMode: false
+    property var selectedIds: ({})  // объект как Set: { [messageId]: true }
+    property int selectionCount: 0
+    // Drag-select состояние (Telegram-style).
+    property int _dragStartIndex: -1
+    property int _dragLastIndex: -1
+    property real _dragMouseY: 0
+    property int _dragScrollDirection: 0
+    property bool _dragSelectActive: false   // true пока зажат чекбокс/идёт drag — отключает flicking
+    property bool _dragSelectMode: true      // true = добавляем, false = снимаем
+    property var _dragInitialSelection: ({}) // снимок selectedIds на старте drag'а
+    // Share-target: данные из системного share-sheet'а, переданные при пуше
+    // ChatPage из Main.qml. Применяются один раз на Component.onCompleted.
+    property string shareTextInitial: ""
+    property var shareFilesInitial: []
 
     signal back()
 
@@ -26,6 +51,50 @@ Rectangle {
         id: sendUnlockTimer
         interval: 700
         onTriggered: root.sendLocked = false
+    }
+
+    // Drag-select автоскролл: триггерится ТОЛЬКО когда палец вышел за края
+    // окна сообщений. Скорость пропорциональна тому, насколько далеко
+    // палец от края (1 px за краем — еле едет, 200 px и дальше — на полной).
+    Timer {
+        id: dragSelectScrollTimer
+        interval: 16
+        repeat: true
+        running: root._dragScrollDirection !== 0 && root.selectionMode
+        onTriggered: {
+            // Дистанция от пальца до края viewport'а (всегда > 0 пока тикаем).
+            let distance = 0
+            if (root._dragScrollDirection < 0) distance = -root._dragMouseY
+            else distance = root._dragMouseY - listView.height
+            if (distance <= 0) {
+                root._dragScrollDirection = 0
+                return
+            }
+            const speedFactor = Math.min(1, distance / 180)
+            // Базовый шаг 2 px (минимум, как только вышли за край), потолок 16 px.
+            const delta = root._dragScrollDirection * Math.max(2, Math.round(16 * speedFactor))
+            const newY = root.clampListContentY(listView.contentY + delta)
+            if (newY === listView.contentY) {
+                // Упёрлись в край списка — всё равно применяем mode к крайнему.
+                const clamp = root._dragScrollDirection < 0 ? 0 : msgModel.count - 1
+                if (clamp >= 0 && clamp !== root._dragLastIndex) {
+                    root.applyDragRange(root._dragStartIndex, clamp,
+                                        root._dragSelectMode, root._dragInitialSelection)
+                    root._dragLastIndex = clamp
+                }
+                return
+            }
+            listView.contentY = newY
+            let idx = listView.indexAt(2, listView.contentY + root._dragMouseY)
+            if (idx < 0) {
+                idx = root._dragScrollDirection < 0 ? 0 : (msgModel.count - 1)
+            }
+            if (idx >= 0 && idx !== root._dragLastIndex) {
+                root.applyDragRange(root._dragStartIndex, idx,
+                                    root._dragSelectMode, root._dragInitialSelection)
+                root._dragLastIndex = idx
+            }
+        }
     }
 
     function formatTime(ts) {
@@ -53,7 +122,13 @@ Rectangle {
 
     function replySummary(raw) {
         let text = (raw || "").replace(/\s+/g, " ").trim()
-        return text.length > 120 ? text.substring(0, 120) + "…" : text
+        return text.length > 120 ? text.substring(0, 120) + "..." : text
+    }
+
+    function replyAuthor(isMe, senderName) {
+        if (isMe) return "Вы"
+        if (senderName && senderName.length > 0) return senderName
+        return root.peer
     }
 
     function fileNameFor(message) {
@@ -105,18 +180,140 @@ Rectangle {
             messageMenu.close()
             return true
         }
+        if (root.selectionMode) {
+            root.exitSelection()
+            return true
+        }
+        if (root.searchActive) {
+            root.closeSearch()
+            return true
+        }
         return false
     }
 
-    function openMessageMenu(sender, text, messageId, imageMessage, downloading, filename, seq, bodyToSeq, item, localX, localY) {
+    function openSearch() {
+        root.searchActive = true
+        root.searchQuery = ""
+        root.searchMatchIndices = []
+        root.searchCurrentIndex = -1
+        searchField.forceActiveFocus()
+    }
+
+    function closeSearch() {
+        root.searchActive = false
+        root.searchQuery = ""
+        root.searchMatchIndices = []
+        root.searchCurrentIndex = -1
+    }
+
+    function beginSelection(messageId) {
+        root.selectedIds = {}
+        root.selectionCount = 0
+        root.selectionMode = true
+        if (messageId && messageId.length > 0) root.toggleSelection(messageId)
+    }
+
+    function toggleSelection(messageId) {
+        if (!messageId || messageId.length === 0) return
+        // ВАЖНО: создаём НОВЫЙ объект, иначе QML не увидит изменения
+        // (selectedIds остаётся той же ссылкой → bindings не пересчитываются).
+        const next = Object.assign({}, root.selectedIds)
+        if (next[messageId]) delete next[messageId]
+        else next[messageId] = true
+        root.selectedIds = next
+        root.selectionCount = Object.keys(next).length
+        if (root.selectionCount === 0) root.exitSelection()
+    }
+
+    function exitSelection() {
+        root.selectionMode = false
+        root.selectedIds = {}
+        root.selectionCount = 0
+        root._dragStartIndex = -1
+        root._dragLastIndex = -1
+        root._dragScrollDirection = 0
+        root._dragSelectActive = false
+    }
+
+    // Применить drag к диапазону [min(startIdx, currentIdx), max(...)] поверх
+    // baseline-снимка selectedIds, который был на момент начала drag'а.
+    // mode === true → добавляем сообщения в выделение, false → снимаем.
+    // Сообщения ВНЕ диапазона возвращаются к baseline-состоянию — поэтому
+    // когда юзер сжимает диапазон обратно, лишние сообщения откатываются.
+    function applyDragRange(startIdx, currentIdx, mode, baseline) {
+        if (startIdx < 0 || currentIdx < 0) return
+        const a = Math.min(startIdx, currentIdx)
+        const b = Math.max(startIdx, currentIdx)
+        const next = Object.assign({}, baseline)
+        for (let i = a; i <= b; ++i) {
+            const m = msgModel.get(i)
+            if (!m || !m.id) continue
+            if (mode) next[m.id] = true
+            else delete next[m.id]
+        }
+        root.selectedIds = next
+        root.selectionCount = Object.keys(next).length
+    }
+
+    function confirmDeleteSelection() {
+        const ids = Object.keys(root.selectedIds)
+        if (ids.length === 0) {
+            root.exitSelection()
+            return
+        }
+        Chat.deleteMessages(ids)
+        root.exitSelection()
+    }
+
+    function messageMatchesQuery(message, queryLower) {
+        if (!message || queryLower.length === 0) return false
+        const text = String(message.text || "")
+        if (text.length > 0 && text.toLowerCase().indexOf(queryLower) >= 0) return true
+        const filename = String(message.filename || "")
+        if (filename.length > 0 && filename.toLowerCase().indexOf(queryLower) >= 0) return true
+        const senderName = String(message.sender_name || "")
+        if (senderName.length > 0 && senderName.toLowerCase().indexOf(queryLower) >= 0) return true
+        return false
+    }
+
+    function recomputeSearchMatches() {
+        if (!root.searchActive || root.searchQuery.trim().length === 0) {
+            root.searchMatchIndices = []
+            root.searchCurrentIndex = -1
+            return
+        }
+        const queryLower = root.searchQuery.trim().toLowerCase()
+        const matches = []
+        for (let i = 0; i < msgModel.count; ++i) {
+            if (messageMatchesQuery(msgModel.get(i), queryLower)) matches.push(i)
+        }
+        root.searchMatchIndices = matches
+        if (matches.length === 0) {
+            root.searchCurrentIndex = -1
+        } else {
+            // Самое свежее совпадение (внизу) первым — обычно интереснее всего.
+            root.searchCurrentIndex = matches.length - 1
+            listView.positionViewAtIndex(matches[root.searchCurrentIndex], ListView.Center)
+        }
+    }
+
+    function searchStep(delta) {
+        if (root.searchMatchIndices.length === 0) return
+        let next = root.searchCurrentIndex + delta
+        if (next < 0) next = root.searchMatchIndices.length - 1
+        if (next >= root.searchMatchIndices.length) next = 0
+        root.searchCurrentIndex = next
+        listView.positionViewAtIndex(root.searchMatchIndices[next], ListView.Center)
+    }
+
+    function openMessageMenu(sender, senderName, isMe, text, messageId, imageMessage, downloading, filename, item, localX, localY) {
         messageMenu.messageSender = sender || ""
+        messageMenu.messageAuthor = root.replyAuthor(isMe, senderName)
         messageMenu.messageText = text || ""
         messageMenu.messageId = messageId || ""
         messageMenu.imageMessage = imageMessage === true
         messageMenu.downloading = downloading === true
         messageMenu.filename = filename && filename.length > 0 ? filename : "attachment.bin"
-        messageMenu.messageSeq = Number(seq)
-        messageMenu.bodyToSeq = Number(bodyToSeq)
 
         const point = item.mapToItem(root, localX, localY)
         messageMenu.x = Math.max(8, Math.min(root.width - messageMenu.width - 8, point.x))
@@ -124,9 +321,19 @@ Rectangle {
         messageMenu.open()
     }
 
-    function replyTo(sender, text) {
-        msgInput.text = "> **" + sender + ":** " + replySummary(text) + "\n\n" + msgInput.text
+    function replyTo(messageId, sender, author, text) {
+        pendingReplyId = messageId || ""
+        pendingReplySender = sender || ""
+        pendingReplyAuthor = author && author.length > 0 ? author : "Сообщение"
+        pendingReplyText = replySummary(text)
         msgInput.forceActiveFocus()
+    }
+
+    function clearPendingReply() {
+        pendingReplyId = ""
+        pendingReplySender = ""
+        pendingReplyAuthor = ""
+        pendingReplyText = ""
     }
 
     function copyMessageText(text) {
@@ -135,38 +342,186 @@ Rectangle {
         copyClipboard.copy()
     }
 
+    function hasValidDraftKey() {
+        return (root.peer || "").length > 0
+    }
+
+    // Гейт сохранения: TextArea во время своей конструкции может выстрелить
+    // textChanged с пустым текстом — это уничтожает только что прочитанный
+    // черновик. Включаем сохранение только ПОСЛЕ того, как restoreDraft
+    // (включая отложенную установку через draftRestoreTimer) отработал.
+    property bool _saveDraftEnabled: false
+
     function saveDraft() {
-        if (draftSettingsKey.length === 0) return
-        draftStore.setValue(draftSettingsKey, msgInput.text)
+        if (!_saveDraftEnabled) return
+        if (!hasValidDraftKey()) return
+        Chat.setDraft(root.peer, msgInput.text)
     }
 
     function clearDraft() {
-        if (draftSettingsKey.length === 0) return
-        draftStore.setValue(draftSettingsKey, "")
+        if (!hasValidDraftKey()) return
+        Chat.clearDraft(root.peer)
     }
+
+    // Хранится между restoreDraft() и срабатыванием draftRestoreTimer.
+    property string _pendingDraft: ""
+    // Отметка, что мы уже применили (или попытались) восстановить черновик
+    // в этом инстансе ChatPage. Защищает от повторного применения, если
+    // несколько триггеров (Component.onCompleted + Timer) сработают подряд.
+    property bool _draftApplied: false
 
     function restoreDraft() {
-        const saved = draftStore.value(draftSettingsKey, "")
-        if (typeof saved === "string" && saved.length > 0)
-            msgInput.text = saved
+        if (root._draftApplied) return
+        if (!hasValidDraftKey()) return
+        const saved = Chat.getDraft(root.peer)
+        if (typeof saved !== "string" || saved.length === 0) {
+            root._draftApplied = true
+            // Включаем сохранение даже если черновика не было — пользователь
+            // только что зашёл, дальнейший ввод нужно сохранять.
+            root._saveDraftEnabled = true
+            return
+        }
+        root._pendingDraft = saved
+        draftRestoreTimer.restart()
     }
 
-    function cutSeqForMessage(seq, bodyToSeq) {
-        let messageSeq = Number(seq)
-        let bodySeq = Number(bodyToSeq)
-        return bodySeq > messageSeq ? bodySeq : messageSeq
+    // Откладываем установку текста до тех пор, пока TextArea внутри
+    // ScrollView точно дотянет свои биндинги. На Linux + Qt 6.10 прямое
+    // присвоение из Component.onCompleted иногда «съедалось» (msgInput
+    // оставался пуст). 50ms — достаточно, чтобы первая отрисовка
+    // отработала и TextArea стал «настоящим» редактором.
+    Timer {
+        id: draftRestoreTimer
+        interval: 50
+        repeat: false
+        onTriggered: {
+            const saved = root._pendingDraft
+            if (!saved || saved.length === 0) { root._saveDraftEnabled = true; return }
+            // clear() + insert() надёжнее, чем `text = saved`: явно
+            // прокидывает изменение через QTextDocument, минуя возможные
+            // конфликты с биндингом property text.
+            msgInput.clear()
+            msgInput.insert(0, saved)
+            msgInput.cursorPosition = saved.length
+            root._pendingDraft = ""
+            root._draftApplied = true
+            // Включаем save только ПОСЛЕ того, как restored-text применён,
+            // иначе onTextChanged внутри clear() пройдёт через save и затрёт
+            // только что восстановленные данные пустотой (clear() → text="").
+            root._saveDraftEnabled = true
+        }
+    }
+
+    function messageKey(message) {
+        if (!message) return ""
+        const id = String(message.id || "")
+        if (id.length > 0) return "id:" + id
+        const seq = Number(message.seq || 0)
+        return seq > 0 ? "seq:" + seq : ""
+    }
+
+    function updateMessageModel(messages) {
+        if (msgModel.count === messages.length) {
+            let sameOrder = true
+            for (let i = 0; i < messages.length; ++i) {
+                if (messageKey(msgModel.get(i)) !== messageKey(messages[i])) {
+                    sameOrder = false
+                    break
+                }
+            }
+            if (sameOrder) {
+                for (let i = 0; i < messages.length; ++i)
+                    msgModel.set(i, messages[i])
+                return true
+            }
+        }
+
+        msgModel.clear()
+        for (let i = 0; i < messages.length; ++i)
+            msgModel.append(messages[i])
+        return false
+    }
+
+    function isListAtEnd() {
+        if (listView.contentHeight <= listView.height) return true
+        return listView.contentY >= root.listMaxContentY() - 24
+    }
+
+    function listMaxContentY() {
+        const minY = listView.originY
+        return Math.max(minY, minY + listView.contentHeight - listView.height)
+    }
+
+    function clampListContentY(y) {
+        return Math.min(Math.max(y, listView.originY), root.listMaxContentY())
+    }
+
+    function visibleMessageAnchor() {
+        const maxProbeY = Math.min(listView.height - 1, 160)
+        for (let y = 1; y <= maxProbeY; y += 24) {
+            const index = listView.indexAt(1, listView.contentY + y)
+            if (index < 0) continue
+            const item = listView.itemAtIndex(index)
+            return {
+                key: messageKey(msgModel.get(index)),
+                offset: item ? listView.contentY - item.y : 0
+            }
+        }
+        return { key: "", offset: 0 }
+    }
+
+    function scrollToMessageId(messageId) {
+        if (!messageId || messageId.length === 0) return false
+        for (let i = 0; i < msgModel.count; ++i) {
+            if (msgModel.get(i).id === messageId) {
+                listView.positionViewAtIndex(i, ListView.Center)
+                return true
+            }
+        }
+        return false
+    }
+
+    function restoreVisibleMessageAnchor(anchor) {
+        if (!anchor || anchor.key.length === 0) return false
+        for (let i = 0; i < msgModel.count; ++i) {
+            if (messageKey(msgModel.get(i)) !== anchor.key) continue
+            listView.positionViewAtIndex(i, ListView.Beginning)
+            Qt.callLater(function() {
+                const item = listView.itemAtIndex(i)
+                if (!item) return
+                const targetY = item.y + anchor.offset
+                listView.contentY = root.clampListContentY(targetY)
+            })
+            return true
+        }
+        return false
     }
 
     Connections {
         target: Chat
         function onMessagesReceived(peer, messages) {
             if (peer !== root.peer) return
-            msgModel.clear()
-            for (let i = 0; i < messages.length; ++i) {
-                let m = messages[i]
-                msgModel.append(m)
+            root.messagesLoaded = true
+            const wasEmpty = msgModel.count === 0
+            const wasAtEnd = root.isListAtEnd()
+            const anchor = wasEmpty || wasAtEnd ? null : root.visibleMessageAnchor()
+            const previousContentY = listView.contentY
+            if (root.updateMessageModel(messages)) {
+                if (wasAtEnd) Qt.callLater(function() { listView.positionViewAtEnd() })
+                if (root.searchActive) root.recomputeSearchMatches()
+                return
             }
-            listView.positionViewAtEnd()
+            Qt.callLater(function() {
+                if (wasEmpty || wasAtEnd) {
+                    listView.positionViewAtEnd()
+                    return
+                }
+
+                if (root.restoreVisibleMessageAnchor(anchor)) return
+
+                listView.contentY = root.clampListContentY(previousContentY)
+            })
+            if (root.searchActive) root.recomputeSearchMatches()
         }
         function onSendError(msg) {
             errorText.text = msg
@@ -201,6 +556,7 @@ Rectangle {
     Component.onCompleted: {
         Chat.openChat(root.peer)
         restoreDraft()
+        applyShareTarget()
         if (VoIPAvailable) {
             root.callPageComponent = Qt.createComponent(
                 Qt.resolvedUrl("CallPage.qml"), Component.PreferSynchronous);
@@ -208,17 +564,61 @@ Rectangle {
                 console.warn("CallPage load error:", root.callPageComponent.errorString());
         }
     }
-    Component.onDestruction: Chat.stopChat()
 
-    Settings {
-        id: draftStore
-        category: "chatDrafts"
+    function applyShareTarget() {
+        if (root.shareTextInitial && root.shareTextInitial.length > 0) {
+            const separator = (msgInput.text.length > 0 && !msgInput.text.endsWith("\n")) ? "\n" : ""
+            msgInput.text = msgInput.text + separator + root.shareTextInitial
+            root.shareTextInitial = ""
+            saveDraft()
+            msgInput.forceActiveFocus()
+        }
+        if (root.shareFilesInitial && root.shareFilesInitial.length > 0) {
+            Chat.requestFileAccessPermissions()
+            const files = root.shareFilesInitial
+            root.shareFilesInitial = []
+            let sent = 0
+            for (let i = 0; i < files.length; ++i) {
+                const candidate = files[i] ? String(files[i]) : ""
+                if (candidate.length > 0) {
+                    Chat.sendFile(candidate)
+                    ++sent
+                }
+            }
+            // Видимая обратная связь: даже если sendFile позже упадёт в
+            // sendError, пользователь знает, что share-данные дошли до ChatPage.
+            if (sent > 0) {
+                errorText.text = "Получено вложений: " + sent + " — идёт отправка"
+                errorBar.visible = true
+                errorTimer.restart()
+            }
+        }
+    }
+    Component.onDestruction: {
+        saveDraft()
+        Chat.stopChat()
     }
 
     FileDialog {
         id: attachDialog
         title: "Выберите файл"
         fileMode: FileDialog.OpenFile
+        onAccepted: Chat.sendFile(selectedFile)
+    }
+
+    FileDialog {
+        id: photoDialog
+        title: "Выберите фото"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)", "Все файлы (*)"]
+        onAccepted: Chat.sendFile(selectedFile)
+    }
+
+    FileDialog {
+        id: videoDialog
+        title: "Выберите видео"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Видео (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.3gp *.ogv)", "Все файлы (*)"]
         onAccepted: Chat.sendFile(selectedFile)
     }
 
@@ -247,13 +647,12 @@ Rectangle {
         z: 900
 
         property string messageSender: ""
+        property string messageAuthor: ""
         property string messageText: ""
         property string messageId: ""
         property bool imageMessage: false
         property bool downloading: false
         property string filename: "attachment.bin"
-        property real messageSeq: 0
-        property real bodyToSeq: 0
 
         background: Rectangle {
             color: Theme.bgCard
@@ -329,7 +728,8 @@ Rectangle {
                     hoverEnabled: true
                     onClicked: {
                         messageMenu.close()
-                        root.replyTo(messageMenu.messageSender, messageMenu.messageText)
+                        root.replyTo(messageMenu.messageId, messageMenu.messageSender, messageMenu.messageAuthor,
+                                     messageMenu.messageText)
                     }
                 }
             }
@@ -410,7 +810,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Удалить до этого сообщения"
+                    text: "Удалить"
                     color: deleteMenuArea.enabled ? Theme.error : Theme.textHint
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -420,10 +820,11 @@ Rectangle {
                     id: deleteMenuArea
                     anchors.fill: parent
                     hoverEnabled: true
-                    enabled: messageMenu.messageSeq > 0
+                    enabled: messageMenu.messageId.length > 0
                     onClicked: {
+                        const id = messageMenu.messageId
                         messageMenu.close()
-                        Chat.deleteMessagesUntil(root.cutSeqForMessage(messageMenu.messageSeq, messageMenu.bodyToSeq))
+                        if (id.length > 0) Chat.deleteMessages([id])
                     }
                 }
             }
@@ -432,13 +833,33 @@ Rectangle {
 
     Popup {
         id: inputMenu
-        width: 100
+        // Базовая ширина для «Очистить/Копировать/Вставить» — 100; когда есть
+        // орфографические подсказки, расширяем до 220, чтобы слова уместились.
+        width: hasSpellSuggestions ? 220 : 100
         height: inputMenuColumn.implicitHeight + topPadding + bottomPadding
         padding: 6
         modal: false
         focus: false
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         z: 901
+
+        // Контекст misspelled-word'а, выставляется перед открытием меню в TextArea.onPressed.
+        property int spellStart: -1
+        property int spellLength: 0
+        property string spellWord: ""
+        property var spellSuggestions: []
+        readonly property bool hasSpellSuggestions: spellStart >= 0 && spellSuggestions && spellSuggestions.length > 0
+
+        function applySuggestion(replacement) {
+            if (spellStart < 0 || spellLength <= 0) return
+            msgInput.remove(spellStart, spellStart + spellLength)
+            msgInput.insert(spellStart, replacement)
+            spellStart = -1
+            spellLength = 0
+            spellWord = ""
+            spellSuggestions = []
+        }
+
         background: Rectangle {
             color: Theme.bgCard
             radius: Theme.radiusMd
@@ -447,8 +868,50 @@ Rectangle {
         }
         contentItem: Column {
             id: inputMenuColumn
-            width: 188
+            width: inputMenu.width - inputMenu.leftPadding - inputMenu.rightPadding
             spacing: 2
+
+            // Орфографические подсказки (только если правый клик пришёлся на слово с ошибкой).
+            Repeater {
+                model: inputMenu.hasSpellSuggestions ? inputMenu.spellSuggestions : []
+                delegate: Rectangle {
+                    required property string modelData
+                    width: inputMenuColumn.width
+                    height: 32
+                    radius: Theme.radiusSm
+                    color: spellArea.containsMouse ? Theme.bgInput : "transparent"
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        text: modelData
+                        color: Theme.accentHover
+                        font.pixelSize: Theme.fontSm
+                        font.family: Theme.fontFamily
+                        font.weight: Font.Medium
+                        elide: Text.ElideRight
+                    }
+                    MouseArea {
+                        id: spellArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            inputMenu.applySuggestion(modelData)
+                            inputMenu.close()
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                visible: inputMenu.hasSpellSuggestions
+                width: inputMenuColumn.width
+                height: visible ? 1 : 0
+                color: Theme.separator
+            }
+
             Repeater {
                 model: ["Очистить", "Копировать", "Вставить"]
                 delegate: Rectangle {
@@ -486,6 +949,85 @@ Rectangle {
         }
     }
 
+    // Меню «+» рядом с полем ввода — выбор типа вложения.
+    Popup {
+        id: attachMenu
+        width: 184
+        height: attachMenuColumn.implicitHeight + topPadding + bottomPadding
+        padding: 6
+        modal: false
+        focus: false
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        z: 901
+        background: Rectangle {
+            color: Theme.bgCard
+            radius: Theme.radiusMd
+            border.width: 1
+            border.color: Theme.border
+        }
+        contentItem: Column {
+            id: attachMenuColumn
+            width: attachMenu.width - attachMenu.leftPadding - attachMenu.rightPadding
+            spacing: 2
+
+            Repeater {
+                model: [
+                    { label: "Файл",   icon: "file"  },
+                    { label: "Фото",   icon: "image" },
+                    { label: "Видео",  icon: "video" }
+                ]
+                delegate: Rectangle {
+                    required property int index
+                    required property var modelData
+                    width: attachMenuColumn.width
+                    height: 38
+                    radius: Theme.radiusSm
+                    color: attachItemArea.containsMouse ? Theme.bgInput : "transparent"
+                    Row {
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        spacing: 10
+                        AppIcon {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 20; height: 20
+                            name: modelData.icon
+                            iconColor: Theme.accentHover
+                            strokeWidth: 1.8
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: modelData.label
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSm
+                            font.family: Theme.fontFamily
+                        }
+                    }
+                    MouseArea {
+                        id: attachItemArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            attachMenu.close()
+                            Chat.requestFileAccessPermissions()
+                            if (index === 0) {
+                                attachDialog.open()
+                            } else if (index === 1) {
+                                // На Android — системный photo picker (галерея),
+                                // на desktop — обычный FileDialog с фильтром изображений.
+                                if (Qt.platform.os === "android") Chat.pickPhotoFromGallery()
+                                else photoDialog.open()
+                            } else {
+                                if (Qt.platform.os === "android") Chat.pickVideoFromGallery()
+                                else videoDialog.open()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -502,11 +1044,80 @@ Rectangle {
                 color: Theme.accentDim
             }
 
+            // Селекшн-тулбар поверх обычной шапки.
+            Rectangle {
+                anchors.fill: parent
+                color: Theme.bgDark
+                visible: root.selectionMode
+                z: 10
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 12
+                    spacing: 8
+
+                    Rectangle {
+                        width: 40; height: 40
+                        radius: Theme.radiusSm
+                        color: cancelSelArea.containsMouse ? Theme.bgCard : "transparent"
+                        border.width: 1
+                        border.color: Theme.border
+                        AppIcon {
+                            anchors.centerIn: parent
+                            width: 22; height: 22
+                            name: "close"
+                            iconColor: Theme.textPrimary
+                            strokeWidth: 2.2
+                        }
+                        MouseArea {
+                            id: cancelSelArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: root.exitSelection()
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.selectionCount + (root.selectionCount === 1 ? " сообщение" : " сообщений")
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontMd
+                        font.family: Theme.fontFamily
+                        font.weight: Font.Medium
+                        elide: Text.ElideRight
+                    }
+
+                    Rectangle {
+                        width: 40; height: 40
+                        radius: Theme.radiusSm
+                        color: root.selectionCount > 0 ? Theme.accent : Theme.bgCard
+                        border.width: 1
+                        border.color: root.selectionCount > 0 ? Theme.accent : Theme.border
+                        opacity: root.selectionCount > 0 ? 1 : 0.45
+                        AppIcon {
+                            anchors.centerIn: parent
+                            width: 22; height: 22
+                            name: "trash"
+                            iconColor: root.selectionCount > 0 ? Theme.textPrimary : Theme.textSecondary
+                            strokeWidth: 2.2
+                        }
+                        MouseArea {
+                            id: deleteSelArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: root.selectionCount > 0
+                            onClicked: deleteSelectionConfirm.open()
+                        }
+                    }
+                }
+            }
+
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 8
                 anchors.rightMargin: 16
                 spacing: 8
+                visible: !root.selectionMode
 
                 // Back button
                 Rectangle {
@@ -516,11 +1127,13 @@ Rectangle {
                     border.width: backArea.containsMouse ? 1 : 0
                     border.color: Theme.border
 
-                    Text {
+                    AppIcon {
                         anchors.centerIn: parent
-                        text: "‹"
-                        color: Theme.accentHover
-                        font.pixelSize: 24
+                        width: 24
+                        height: 24
+                        name: "chevronLeft"
+                        iconColor: Theme.accentHover
+                        strokeWidth: 2.2
                     }
                     MouseArea {
                         id: backArea
@@ -566,7 +1179,7 @@ Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
                             checked: Chat.readReceiptsEnabled
                             palette.text: Theme.controlText
-                            onToggled: Chat.setReadReceiptsEnabled(checked)
+                            onToggled: function(checked) { Chat.setReadReceiptsEnabled(checked) }
                         }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
@@ -578,120 +1191,369 @@ Rectangle {
                     }
                 }
 
-                // Кнопка «Позвонить» — видна только если voip собран и есть
-                // master_key для диалога.
+                // Поиск по диалогу
                 Rectangle {
-                    id: callBtn
-                    visible: VoIPAvailable
-                    width: 40; height: 40
+                    Layout.preferredWidth: 40
+                    Layout.preferredHeight: 40
+                    Layout.alignment: Qt.AlignVCenter
                     radius: Theme.radiusSm
-                    color: callArea.containsMouse ? Theme.bgCard : "transparent"
-                    border.width: callArea.containsMouse ? 1 : 0
+                    color: searchHeaderArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: searchHeaderArea.containsMouse ? 1 : 0
                     border.color: Theme.border
 
-                    // SVG-иконка телефона с цветами темы
-                    Canvas {
-                        id: phoneIcon
+                    AppIcon {
                         anchors.centerIn: parent
-                        width: 20
-                        height: 20
-
-                        onPaint: {
-                            var ctx = getContext("2d")
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.setTransform(1, 0, 0, 1, 0, 0)
-                            ctx.fillStyle = callArea.containsMouse
-                                ? Theme.accentHover
-                                : Theme.accent
-
-                            // Иконка телефона (Lucide-style phone path, 24x24 → масштабируем)
-                            ctx.scale(width / 24, height / 24)
-                            ctx.beginPath()
-                            // Корпус телефона
-                            ctx.moveTo(6.6, 10.8)
-                            ctx.bezierCurveTo(7.8, 13.2, 9.8, 15.2, 12.2, 16.4)
-                            ctx.lineTo(14.0, 14.6)
-                            ctx.bezierCurveTo(14.3, 14.3, 14.7, 14.2, 15.0, 14.4)
-                            ctx.bezierCurveTo(16.1, 14.8, 17.3, 15.0, 18.5, 15.0)
-                            ctx.bezierCurveTo(19.3, 15.0, 20.0, 15.7, 20.0, 16.5)
-                            ctx.lineTo(20.0, 19.5)
-                            ctx.bezierCurveTo(20.0, 20.3, 19.3, 21.0, 18.5, 21.0)
-                            ctx.bezierCurveTo(9.9, 21.0, 3.0, 14.1, 3.0, 5.5)
-                            ctx.bezierCurveTo(3.0, 4.7, 3.7, 4.0, 4.5, 4.0)
-                            ctx.lineTo(7.5, 4.0)
-                            ctx.bezierCurveTo(8.3, 4.0, 9.0, 4.7, 9.0, 5.5)
-                            ctx.bezierCurveTo(9.0, 6.7, 9.2, 7.9, 9.6, 9.0)
-                            ctx.bezierCurveTo(9.8, 9.3, 9.7, 9.7, 9.4, 10.0)
-                            ctx.closePath()
-                            ctx.fill()
-                        }
-
-                        // Перерисовка при смене hover или темы
-                        Connections {
-                            target: callArea
-                            function onContainsMouseChanged() { phoneIcon.requestPaint() }
-                        }
-                        Connections {
-                            target: Theme
-                            function onDarkModeChanged() { phoneIcon.requestPaint() }
-                        }
+                        width: 22; height: 22
+                        name: "search"
+                        iconColor: root.searchActive ? Theme.accent : Theme.accentHover
+                        strokeWidth: 2
                     }
 
                     MouseArea {
-                        id: callArea
+                        id: searchHeaderArea
                         anchors.fill: parent
                         hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            if (!VoIPAvailable) return
-                            const mk = CallSignaling.masterKeyFor(root.peer)
-                            if (mk.length === 0) {
-                                console.warn("No master key for peer", root.peer)
-                                return
-                            }
-                            if (!root.callPageComponent || root.callPageComponent.status !== Component.Ready) {
-                                console.warn("CallPage component not ready")
-                                return
-                            }
-                            if (!CallControl.startOutgoingCall(root.peer, mk)) {
-                                console.warn("startOutgoingCall failed")
-                                return
-                            }
-                            stackView.push(root.callPageComponent, { mode: "outgoing", peerName: root.peer })
+                            if (root.searchActive) root.closeSearch()
+                            else root.openSearch()
                         }
+                    }
+                }
+
+                // Видна только если voip собран. Наличие master_key проверяется перед стартом вызова.
+                CallButton {
+                    visible: VoIPAvailable
+                    onClicked: {
+                        if (!VoIPAvailable) return
+                        const mk = CallSignaling.masterKeyFor(root.peer)
+                        if (mk.length === 0) {
+                            console.warn("No master key for peer", root.peer)
+                            return
+                        }
+                        if (!root.callPageComponent || root.callPageComponent.status !== Component.Ready) {
+                            console.warn("CallPage component not ready")
+                            return
+                        }
+                        if (!CallControl.startOutgoingCall(root.peer, mk)) {
+                            console.warn("startOutgoingCall failed")
+                            return
+                        }
+                        stackView.push(root.callPageComponent, { mode: "outgoing", peerName: root.peer })
+                    }
+                }
+            }
+        }
+
+        // ── Search bar ────────────────────────────────────────
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: root.searchActive ? 48 : 0
+            visible: root.searchActive
+            color: Theme.bgSecondary
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width; height: 1
+                color: Theme.separator
+            }
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                anchors.topMargin: 6
+                anchors.bottomMargin: 6
+                spacing: 6
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: Theme.radiusMd
+                    color: Theme.bgInput
+                    border.color: Theme.border
+                    border.width: 1
+
+                    TextField {
+                        id: searchField
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        placeholderText: "Поиск по диалогу…"
+                        placeholderTextColor: Theme.textHint
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSm
+                        font.family: Theme.fontFamily
+                        background: null
+                        selectByMouse: true
+                        text: root.searchQuery
+                        onTextChanged: {
+                            if (text === root.searchQuery) return
+                            root.searchQuery = text
+                            root.recomputeSearchMatches()
+                        }
+                        Keys.onEscapePressed: root.closeSearch()
+                        Keys.onReturnPressed: root.searchStep(-1)
+                    }
+                }
+
+                Text {
+                    Layout.alignment: Qt.AlignVCenter
+                    text: {
+                        if (root.searchQuery.trim().length === 0) return ""
+                        if (root.searchMatchIndices.length === 0) return "0"
+                        return (root.searchCurrentIndex + 1) + "/" + root.searchMatchIndices.length
+                    }
+                    color: root.searchMatchIndices.length === 0 && root.searchQuery.trim().length > 0
+                           ? Theme.error : Theme.textSecondary
+                    font.pixelSize: Theme.fontXs
+                    font.family: Theme.fontFamily
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: Theme.radiusSm
+                    color: prevArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: 1
+                    border.color: Theme.border
+                    AppIcon {
+                        anchors.centerIn: parent
+                        width: 16; height: 16
+                        name: "chevronLeft"
+                        iconColor: Theme.accentHover
+                        strokeWidth: 2
+                        rotation: 90
+                    }
+                    MouseArea {
+                        id: prevArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.searchStep(1)
+                    }
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: Theme.radiusSm
+                    color: nextArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: 1
+                    border.color: Theme.border
+                    AppIcon {
+                        anchors.centerIn: parent
+                        width: 16; height: 16
+                        name: "chevronLeft"
+                        iconColor: Theme.accentHover
+                        strokeWidth: 2
+                        rotation: -90
+                    }
+                    MouseArea {
+                        id: nextArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.searchStep(-1)
+                    }
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: Theme.radiusSm
+                    color: searchCloseArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: 1
+                    border.color: Theme.border
+                    AppIcon {
+                        anchors.centerIn: parent
+                        width: 16; height: 16
+                        name: "close"
+                        iconColor: Theme.accentHover
+                        strokeWidth: 2
+                    }
+                    MouseArea {
+                        id: searchCloseArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.closeSearch()
                     }
                 }
             }
         }
 
         // ── Message list ──────────────────────────────────────
-        ListView {
-            id: listView
+        Item {
+            id: messageListPane
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            spacing: 4
 
-            model: ListModel { id: msgModel }
+            ListView {
+                id: listView
+                anchors.fill: parent
+                clip: true
+                spacing: 4
+                // Пока зажат чекбокс drag-select, отключаем встроенный Flickable, иначе
+                // ListView перехватывает вертикальный жест и устраивает flick
+                // (визуально это и был тот «телепорт на страницу»).
+                interactive: !root._dragSelectActive
 
-            ScrollBar.vertical: ScrollBar {}
+                model: ListModel { id: msgModel }
 
-            delegate: Item {
-                width: listView.width
-                height: bubble.implicitHeight + 8
+                ScrollBar.vertical: ScrollBar {}
 
-                readonly property bool isMe: model.isMe === true
-                readonly property string mimeType: model.mime_type || ""
-                readonly property bool isImage: root.isImageMessage(model.kind, mimeType)
-                readonly property bool hasAttachment: model.kind === "file" || model.kind === "image" || model.kind === "voice" || isImage
-                readonly property bool showMessageText: !hasAttachment && (model.text || "").length > 0
-                readonly property bool showFileCard: hasAttachment && !isImage
-                readonly property string attachmentName: root.fileNameFor(model)
-                readonly property string previewSource: model.preview_source || ""
-                readonly property bool isDownloading: root.downloadingAttachmentId === model.id
-                readonly property var reactions: {
-                    const raw = model.reactions_json || ""
-                    if (raw.length === 0) return []
-                    try { return JSON.parse(raw) } catch (e) { return [] }
+                delegate: Item {
+                    width: listView.width
+                    height: bubble.implicitHeight + 8
+
+                    readonly property int delegateIndex: index
+                    readonly property bool isSearchMatch: root.searchActive && root.searchMatchIndices.indexOf(delegateIndex) >= 0
+                    readonly property bool isSearchCurrent: isSearchMatch
+                                                           && root.searchCurrentIndex >= 0
+                                                           && root.searchMatchIndices[root.searchCurrentIndex] === delegateIndex
+                    readonly property bool isMe: model.isMe === true
+                    readonly property string mimeType: model.mime_type || ""
+                    readonly property bool isImage: root.isImageMessage(model.kind, mimeType)
+                    readonly property bool hasAttachment: model.kind === "file" || model.kind === "image" || model.kind === "voice" || isImage
+                    readonly property bool showMessageText: !hasAttachment && (model.text || "").length > 0
+                    readonly property bool showFileCard: hasAttachment && !isImage
+                    readonly property string attachmentName: root.fileNameFor(model)
+                    readonly property string previewSource: model.preview_source || ""
+                    readonly property bool hasReply: (model.reply_to_id || "").length > 0
+                    readonly property bool isDownloading: root.downloadingAttachmentId === model.id
+                    readonly property var reactions: {
+                        const raw = model.reactions_json || ""
+                        if (raw.length === 0) return []
+                        try { return JSON.parse(raw) } catch (e) { return [] }
+                    }
+                    readonly property bool isSelected: root.selectionMode && root.selectedIds[model.id] === true
+
+                // Чекбокс-индикатор сбоку от пузыря (снаружи).
+                Rectangle {
+                    id: selectionCheckbox
+                    width: 24; height: 24
+                    radius: 12
+                    z: 60
+                    anchors.verticalCenter: bubble.verticalCenter
+                    anchors.right: isMe ? bubble.left : undefined
+                    anchors.left:  isMe ? undefined  : bubble.right
+                    anchors.rightMargin: isMe ? 8 : 0
+                    anchors.leftMargin:  isMe ? 0 : 8
+                    visible: root.selectionMode
+                    color: isSelected ? Theme.accent : Theme.bgPrimary
+                    border.width: 2
+                    border.color: isSelected ? Theme.accent : Theme.border
+                    AppIcon {
+                        anchors.centerIn: parent
+                        width: 18; height: 18
+                        name: "check"
+                        iconColor: "#FFFFFF"
+                        strokeWidth: 3
+                        visible: isSelected
+                    }
+
+                    // Tap по чекбоксу — тоггл выделения. Press-and-drag —
+                    // Telegram-style: режим (add/remove) определяется тем, был
+                    // ли стартовый чекбокс выбран в момент нажатия.
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -8   // комфортная хит-зона
+                        preventStealing: true
+                        enabled: root.selectionMode
+                        propagateComposedEvents: false
+                        z: 70
+
+                        property real pressScreenY: 0
+                        property bool dragHappened: false
+
+                        onPressed: function(mouse) {
+                            listView.cancelFlick()
+                            root._dragSelectActive = true
+                            const p = mapToItem(listView, mouse.x, mouse.y)
+                            pressScreenY = p.y
+                            dragHappened = false
+                            root._dragStartIndex = delegateIndex
+                            root._dragLastIndex = delegateIndex
+                            root._dragMouseY = p.y
+                            root._dragScrollDirection = 0
+                            // Режим drag'а определяется на старте: если start
+                            // не выбран — drag добавляет, если выбран — снимает.
+                            root._dragSelectMode = !isSelected
+                            root._dragInitialSelection = Object.assign({}, root.selectedIds)
+                        }
+                        onPositionChanged: function(mouse) {
+                            if (!pressed) return
+                            const p = mapToItem(listView, mouse.x, mouse.y)
+                            // Порог 8 px, чтобы случайные дрожания не превращали
+                            // обычный тап в drag.
+                            if (!dragHappened && Math.abs(p.y - pressScreenY) > 8) {
+                                dragHappened = true
+                                root._dragSelectActive = true
+                                // Сразу применяем mode к стартовому сообщению.
+                                root.applyDragRange(root._dragStartIndex, root._dragStartIndex,
+                                                    root._dragSelectMode, root._dragInitialSelection)
+                            }
+                            root._dragMouseY = p.y
+                            if (!dragHappened) return
+                            const idx = listView.indexAt(2, listView.contentY + p.y)
+                            if (idx >= 0 && idx !== root._dragLastIndex) {
+                                root.applyDragRange(root._dragStartIndex, idx,
+                                                    root._dragSelectMode, root._dragInitialSelection)
+                                root._dragLastIndex = idx
+                            }
+                            if (p.y < 0) root._dragScrollDirection = -1
+                            else if (p.y > listView.height) root._dragScrollDirection = 1
+                            else root._dragScrollDirection = 0
+                        }
+                        onReleased: {
+                            if (!dragHappened) root.toggleSelection(model.id)
+                            root._dragStartIndex = -1
+                            root._dragLastIndex = -1
+                            root._dragScrollDirection = 0
+                            root._dragSelectActive = false
+                            dragHappened = false
+                            // Если за время drag'а всё выделение убрали — выйти из режима.
+                            if (root.selectionCount === 0) root.exitSelection()
+                        }
+                        onCanceled: {
+                            root._dragStartIndex = -1
+                            root._dragLastIndex = -1
+                            root._dragScrollDirection = 0
+                            root._dragSelectActive = false
+                            dragHappened = false
+                        }
+                    }
+                }
+
+                // Перехватчик кликов в режиме выделения: тап по любой части
+                // делегата тоггл'ит выделение, без открытия фото/файла/реакций.
+                MouseArea {
+                    anchors.fill: parent
+                    visible: root.selectionMode
+                    enabled: root.selectionMode
+                    z: 50
+                    hoverEnabled: false
+                    onClicked: root.toggleSelection(model.id)
+                }
+
+                // На десктопе клик левой кнопкой мыши «напротив» пузыря (по
+                // строке делегата, но не по самому пузырю) сразу входит в
+                // режим выделения и выбирает это сообщение.
+                MouseArea {
+                    anchors.fill: parent
+                    visible: !root.selectionMode && !root.isMobileOs
+                    enabled: !root.selectionMode && !root.isMobileOs
+                    acceptedButtons: Qt.LeftButton
+                    hoverEnabled: false
+                    z: 1
+                    onClicked: function(mouse) {
+                        if (model.id && model.id.length > 0) root.beginSelection(model.id)
+                    }
                 }
                 readonly property bool hasReactions: reactions && reactions.length > 0
 
@@ -709,6 +1571,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
 
                     width: Math.min(Math.max(showMessageText ? msgText.implicitWidth : 0,
+                                             hasReply ? messageReplyPreview.implicitWidth : 0,
                                              isImage ? imagePreview.implicitWidth : 0,
                                              showFileCard ? fileCard.implicitWidth : 0,
                                              hasReactions ? reactionsFlow.implicitWidth : 0,
@@ -716,6 +1579,7 @@ Rectangle {
                                              isMe ? 0 : senderLabel.implicitWidth) + 24,
                                       listView.width * 0.72)
                     implicitHeight: (isMe ? 0 : senderLabel.implicitHeight + 2)
+                                  + (hasReply ? messageReplyPreview.implicitHeight + 6 : 0)
                                   + (showMessageText ? msgText.implicitHeight : 0)
                                   + (isImage ? imagePreview.implicitHeight + 6 : 0)
                                   + (showFileCard ? fileCard.implicitHeight + 6 : 0)
@@ -723,18 +1587,30 @@ Rectangle {
                                   + metaRow.implicitHeight + 16
                     radius: Theme.radiusMd
                     color: isMe ? Theme.bgButton : Theme.bgSecondary
-                    border.width: 1
-                    border.color: isMe ? Theme.accentDim : Theme.border
+                    border.width: isSearchMatch ? (isSearchCurrent ? 3 : 2) : 1
+                    border.color: isSearchMatch
+                                  ? (isSearchCurrent ? Theme.accent : Theme.accentHover)
+                                  : (isMe ? Theme.accentDim : Theme.border)
 
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                         hoverEnabled: false
                         onClicked: function(mouse) {
-                            if (mouse.button === Qt.RightButton || mouse.source !== Qt.MouseEventNotSynthesized)
-                                root.openMessageMenu(model.sender, model.text, model.id, isImage, isDownloading,
-                                                     attachmentName, model.seq, model.body_to_seq, bubble, mouse.x, mouse.y)
-
+                            if (mouse.button === Qt.RightButton || (root.isMobileOs && !root.selectionMode)) {
+                                root.openMessageMenu(model.sender, model.sender_name, isMe, model.text, model.id,
+                                                     isImage, isDownloading, attachmentName,
+                                                     bubble, mouse.x, mouse.y)
+                                return
+                            }
+                            // Десктоп: левый клик по пузырю входит в selection.
+                            if (!root.isMobileOs && model.id && model.id.length > 0)
+                                root.beginSelection(model.id)
+                        }
+                        // Мобилка: long-press — вход в режим множественного выделения.
+                        onPressAndHold: function(mouse) {
+                            if (root.isMobileOs && model.id && model.id.length > 0)
+                                root.beginSelection(model.id)
                         }
                     }
 
@@ -752,10 +1628,26 @@ Rectangle {
                         visible: !isMe
                     }
 
+                    ReplyPreview {
+                        id: messageReplyPreview
+                        anchors.top: isMe ? parent.top : senderLabel.bottom
+                        anchors.topMargin: isMe ? 10 : 4
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        visible: hasReply
+                        author: model.reply_sender_name || model.reply_sender || ""
+                        previewText: root.replySummary(model.reply_text || "")
+                        outgoing: isMe
+                        interactive: hasReply
+                        onClicked: root.scrollToMessageId(model.reply_to_id)
+                    }
+
                     Text {
                         id: msgText
-                        anchors.top: isMe ? parent.top : senderLabel.bottom
-                        anchors.topMargin: isMe ? 10 : 2
+                        anchors.top: hasReply ? messageReplyPreview.bottom : (isMe ? parent.top : senderLabel.bottom)
+                        anchors.topMargin: hasReply ? 6 : (isMe ? 10 : 2)
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.leftMargin: 12
@@ -765,17 +1657,17 @@ Rectangle {
                         textFormat: Text.MarkdownText
                         linkColor: Theme.accentHover
                         onLinkActivated: function(link) { Qt.openUrlExternally(link) }
-                        color: Theme.textPrimary
+                        color: isMe ? Theme.messageTextOutgoing : Theme.textPrimary
                         font.pixelSize: Theme.fontMd
                         font.family: Theme.fontFamily
-                        wrapMode: Text.WordWrap
+                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                         lineHeight: 1.3
                     }
 
                     Rectangle {
                         id: imagePreview
-                        anchors.top: showMessageText ? msgText.bottom : (isMe ? parent.top : senderLabel.bottom)
-                        anchors.topMargin: isMe && !showMessageText ? 10 : 6
+                        anchors.top: showMessageText ? msgText.bottom : (hasReply ? messageReplyPreview.bottom : (isMe ? parent.top : senderLabel.bottom))
+                        anchors.topMargin: showMessageText || hasReply ? 6 : (isMe ? 10 : 6)
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.leftMargin: 12
@@ -796,7 +1688,11 @@ Rectangle {
                             source: previewSource
                             visible: previewSource.length > 0
                             asynchronous: true
-                            cache: true
+                            // cache=false: расшифрованные превью идут через
+                            // image://secure/<id>, держим их только в
+                            // EncryptedImageProvider'е, без дисковых копий
+                            // и без копий в QPixmapCache.
+                            cache: false
                             fillMode: Image.PreserveAspectCrop
                             sourceSize.width: 640
                             sourceSize.height: 640
@@ -839,12 +1735,13 @@ Rectangle {
                             border.color: Theme.border
                             z: 3
 
-                            Text {
+                            AppIcon {
                                 anchors.centerIn: parent
-                                text: "↓"
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontMd
-                                font.family: Theme.fontFamily
+                                width: 18
+                                height: 18
+                                name: "download"
+                                iconColor: previewSaveArea.containsMouse ? Theme.textPrimary : "#F7E8EA"
+                                strokeWidth: 2
                             }
 
                             MouseArea {
@@ -859,7 +1756,7 @@ Rectangle {
 
                     Rectangle {
                         id: fileCard
-                        anchors.top: showMessageText ? msgText.bottom : (isMe ? parent.top : senderLabel.bottom)
+                        anchors.top: showMessageText ? msgText.bottom : (hasReply ? messageReplyPreview.bottom : (isMe ? parent.top : senderLabel.bottom))
                         anchors.topMargin: 6
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -887,29 +1784,12 @@ Rectangle {
                             border.width: 1
                             border.color: fileIconArea.containsMouse ? Theme.accentDim : Theme.border
 
-                            Canvas {
+                            AppIcon {
                                 anchors.fill: parent
-                                onPaint: {
-                                    const ctx = getContext("2d")
-                                    ctx.clearRect(0, 0, width, height)
-                                    ctx.strokeStyle = Theme.accentHover
-                                    ctx.fillStyle = Theme.accentDim
-                                    ctx.lineWidth = 1.5
-                                    ctx.beginPath()
-                                    ctx.moveTo(width * 0.30, height * 0.18)
-                                    ctx.lineTo(width * 0.62, height * 0.18)
-                                    ctx.lineTo(width * 0.76, height * 0.32)
-                                    ctx.lineTo(width * 0.76, height * 0.82)
-                                    ctx.lineTo(width * 0.30, height * 0.82)
-                                    ctx.closePath()
-                                    ctx.fill()
-                                    ctx.stroke()
-                                    ctx.beginPath()
-                                    ctx.moveTo(width * 0.62, height * 0.18)
-                                    ctx.lineTo(width * 0.62, height * 0.34)
-                                    ctx.lineTo(width * 0.76, height * 0.34)
-                                    ctx.stroke()
-                                }
+                                name: "file"
+                                iconColor: Theme.accentHover
+                                fillColor: Theme.accentDim
+                                strokeWidth: 1.5
                             }
 
                             MouseArea {
@@ -1024,11 +1904,12 @@ Rectangle {
                     }
                 }
             }
+            }
 
             BusyIndicator {
                 id: messagesBusy
                 anchors.centerIn: parent
-                running: Chat.messagesLoading || msgModel.count === 0
+                running: Chat.messagesLoading || !root.messagesLoaded
                 visible: running
                 z: 2
             }
@@ -1043,6 +1924,183 @@ Rectangle {
                 font.family: Theme.fontFamily
                 visible: messagesBusy.visible
                 z: 2
+            }
+
+            Text {
+                anchors.centerIn: parent
+                text: "Сообщений пока нет"
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                visible: root.messagesLoaded && !Chat.messagesLoading && msgModel.count === 0
+                z: 2
+            }
+
+            Rectangle {
+                id: scrollToBottomButton
+                width: 44
+                height: 44
+                anchors.right: parent.right
+                anchors.rightMargin: 18
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 18
+                radius: 22
+                visible: root.messagesLoaded && msgModel.count > 0 && !root.isListAtEnd()
+                opacity: visible ? 1 : 0
+                z: 5
+                color: scrollToBottomArea.containsMouse ? Theme.accentHover : Theme.accent
+                border.width: 1
+                border.color: Theme.accentDim
+
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+                Behavior on color { ColorAnimation { duration: 120 } }
+
+                AppIcon {
+                    anchors.centerIn: parent
+                    width: 22
+                    height: 22
+                    name: "chevronLeft"
+                    rotation: -90
+                    iconColor: Theme.textPrimary
+                    strokeWidth: 2.4
+                }
+
+                MouseArea {
+                    id: scrollToBottomArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: listView.positionViewAtEnd()
+                }
+
+                ToolTip.visible: scrollToBottomArea.containsMouse
+                ToolTip.delay: 500
+                ToolTip.text: "Вниз"
+            }
+        }
+
+        // ── Sending-files indicator ──────────────────────────
+        // Видимая обратная связь, пока Chat.sendFile в полёте: пользователь
+        // видит, что отправка реально идёт (как для обычных вложений из «+»,
+        // так и для share-target'а).
+        Rectangle {
+            id: sendIndicator
+            Layout.fillWidth: true
+            Layout.preferredHeight: Chat.filesInFlight > 0 ? 44 : 0
+            visible: Chat.filesInFlight > 0
+            color: Theme.bgSecondary
+
+            // Прогресс per-transfer: ключ — sendKey из C++ (см. ChatBackend::sendFile),
+            // значение — { chunk, total }. Прогрессбар внизу показывает агрегат.
+            property var progressByTransfer: ({})
+            property int totalChunks: 0
+            property int doneChunks: 0
+            readonly property real progressFraction: totalChunks > 0
+                ? Math.min(1.0, doneChunks / totalChunks) : 0
+            readonly property bool hasProgress: totalChunks > 0
+
+            function recomputeProgress() {
+                let d = 0, t = 0
+                for (const k in progressByTransfer) {
+                    const p = progressByTransfer[k]
+                    d += p.chunk || 0
+                    t += p.total || 0
+                }
+                doneChunks = d
+                totalChunks = t
+            }
+
+            Connections {
+                target: Chat
+                function onFileProgress(transferKey, chunkIndex, total) {
+                    const map = sendIndicator.progressByTransfer
+                    map[transferKey] = { chunk: chunkIndex, total: total }
+                    // Если transfer завершён, удалим запись.
+                    if (chunkIndex >= total) delete map[transferKey]
+                    sendIndicator.progressByTransfer = map
+                    sendIndicator.recomputeProgress()
+                }
+                function onFilesInFlightChanged() {
+                    if (Chat.filesInFlight === 0) {
+                        sendIndicator.progressByTransfer = ({})
+                        sendIndicator.doneChunks = 0
+                        sendIndicator.totalChunks = 0
+                    }
+                }
+            }
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width; height: 1
+                color: Theme.separator
+            }
+
+            // Круглый прогресс-бар: рисуем дугу пропорционально progressFraction.
+            // Если ещё ни один chunk не пришёл (total=0) — показываем
+            // обычный BusyIndicator как «крутилку».
+            Item {
+                id: progressVis
+                anchors.left: parent.left
+                anchors.leftMargin: 14
+                anchors.verticalCenter: parent.verticalCenter
+                width: 24; height: 24
+
+                BusyIndicator {
+                    anchors.fill: parent
+                    running: visible
+                    visible: !sendIndicator.hasProgress
+                }
+
+                Canvas {
+                    id: arcCanvas
+                    anchors.fill: parent
+                    visible: sendIndicator.hasProgress
+                    property real fraction: sendIndicator.progressFraction
+                    onFractionChanged: requestPaint()
+                    onPaint: {
+                        const ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        const cx = width / 2, cy = height / 2
+                        const r = Math.min(cx, cy) - 2
+                        ctx.lineWidth = 2.5
+                        ctx.lineCap = "round"
+                        // Базовое кольцо
+                        ctx.beginPath()
+                        ctx.strokeStyle = Theme.accentDim
+                        ctx.arc(cx, cy, r, 0, Math.PI * 2)
+                        ctx.stroke()
+                        // Активная дуга
+                        if (fraction > 0) {
+                            ctx.beginPath()
+                            ctx.strokeStyle = Theme.accent
+                            ctx.arc(cx, cy, r, -Math.PI / 2,
+                                    -Math.PI / 2 + Math.PI * 2 * fraction)
+                            ctx.stroke()
+                        }
+                    }
+                }
+            }
+
+            Text {
+                anchors.left: progressVis.right
+                anchors.leftMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                text: {
+                    if (!sendIndicator.hasProgress)
+                        return Chat.filesInFlight === 1
+                               ? "Отправка вложения…"
+                               : "Отправка вложений: " + Chat.filesInFlight + "…"
+                    const pct = Math.round(sendIndicator.progressFraction * 100)
+                    const filesPart = Chat.filesInFlight > 1
+                        ? " (файлов: " + Chat.filesInFlight + ")"
+                        : ""
+                    return "Отправка: " + sendIndicator.doneChunks
+                           + "/" + sendIndicator.totalChunks
+                           + " блоков (" + pct + "%)" + filesPart
+                }
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
             }
         }
 
@@ -1069,7 +2127,8 @@ Rectangle {
         Rectangle {
             id: inputBar
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(Math.max(msgInput.implicitHeight + 32, 60), 142)
+            Layout.preferredHeight: Math.min(Math.max(msgInput.implicitHeight + 32 + (root.hasPendingReply ? 58 : 0),
+                                                      root.hasPendingReply ? 118 : 60), 200)
             color: Theme.bgDark
 
             Rectangle {
@@ -1078,361 +2137,378 @@ Rectangle {
                 color: Theme.separator
             }
 
-            RowLayout {
+            ColumnLayout {
+                id: inputContent
                 anchors.fill: parent
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
                 anchors.topMargin: 8
                 anchors.bottomMargin: 8
-                spacing: 8
+                spacing: 6
 
-                Rectangle {
-                    Layout.preferredWidth: 40
-                    Layout.preferredHeight: 40
-                    Layout.alignment: Qt.AlignVCenter
-                    radius: Theme.radiusSm
-                    color: attachArea.containsMouse ? Theme.bgCard : Theme.bgInput
-                    border.width: 1
-                    border.color: Theme.border
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "+"
-                        color: Theme.accentHover
-                        font.pixelSize: 24
-                        font.family: Theme.fontFamily
-                    }
-
-                    MouseArea {
-                        id: attachArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        onClicked: {
-                            Chat.requestFileAccessPermissions()
-                            attachDialog.open()
-                        }
-                    }
-                }
-
-                ScrollView {
-                    id: msgInputScroll
+                ReplyPreview {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(Math.max(msgInput.implicitHeight, 40), 124)
-                    Layout.alignment: Qt.AlignVCenter
-                    clip: true
-                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                    Layout.preferredHeight: root.hasPendingReply ? implicitHeight : 0
+                    visible: root.hasPendingReply
+                    author: root.pendingReplyAuthor
+                    previewText: root.pendingReplyText
+                    closeVisible: true
+                    onCloseClicked: root.clearPendingReply()
+                }
 
-                    background: Rectangle {
-                        radius: Theme.radiusMd
-                        color: Theme.bgInput
-                        border.color: Theme.border
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 8
+
+                    Rectangle {
+                        Layout.preferredWidth: 40
+                        Layout.preferredHeight: 40
+                        Layout.alignment: Qt.AlignVCenter
+                        radius: Theme.radiusSm
+                        color: attachArea.containsMouse ? Theme.bgCard : Theme.bgInput
                         border.width: 1
+                        border.color: Theme.border
+
+                        AppIcon {
+                            anchors.centerIn: parent
+                            width: 20
+                            height: 20
+                            name: "plus"
+                            iconColor: Theme.accentHover
+                            strokeWidth: 2.2
+                        }
+
+                        MouseArea {
+                            id: attachArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: {
+                                const p = mapToItem(root, 0, 0)
+                                attachMenu.x = Math.max(8, p.x)
+                                attachMenu.y = Math.max(8, p.y - attachMenu.height - 6)
+                                attachMenu.open()
+                            }
+                        }
                     }
 
-                    TextArea {
-                        id: msgInput
-                        placeholderText: "Сообщение…"
-                        placeholderTextColor: Theme.textHint
-                        wrapMode: TextEdit.Wrap
-                        selectByMouse: true
-                        inputMethodHints: Qt.ImhNoAutoUppercase
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontMd
-                        font.family: Theme.fontFamily
-                        topPadding: 8
-                        bottomPadding: 8
-                        leftPadding: 14
-                        rightPadding: 14
-                        
-                        background: null
-                        onTextChanged: {
-                            if (text.length > 0) root.sendLocked = false
-                            root.saveDraft()
+                    ScrollView {
+                        id: msgInputScroll
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(Math.max(msgInput.implicitHeight, 40), 124)
+                        Layout.alignment: Qt.AlignVCenter
+                        clip: true
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                        background: Rectangle {
+                            radius: Theme.radiusMd
+                            color: Theme.bgInput
+                            border.color: Theme.border
+                            border.width: 1
                         }
 
-                        SpellHighlighter {
-                            textDocument: msgInput.textDocument
-                            enabled: true
-                            locale: "ru_RU"
-                        }
+                        TextArea {
+                            id: msgInput
+                            placeholderText: "Сообщение…"
+                            placeholderTextColor: Theme.textHint
+                            wrapMode: TextEdit.Wrap
+                            selectByMouse: true
+                            inputMethodHints: Qt.ImhNoAutoUppercase
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontMd
+                            font.family: Theme.fontFamily
+                            topPadding: 8
+                            bottomPadding: 8
+                            leftPadding: 14
+                            rightPadding: 14
 
-                        persistentSelection: true
-                        // Правая кнопка на десктопе
-                        onPressed: function(event) {
-                            if (event.button === Qt.RightButton && !isMobileOs) {
-                                const p = mapToItem(root, event.x, event.y)
-                                inputMenu.x = p.x - inputMenu.width
-                                inputMenu.y = p.y - inputMenu.height
+                            background: null
+                            onTextChanged: {
+                                if (text.length > 0) root.sendLocked = false
+                                root.saveDraft()
+                            }
+
+                            SpellHighlighter {
+                                id: spellHighlighter
+                                textDocument: msgInput.textDocument
+                                // На мобилках орфографию подсвечивает Qt VKB (предикативный ввод).
+                                // Дублирующее подчёркивание от Hunspell визуально мешает.
+                                enabled: !root.isMobileOs
+                                locale: "ru_RU"
+                            }
+
+                            persistentSelection: true
+
+                            function populateSpellContext(x, y) {
+                                inputMenu.spellStart = -1
+                                inputMenu.spellLength = 0
+                                inputMenu.spellWord = ""
+                                inputMenu.spellSuggestions = []
+                                if (!spellHighlighter.enabled || !spellHighlighter.available) return
+                                const pos = positionAt(x, y)
+                                if (pos < 0) return
+                                const info = spellHighlighter.misspelledAt(pos, 5)
+                                if (info && info.start !== undefined) {
+                                    inputMenu.spellStart = info.start
+                                    inputMenu.spellLength = info.length
+                                    inputMenu.spellWord = info.word
+                                    inputMenu.spellSuggestions = info.suggestions || []
+                                }
+                            }
+
+                            function placeInputMenu(clickX, clickY) {
+                                const p = mapToItem(root, clickX, clickY)
+                                let targetX = p.x - inputMenu.width
+                                if (targetX < 8) targetX = 8
+                                if (targetX + inputMenu.width > root.width - 8)
+                                    targetX = root.width - inputMenu.width - 8
+                                let targetY = p.y - inputMenu.height
+                                if (targetY < 8) targetY = Math.min(p.y + 8, root.height - inputMenu.height - 8)
+                                inputMenu.x = targetX
+                                inputMenu.y = targetY
+                            }
+
+                            // Правая кнопка на десктопе
+                            onPressed: function(event) {
+                                if (event.button === Qt.RightButton && !isMobileOs) {
+                                    populateSpellContext(event.x, event.y)
+                                    placeInputMenu(event.x, event.y)
+                                    inputMenu.open()
+                                    event.accepted = true
+                                }
+                            }
+
+                            // Длинное нажатие на мобильных
+                            onPressAndHold: function(event) {
+                                if (!isMobileOs) return
+                                populateSpellContext(event.x, event.y)
+                                placeInputMenu(event.x, event.y)
                                 inputMenu.open()
-                                event.accepted = true
                             }
-                        }
 
-                        // Длинное нажатие на мобильных
-                        onPressAndHold: function(event) {
-                            if (!isMobileOs) return
-                            const p = mapToItem(root, event.x, event.y)
-                            inputMenu.x = p.x - inputMenu.width
-                            inputMenu.y = p.y - inputMenu.height
-                            inputMenu.open()
-                        }
+                            onActiveFocusChanged: {
+                               if (activeFocus) Qt.inputMethod.show()
+                            }
 
-                        onActiveFocusChanged: {
-                           if (activeFocus) Qt.inputMethod.show()
-                        }
-
-                        Keys.onPressed: function(event) {
-                            if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-                                    && (event.modifiers & Qt.ControlModifier)) {
-                                sendBtn.clicked()
-                                event.accepted = true
+                            Keys.onPressed: function(event) {
+                                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                        && (event.modifiers & Qt.ControlModifier)) {
+                                    sendBtn.clicked()
+                                    event.accepted = true
+                                }
                             }
                         }
                     }
-                }
 
-                // Send button
-                Rectangle {
-                    Layout.preferredWidth: 40
-                    Layout.preferredHeight: 40
-                    Layout.alignment: Qt.AlignVCenter
-                    radius: Theme.radiusSm
-                    color: root.sendLocked || (msgInput.text.trim().length === 0) ? Theme.accentDim : (sendArea.containsMouse ? Theme.accentHover : Theme.accent)
+                    // Send button
+                    Rectangle {
+                        // Активность по тексту ИЛИ по pre-edit'у (предикативный ввод
+                        // до коммита держит первое слово только в preeditText).
+                        readonly property bool hasContent: msgInput.text.trim().length > 0
+                                                           || (msgInput.preeditText && msgInput.preeditText.trim().length > 0)
+                        Layout.preferredWidth: 40
+                        Layout.preferredHeight: 40
+                        Layout.alignment: Qt.AlignVCenter
+                        radius: Theme.radiusSm
+                        color: root.sendLocked || !hasContent ? Theme.accentDim : (sendArea.containsMouse ? Theme.accentHover : Theme.accent)
 
-                    Canvas {
-                        property bool enabled: msgInput.text.trim().length > 0
-                        onEnabledChanged: requestPaint()
+                        AppIcon {
+                            anchors.fill: parent
+                            name: "send"
+                            iconColor: parent.hasContent ? Theme.textPrimary : Theme.textSecondary
+                        }
 
-                        anchors.fill: parent
-                        onPaint: {
-                            const ctx = getContext("2d")
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.fillStyle = (enabled) ? Theme.textPrimary : Theme.textSecondary
-                            ctx.beginPath()
-                            ctx.moveTo(width * 0.24, height * 0.20)
-                            ctx.lineTo(width * 0.78, height * 0.50)
-                            ctx.lineTo(width * 0.24, height * 0.80)
-                            ctx.lineTo(width * 0.34, height * 0.54)
-                            ctx.lineTo(width * 0.58, height * 0.50)
-                            ctx.lineTo(width * 0.34, height * 0.46)
-                            ctx.closePath()
-                            ctx.fill()
+                        MouseArea {
+                            id: sendArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: !root.sendLocked && parent.hasContent
+                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                            onClicked: sendBtn.clicked()
                         }
                     }
 
-                    MouseArea {
-                        id: sendArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        enabled: !root.sendLocked && msgInput.text.trim().length > 0
-                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
-                        onClicked: sendBtn.clicked()
-                    }
-                }
+                    // Invisible button target for keyboard submit
+                    Item {
+                        id: sendBtn
+                        signal clicked()
 
-                // Invisible button target for keyboard submit
-                Item {
-                    id: sendBtn
-                    signal clicked()
-                    onClicked: {
-                        if (root.sendLocked) return
-                        Chat.commitInputMethod()
-                        let txt = msgInput.text.trim()
-                        if (txt.length === 0) return
-                        root.sendLocked = true
-                        Chat.sendText(txt)
-                        msgInput.text = ""
-                        root.clearDraft()
-                        sendUnlockTimer.restart()
+                        function doSend() {
+                            if (root.sendLocked) return
+                            let txt = msgInput.text.trim()
+                            // Если commit() не успел сложить pre-edit в text
+                            // (предикативный ввод первого слова), берём напрямую
+                            // из preeditText TextArea — он содержит то, что
+                            // визуально показано пользователю.
+                            if (txt.length === 0 && msgInput.preeditText && msgInput.preeditText.length > 0)
+                                txt = String(msgInput.preeditText).trim()
+                            if (txt.length === 0) return
+                            root.sendLocked = true
+                            if (root.hasPendingReply)
+                                Chat.sendTextReply(txt, root.pendingReplyId, root.pendingReplySender, root.pendingReplyText)
+                            else
+                                Chat.sendText(txt)
+                            msgInput.text = ""
+                            root.clearDraft()
+                            root.clearPendingReply()
+                            sendUnlockTimer.restart()
+                        }
+
+                        onClicked: {
+                            if (root.sendLocked) return
+                            // Qt.inputMethod.commit() кладёт pre-edit в editor через
+                            // QInputMethodEvent. Property msgInput.text обновляется,
+                            // но для некоторых input method'ов (Android Latin, Qt VKB
+                            // с предикцией) первое слово приходит в preeditText и не
+                            // успевает закоммититься в text до возврата из commit().
+                            // Поэтому отправляем через Qt.callLater + fallback на
+                            // preeditText в doSend().
+                            Qt.inputMethod.commit()
+                            Qt.callLater(doSend)
+                        }
                     }
                 }
             }
         }
     }
 
-    Rectangle {
+    PhotoViewer {
         id: photoViewer
         anchors.fill: parent
-        visible: false
-        z: 1000
-        color: "#EE020103"
-        focus: visible
+        onSaveRequested: function(messageId, filename) {
+            root.openSaveDialog(messageId, filename)
+        }
+    }
 
-        property string source: ""
-        property string messageId: ""
-        property string filename: "attachment.bin"
-        property real zoom: 1.0
-        property real pinchStartZoom: 1.0
+    // ── Подтверждение удаления выделенных сообщений ──────────────────────
+    Popup {
+        id: deleteSelectionConfirm
+        anchors.centerIn: Overlay.overlay
+        width: 320; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
-        function open(path, id, name) {
-            source = path
-            messageId = id || ""
-            filename = name && name.length > 0 ? name : "attachment.bin"
-            zoom = 1.0
-            visible = true
-            forceActiveFocus()
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color: Theme.bgSecondary
+            border.color: Theme.border
         }
 
-        function close() {
-            visible = false
-            source = ""
-            messageId = ""
-            filename = "attachment.bin"
-            zoom = 1.0
-        }
-
-        function setZoom(value) {
-            zoom = Math.max(1.0, Math.min(5.0, value))
-        }
-
-        function toggleZoom() {
-            setZoom(zoom > 1.05 ? 1.0 : 2.5)
-        }
-
-        Keys.onEscapePressed: close()
-
-        Flickable {
-            id: photoFlick
-            anchors.fill: parent
-            clip: true
-            interactive: photoViewer.zoom > 1.0
-            boundsBehavior: Flickable.StopAtBounds
-            contentWidth: Math.max(width, width * photoViewer.zoom)
-            contentHeight: Math.max(height, height * photoViewer.zoom)
-
-            Image {
-                id: fullPhoto
-                source: photoViewer.source
-                asynchronous: true
-                cache: true
-                fillMode: Image.PreserveAspectFit
-                width: photoFlick.width
-                height: photoFlick.height
-                x: (photoFlick.contentWidth - width) / 2
-                y: (photoFlick.contentHeight - height) / 2
-                scale: photoViewer.zoom
-                transformOrigin: Item.Center
+        contentItem: ColumnLayout {
+            spacing: 16
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: "Удалить сообщения?"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family: Theme.fontFamily
+                font.weight: Font.Medium
             }
-
-            WheelHandler {
-                target: null
-                onWheel: function(event) {
-                    photoViewer.setZoom(photoViewer.zoom * (event.angleDelta.y > 0 ? 1.12 : 0.88))
-                    event.accepted = true
+            Text {
+                Layout.fillWidth: true
+                text: "Выбранные сообщения (включая прикреплённые файлы) будут удалены и с сервера, и у собеседника при следующей синхронизации."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Удалить"
+                    onClicked: {
+                        deleteSelectionConfirm.close()
+                        root.confirmDeleteSelection()
+                    }
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Отмена"
+                    secondary: true
+                    onClicked: deleteSelectionConfirm.close()
                 }
             }
         }
+    }
 
-        PinchHandler {
-            target: null
-            enabled: photoViewer.visible
-            minimumPointCount: 2
-            maximumPointCount: 2
-            onActiveChanged: if (active) photoViewer.pinchStartZoom = photoViewer.zoom
-            onActiveScaleChanged: if (active) photoViewer.setZoom(photoViewer.pinchStartZoom * activeScale)
+    // ── Предложение удалить файл с сервера после скачивания ──────────────
+    Popup {
+        id: deleteServerCopyPrompt
+        anchors.centerIn: Overlay.overlay
+        width: 340; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        property string targetMessageId: ""
+        property string targetFilename: ""
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color: Theme.bgSecondary
+            border.color: Theme.border
         }
 
-        TapHandler {
-            acceptedButtons: Qt.LeftButton
-            gesturePolicy: TapHandler.ReleaseWithinBounds
-            onDoubleTapped: photoViewer.toggleZoom()
+        contentItem: ColumnLayout {
+            spacing: 16
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: "Удалить файл с сервера?"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family: Theme.fontFamily
+                font.weight: Font.Medium
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "Файл скачан и сохранён локально. Если он больше не нужен на сервере — можно его убрать. Сообщение в чате останется."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                text: deleteServerCopyPrompt.targetFilename
+                color: Theme.textHint
+                font.pixelSize: Theme.fontXs
+                font.family: Theme.fontFamily
+                elide: Text.ElideMiddle
+                visible: deleteServerCopyPrompt.targetFilename.length > 0
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Удалить"
+                    onClicked: {
+                        const id = deleteServerCopyPrompt.targetMessageId
+                        deleteServerCopyPrompt.close()
+                        if (id.length > 0) Chat.removeAttachmentChunksFromServer(id)
+                    }
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Оставить"
+                    secondary: true
+                    onClicked: deleteServerCopyPrompt.close()
+                }
+            }
         }
+    }
 
-        Row {
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 14
-            spacing: 8
-
-            Rectangle {
-                width: 38
-                height: 38
-                radius: Theme.radiusSm
-                color: saveViewerArea.containsMouse ? Theme.bgCard : Theme.bgInput
-                border.width: 1
-                border.color: Theme.border
-                Text {
-                    anchors.centerIn: parent
-                    text: "↓"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSm
-                    font.family: Theme.fontFamily
-                }
-                MouseArea {
-                    id: saveViewerArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    enabled: photoViewer.messageId.length > 0
-                    onClicked: root.openSaveDialog(photoViewer.messageId, photoViewer.filename)
-                }
-            }
-
-            Rectangle {
-                width: 38
-                height: 38
-                radius: Theme.radiusSm
-                color: zoomOutArea.containsMouse ? Theme.bgCard : Theme.bgInput
-                border.width: 1
-                border.color: Theme.border
-                Text {
-                    anchors.centerIn: parent
-                    text: "-"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontLg
-                    font.family: Theme.fontFamily
-                }
-                MouseArea {
-                    id: zoomOutArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: photoViewer.setZoom(photoViewer.zoom / 1.25)
-                }
-            }
-
-            Rectangle {
-                width: 38
-                height: 38
-                radius: Theme.radiusSm
-                color: zoomInArea.containsMouse ? Theme.bgCard : Theme.bgInput
-                border.width: 1
-                border.color: Theme.border
-                Text {
-                    anchors.centerIn: parent
-                    text: "+"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontLg
-                    font.family: Theme.fontFamily
-                }
-                MouseArea {
-                    id: zoomInArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: photoViewer.setZoom(photoViewer.zoom * 1.25)
-                }
-            }
-
-            Rectangle {
-                width: 38
-                height: 38
-                radius: Theme.radiusSm
-                color: closeViewerArea.containsMouse ? Theme.bgCard : Theme.bgInput
-                border.width: 1
-                border.color: Theme.border
-                Text {
-                    anchors.centerIn: parent
-                    text: "x"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontLg
-                    font.family: Theme.fontFamily
-                }
-                MouseArea {
-                    id: closeViewerArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: photoViewer.close()
-                }
-            }
+    Connections {
+        target: Chat
+        function onAttachmentDownloaded(messageId, filename) {
+            deleteServerCopyPrompt.targetMessageId = messageId || ""
+            deleteServerCopyPrompt.targetFilename = filename || ""
+            deleteServerCopyPrompt.open()
+        }
+        function onMessagesDeleted(peer) {
+            if (peer === root.peer) Chat.fetchMessages()
         }
     }
 }

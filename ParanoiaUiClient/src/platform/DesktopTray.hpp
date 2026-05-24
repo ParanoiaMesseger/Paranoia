@@ -9,6 +9,10 @@ class QQmlApplicationEngine;
 #include <QAction>
 #endif
 
+#if defined(OS_LINUX)
+#include "platform/LinuxNotifier.hpp"
+#endif
+
 class DesktopTray : public QObject
 {
     Q_OBJECT
@@ -17,6 +21,7 @@ public:
     DesktopTray(QQmlApplicationEngine &engine);
 public slots:
     void notificationAvailable(quint64 count);
+    void clearAccumulatedNotifications();
 #if PARANOIA_DESKTOP_TRAY
     void showWindow();
 
@@ -26,5 +31,8 @@ private:
     QAction showAction_;
     QAction quitAction_;
     QQmlApplicationEngine &engine_;
+#if defined(OS_LINUX)
+    LinuxNotifier linuxNotifier_;
+#endif
 #endif
 };

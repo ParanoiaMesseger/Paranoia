@@ -471,6 +471,16 @@ pub fn build_create_permission_no_auth(transaction_id: [u8; 12], peers: &[Socket
     b.finish()
 }
 
+/// Собрать Refresh Request для продления allocation lifetime.
+/// `lifetime_seconds = 0` — explicit close allocation (RFC 8656 §7.2).
+/// Без auth (для встроенного Paranoia TURN). Сервер ответит Refresh Success
+/// с актуальным LIFETIME, который нужно использовать для следующего refresh.
+pub fn build_refresh_no_auth(transaction_id: [u8; 12], lifetime_seconds: u32) -> Vec<u8> {
+    let mut b = MessageBuilder::new(method::REFRESH, Class::Request, transaction_id);
+    b.push_u32(attr::LIFETIME, lifetime_seconds);
+    b.finish()
+}
+
 /// Собрать Send Indication: пакет с DATA, обёрнутый для отправки через TURN.
 /// Indications не имеют MESSAGE-INTEGRITY (RFC 8656 §11).
 pub fn build_send_indication(transaction_id: [u8; 12], peer: SocketAddr, data: &[u8]) -> Vec<u8> {

@@ -47,11 +47,13 @@ Rectangle {
                 border.color: Theme.border
                 Behavior on color { ColorAnimation { duration: 120 } }
 
-                Text {
+                AppIcon {
                     anchors.centerIn: parent
-                    text:             "←"
-                    color:            Theme.accentHover
-                    font.pixelSize:   Theme.fontLg
+                    width: 20
+                    height: 20
+                    name: "arrowLeft"
+                    iconColor: Theme.accentHover
+                    strokeWidth: 2
                 }
 
                 MouseArea {

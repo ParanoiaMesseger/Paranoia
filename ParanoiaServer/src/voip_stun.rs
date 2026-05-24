@@ -329,6 +329,37 @@ fn relay_bind_addr(control_bind: SocketAddr, client: SocketAddr) -> SocketAddr {
     SocketAddr::new(ip, 0)
 }
 
+/// Bind UDP relay-сокет на свободный порт из указанного диапазона. Если
+/// диапазон не задан — bind на эфемерный порт ОС (как раньше). Это нужно для
+/// инсталляций за NAT, где требуется заранее знать диапазон портов и пробросить
+/// его на роутере (DMZ/range port forwarding) — иначе клиенты не достучатся до
+/// relay-сокета сервера.
+async fn bind_relay_socket(
+    control_bind: SocketAddr,
+    client: SocketAddr,
+    relay_port_range: Option<(u16, u16)>,
+) -> std::io::Result<UdpSocket> {
+    let base = relay_bind_addr(control_bind, client);
+    let Some((start, end)) = relay_port_range else {
+        return UdpSocket::bind(base).await;
+    };
+    // Пробуем порты по очереди — если все заняты, возвращаем последнюю ошибку.
+    let mut last_err: Option<std::io::Error> = None;
+    for port in start..=end {
+        let candidate = SocketAddr::new(base.ip(), port);
+        match UdpSocket::bind(candidate).await {
+            Ok(sock) => return Ok(sock),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("all ports in relay range {start}-{end} are busy"),
+        )
+    }))
+}
+
 fn public_addr(local: SocketAddr, public_ip: Option<IpAddr>) -> SocketAddr {
     public_ip
         .map(|ip| SocketAddr::new(ip, local.port()))
@@ -368,6 +399,7 @@ async fn get_or_create_allocation(
     allocations: Allocations,
     control_bind: SocketAddr,
     public_ip: Option<IpAddr>,
+    relay_port_range: Option<(u16, u16)>,
     client: SocketAddr,
 ) -> anyhow::Result<Allocation> {
     let now = Instant::now();
@@ -383,7 +415,8 @@ async fn get_or_create_allocation(
         }
     }
 
-    let relay_socket = Arc::new(UdpSocket::bind(relay_bind_addr(control_bind, client)).await?);
+    let relay_socket =
+        Arc::new(bind_relay_socket(control_bind, client, relay_port_range).await?);
     let local = relay_socket.local_addr()?;
     let relayed_addr = public_addr(local, public_ip);
     let shutdown = Arc::new(Notify::new());
@@ -409,6 +442,7 @@ async fn handle_allocate(
     allocations: Allocations,
     bind: SocketAddr,
     public_ip: Option<IpAddr>,
+    relay_port_range: Option<(u16, u16)>,
     from: SocketAddr,
     msg: &Message,
 ) {
@@ -420,7 +454,16 @@ async fn handle_allocate(
         let _ = socket.send_to(&resp, from).await;
         return;
     }
-    match get_or_create_allocation(Arc::clone(&socket), allocations, bind, public_ip, from).await {
+    match get_or_create_allocation(
+        Arc::clone(&socket),
+        allocations,
+        bind,
+        public_ip,
+        relay_port_range,
+        from,
+    )
+    .await
+    {
         Ok(allocation) => {
             let attrs = [
                 (
@@ -536,7 +579,14 @@ async fn spawn_gc(allocations: Allocations) {
 
 /// Слушать STUN/TURN-запросы на `bind`. `turn_public_ip` нужен, если listener
 /// биндим на `0.0.0.0`, а клиентам надо отдать публичный IP в relayed address.
-pub async fn run(bind: SocketAddr, turn_public_ip: Option<IpAddr>) -> anyhow::Result<()> {
+/// `relay_port_range` (start, end включительно) — узкий диапазон UDP-портов для
+/// TURN relay-аллокаций, нужен если сервер за NAT и эти порты должны быть
+/// проброшены вручную; `None` — эфемерный порт ОС.
+pub async fn run(
+    bind: SocketAddr,
+    turn_public_ip: Option<IpAddr>,
+    relay_port_range: Option<(u16, u16)>,
+) -> anyhow::Result<()> {
     let socket = Arc::new(
         UdpSocket::bind(bind)
             .await
@@ -546,6 +596,9 @@ pub async fn run(bind: SocketAddr, turn_public_ip: Option<IpAddr>) -> anyhow::Re
     info!("Paranoia STUN/TURN listening on udp://{local}");
     if let Some(ip) = turn_public_ip {
         info!("Paranoia TURN public relay IP: {ip}");
+    }
+    if let Some((start, end)) = relay_port_range {
+        info!("Paranoia TURN relay port range: {start}-{end}");
     }
 
     let allocations: Allocations = Arc::new(Mutex::new(HashMap::new()));
@@ -579,6 +632,7 @@ pub async fn run(bind: SocketAddr, turn_public_ip: Option<IpAddr>) -> anyhow::Re
                     Arc::clone(&allocations),
                     local,
                     turn_public_ip,
+                    relay_port_range,
                     from,
                     &msg,
                 )
