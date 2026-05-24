@@ -56,11 +56,6 @@ ios_arch_name() {
     esac
 }
 
-ffmpeg_has_list_entry() {
-    local list_name="$1"
-    local entry="$2"
-    "$SRCDIR/configure" "--list-${list_name}" | grep -qx "$entry"
-}
 
 build_one_arch() {
     local arch="$1"
@@ -94,12 +89,8 @@ build_one_arch() {
     mkdir -p "$builddir"
 
     local common_flags="-arch $arch -isysroot $SDK_PATH $min_flag -O3 -fPIC"
-    local videotoolbox_args=(--enable-videotoolbox)
-    if ffmpeg_has_list_entry encoders h264_videotoolbox; then
-        videotoolbox_args+=(--enable-encoder=h264_videotoolbox)
-    else
-        echo "WARN: FFmpeg ${FFMPEG_VERSION} has no h264_videotoolbox encoder; iOS video send may be unavailable" >&2
-    fi
+    # h264_videotoolbox присутствует в FFmpeg начиная с 3.x — проверка не нужна.
+    local videotoolbox_args=(--enable-videotoolbox --enable-encoder=h264_videotoolbox)
     (
         cd "$builddir"
         "$SRCDIR/configure" \

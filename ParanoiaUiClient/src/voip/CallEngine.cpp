@@ -11,6 +11,12 @@
 #include <QJniEnvironment>
 #include <QJniObject>
 #endif
+#if defined(Q_OS_IOS)
+#include "IosAudioSession.hpp"
+#include <QCoreApplication>
+#include <QPermissions>
+#include <QPointer>
+#endif
 
 namespace paranoia::voip
 {
@@ -157,6 +163,8 @@ namespace paranoia::voip
                 if (env->ExceptionCheck()) env->ExceptionClear();
             }
         }
+#elif defined(Q_OS_IOS)
+        iosAudioSessionDeactivate();
 #endif
 #if PARANOIA_HAS_VIDEO
         if (video_capture_) {
@@ -336,6 +344,27 @@ namespace paranoia::voip
             return false;
         }
         if (capture_) return true;
+#if defined(Q_OS_IOS) && QT_CONFIG(permissions)
+        {
+            QMicrophonePermission permission;
+            const auto status = qApp->checkPermission(permission);
+            if (status == Qt::PermissionStatus::Undetermined) {
+                QPointer<CallEngine> self(this);
+                qApp->requestPermission(permission, this, [self](const QPermission &granted) {
+                    if (!self) return;
+                    if (granted.status() == Qt::PermissionStatus::Granted)
+                        self->attachAudio();
+                    else
+                        emit self->errorOccurred(QStringLiteral("Нет доступа к микрофону."));
+                });
+                return false;
+            }
+            if (status == Qt::PermissionStatus::Denied) {
+                emit errorOccurred(QStringLiteral("Нет доступа к микрофону."));
+                return false;
+            }
+        }
+#endif
 #if defined(Q_OS_ANDROID)
         {
             QJniEnvironment env;
@@ -354,6 +383,12 @@ namespace paranoia::voip
                 if (env->ExceptionCheck()) env->ExceptionClear();
             }
         }
+#elif defined(Q_OS_IOS)
+        // Прямой аналог Android-блока выше: переключаем AVAudioSession в
+        // PlayAndRecord/VoiceChat с DefaultToSpeaker ДО старта QAudioSource/Sink.
+        // Иначе выход уходит в earpiece, а одновременный recording в дефолтной
+        // категории приглушает воспроизведение.
+        iosAudioSessionConfigureForVoiceCall();
 #endif
         capture_ = std::make_unique<AudioCapture>(this);
         connect(capture_.get(), &AudioCapture::frameReady, this, &CallEngine::onPcmFrameFromMic);
@@ -374,6 +409,27 @@ namespace paranoia::voip
             return false;
         }
         if (video_attached_) return true;
+#if defined(Q_OS_IOS) && QT_CONFIG(permissions)
+        {
+            QCameraPermission permission;
+            const auto status = qApp->checkPermission(permission);
+            if (status == Qt::PermissionStatus::Undetermined) {
+                QPointer<CallEngine> self(this);
+                qApp->requestPermission(permission, this, [self](const QPermission &granted) {
+                    if (!self) return;
+                    if (granted.status() == Qt::PermissionStatus::Granted)
+                        self->attachVideo();
+                    else
+                        emit self->errorOccurred(QStringLiteral("Нет доступа к камере."));
+                });
+                return false;
+            }
+            if (status == Qt::PermissionStatus::Denied) {
+                emit errorOccurred(QStringLiteral("Нет доступа к камере."));
+                return false;
+            }
+        }
+#endif
 #if defined(Q_OS_ANDROID)
         {
             QJniEnvironment env;

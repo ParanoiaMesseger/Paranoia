@@ -42,10 +42,6 @@ if [ -z "$SDK_PATH" ]; then
     exit 1
 fi
 
-CLANG_BIN="$(xcrun --sdk "$OPUS_IOS_SDK" --find clang)"
-AR_BIN="$(xcrun --sdk "$OPUS_IOS_SDK" --find ar)"
-RANLIB_BIN="$(xcrun --sdk "$OPUS_IOS_SDK" --find ranlib)"
-
 mkdir -p "$OPUS_WORK_DIR"
 
 TARBALL="$OPUS_WORK_DIR/opus-${OPUS_VERSION}.tar.gz"
@@ -61,20 +57,15 @@ if [ ! -d "$SRCDIR" ]; then
     tar -xzf "$TARBALL" -C "$OPUS_WORK_DIR"
 fi
 
-COMMON_CONF_ARGS=(
-    --enable-static
-    --disable-shared
-    --disable-doc
-    --disable-extra-programs
-)
-
 # Только arm64 имеет смысл для iOS-устройств; для симулятора используется
 # arm64 (M-серия) или x86_64 (Intel) с sdk=iphonesimulator.
 build_one_arch() {
     local arch="$1"
     local out_subdir="ios-${arch}"
+    local cmake_system_name="iOS"
     if [ "$OPUS_IOS_SDK" = "iphonesimulator" ]; then
         out_subdir="iossim-${arch}"
+        cmake_system_name="iOS"
     fi
     local prefix="$OUT_DIR/$out_subdir"
     if [ "$FORCE_REBUILD" != "1" ] \
@@ -84,40 +75,28 @@ build_one_arch() {
         return
     fi
 
-    # Триплет для autoconf.
-    local host
-    case "$arch" in
-        arm64)  host="aarch64-apple-darwin" ;;
-        x86_64) host="x86_64-apple-darwin" ;;
-        *) echo "WARN: неподдерживаемая iOS arch '$arch'" >&2; return ;;
-    esac
-
-    local builddir="$OPUS_WORK_DIR/build-$out_subdir"
-    rm -rf "$builddir"
+    local builddir="$OPUS_WORK_DIR/cmake-build-$out_subdir"
+    rm -rf "$builddir" "$prefix"
     mkdir -p "$builddir"
 
-    local arch_flags="-arch $arch"
-    local min_flag="-mios-version-min=$IPHONEOS_DEPLOYMENT_TARGET"
-    if [ "$OPUS_IOS_SDK" = "iphonesimulator" ]; then
-        min_flag="-mios-simulator-version-min=$IPHONEOS_DEPLOYMENT_TARGET"
-    fi
+    # Используем cmake вместо autotools: autotools генерирует depfiles через
+    # `make -f - am--depfiles`, что вызывает deadlock pipe-буфера на macOS
+    # при cross-компиляции для iOS. cmake/ninja лишён этой проблемы.
+    cmake -S "$SRCDIR" -B "$builddir" \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SYSTEM_NAME="$cmake_system_name" \
+        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+        -DCMAKE_OSX_ARCHITECTURES="$arch" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \
+        -DCMAKE_INSTALL_PREFIX="$prefix" \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DOPUS_BUILD_PROGRAMS=OFF \
+        -DOPUS_BUILD_TESTING=OFF \
+        -DOPUS_INSTALL_PKG_CONFIG_MODULE=ON
 
-    (
-        cd "$builddir"
-        export CC="$CLANG_BIN"
-        export AR="$AR_BIN"
-        export RANLIB="$RANLIB_BIN"
-        export CFLAGS="$arch_flags -isysroot $SDK_PATH $min_flag -fPIC -fembed-bitcode -O3"
-        export LDFLAGS="$arch_flags -isysroot $SDK_PATH $min_flag"
-        "$SRCDIR/configure" \
-            --host="$host" \
-            --prefix="$prefix" \
-            "${COMMON_CONF_ARGS[@]}"
-        make -j"$(sysctl -n hw.ncpu)"
-        rm -rf "$prefix"
-        mkdir -p "$prefix"
-        make install
-    )
+    cmake --build "$builddir" --parallel
+    cmake --install "$builddir"
 
     if [ ! -f "$prefix/lib/libopus.a" ] || [ ! -f "$prefix/include/opus/opus.h" ]; then
         echo "ERROR: установка opus для $out_subdir не дала ожидаемых файлов" >&2

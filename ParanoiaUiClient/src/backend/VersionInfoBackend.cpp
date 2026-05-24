@@ -40,6 +40,8 @@ namespace
     {
 #if defined(Q_OS_ANDROID)
         return {QStringLiteral("paranoia-android-arm64.apk"), QStringLiteral("android")};
+#elif defined(Q_OS_IOS)
+        return {QStringLiteral("paranoia-ios-arm64.ipa"), QStringLiteral("ios")};
 #elif defined(Q_OS_WIN)
         return {QStringLiteral("paranoia-windows-x86_64-installer.exe"), QStringLiteral("windows")};
 #elif defined(Q_OS_LINUX)

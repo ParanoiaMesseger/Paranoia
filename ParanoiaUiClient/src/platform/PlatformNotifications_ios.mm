@@ -4,11 +4,33 @@
 #import <dispatch/dispatch.h>
 #import <objc/message.h>
 #import <stdlib.h>
+#import <string.h>
 
 extern "C" void paranoia_platform_trigger_background_poll();
 
 @interface ParanoiaIosNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
 @end
+
+namespace
+{
+    NSString *const kPollingTaskIdentifier  = @"com.paranoia.polling";
+    NSString *const kWarningShownKey        = @"paranoia.ios.background_warning_shown";
+    NSString *const kOpenProfileIdKey       = @"paranoia.ios.open_profile_id";
+    NSString *const kOpenPeerKey            = @"paranoia.ios.open_peer";
+    NSString *const kUserInfoProfileIdKey   = @"profileId";
+    NSString *const kUserInfoPeerKey        = @"peer";
+
+    // Сохраняет target открытия чата в NSUserDefaults. Используется и при
+    // тёплом тапе (didReceiveNotificationResponse:), и переживает cold start —
+    // QML при запуске зовёт takeOpenTargetFromNotification и забирает.
+    void persistOpenTarget(NSString *profileId, NSString *peer)
+    {
+        if (peer.length == 0) return;
+        NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+        [defaults setObject:(profileId ?: @"") forKey:kOpenProfileIdKey];
+        [defaults setObject:peer forKey:kOpenPeerKey];
+    }
+}
 
 @implementation ParanoiaIosNotificationDelegate
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
@@ -26,13 +48,28 @@ extern "C" void paranoia_platform_trigger_background_poll();
                           UNNotificationPresentationOptionSound);
     }
 }
+
+// Срабатывает при тапе по уведомлению (и при тёплом старте, и при cold start
+// после запуска приложения). userInfo приходит из content.userInfo, которую
+// мы кладём в paranoia_ios_show_message_count.
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void (^)(void))completionHandler
+{
+    (void)center;
+    NSDictionary *userInfo = response.notification.request.content.userInfo;
+    NSString *profileId    = userInfo[kUserInfoProfileIdKey];
+    NSString *peer         = userInfo[kUserInfoPeerKey];
+    if ([profileId isKindOfClass:NSString.class] == NO) profileId = @"";
+    if ([peer isKindOfClass:NSString.class]) {
+        persistOpenTarget(profileId, peer);
+    }
+    completionHandler();
+}
 @end
 
 namespace
 {
-    NSString *const kPollingTaskIdentifier = @"com.paranoia.polling";
-    NSString *const kWarningShownKey = @"paranoia.ios.background_warning_shown";
-
     ParanoiaIosNotificationDelegate *notificationDelegate()
     {
         static ParanoiaIosNotificationDelegate *delegate = [ParanoiaIosNotificationDelegate new];
@@ -206,6 +243,16 @@ namespace
                                                                            completionHandler:^(__unused BOOL granted,
                                                                                                __unused NSError *error) {}];
     }
+
+    // Дублирующая C-строка для возврата через extern "C" интерфейс — caller
+    // (PlatformNotifications.cpp) обязан освободить через paranoia_ios_free_string.
+    char *duplicateUtf8(NSString *value)
+    {
+        if (value == nil || value.length == 0) return nullptr;
+        const char *utf8 = value.UTF8String;
+        if (utf8 == nullptr) return nullptr;
+        return strdup(utf8);
+    }
 }
 
 extern "C" void paranoia_ios_register_background_tasks()
@@ -225,7 +272,7 @@ extern "C" void paranoia_ios_cancel_background_polling()
     cancelPollingTask();
 }
 
-extern "C" void paranoia_ios_show_message_count(unsigned long long count)
+extern "C" void paranoia_ios_show_message_count(unsigned long long count, const char *profileId, const char *peer)
 {
     if (count == 0) return;
     UNMutableNotificationContent *content = [UNMutableNotificationContent new];
@@ -234,8 +281,41 @@ extern "C" void paranoia_ios_show_message_count(unsigned long long count)
     content.sound = UNNotificationSound.defaultSound;
     content.badge = @(count > NSIntegerMax ? NSIntegerMax : (NSInteger)count);
 
+    // Кладём target в userInfo — забираем обратно в didReceiveNotificationResponse:
+    // при тапе. Пустой peer оставляем (значит «общий» баннер без целевого чата).
+    NSString *profileIdStr = (profileId != nullptr) ? @(profileId) : @"";
+    NSString *peerStr      = (peer != nullptr) ? @(peer) : @"";
+    content.userInfo = @{
+        kUserInfoProfileIdKey: profileIdStr ?: @"",
+        kUserInfoPeerKey:      peerStr      ?: @"",
+    };
+
     UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:@"paranoia.new_messages"
                                                                            content:content
                                                                            trigger:nil];
     [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
+}
+
+extern "C" bool paranoia_ios_take_open_target(char **out_profile_id, char **out_peer)
+{
+    if (out_profile_id == nullptr || out_peer == nullptr) return false;
+    *out_profile_id = nullptr;
+    *out_peer       = nullptr;
+
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *peer           = [defaults stringForKey:kOpenPeerKey];
+    if (peer.length == 0) return false;
+
+    NSString *profileId = [defaults stringForKey:kOpenProfileIdKey];
+    [defaults removeObjectForKey:kOpenProfileIdKey];
+    [defaults removeObjectForKey:kOpenPeerKey];
+
+    *out_profile_id = duplicateUtf8(profileId);
+    *out_peer       = duplicateUtf8(peer);
+    return true;
+}
+
+extern "C" void paranoia_ios_free_string(char *value)
+{
+    if (value != nullptr) free(value);
 }
