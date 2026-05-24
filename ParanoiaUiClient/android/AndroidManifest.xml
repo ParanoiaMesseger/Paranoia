@@ -16,6 +16,24 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Управление audio-стеком во время звонка: переключение режима в
+         MODE_IN_COMMUNICATION и speakerphone. Без этого permission'а
+         setMode/setSpeakerphoneOn молча игнорируются и звук QAudioSink
+         уходит в media stream, который при одновременном recording'е
+         приглушается аудиосервисом. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Точные alarm'ы для polling-цикла сервиса уведомлений. Без exact-alarm'а
+         app standby bucket (working set+) откладывает setAndAllowWhileIdle на
+         минуты, и фоновые уведомления опаздывают. USE_EXACT_ALARM на Android 13+
+         выдаётся системой автоматически как core feature для messaging-приложений;
+         SCHEDULE_EXACT_ALARM — fallback для 12, который пользователь может
+         подтвердить руками. -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Wake lock — receiver alarm'а удерживает CPU на время сетевого poll'а,
+         пока устройство в Doze. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <!-- %%INSERT_FEATURES -->
@@ -33,8 +51,13 @@
         android:requestLegacyExternalStorage="true"
         android:allowBackup="true"
         android:fullBackupOnly="false">
+        <!-- Единственная активити приложения — подкласс QtActivity (см.
+             ParanoiaActivity.java, добивает зависший Qt-shutdown). И иконка
+             лаунчера, и тап по уведомлению целятся прямо в неё (см.
+             openAppIntent): Qt — singleton на процесс, любой activity-trampoline,
+             роняющий QtActivity в отдельную task, приводит к зависанию. -->
         <activity
-            android:name="org.qtproject.qt.android.bindings.QtActivity"
+            android:name="app.paranoia.client.ParanoiaActivity"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
             android:label="-- %%INSERT_APP_NAME%% --"
             android:launchMode="singleTop"
@@ -45,7 +68,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="-- %%INSERT_APP_LIB_NAME%% --" />
@@ -59,8 +81,18 @@
             android:name="app.paranoia.client.ParanoiaForegroundService"
             android:enabled="true"
             android:exported="false"
+            android:process=":notifications"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
+
+        <!-- Получатель alarm-будилки. Должен жить в том же процессе, что и
+             сервис (:notifications), иначе тянет за собой инициализацию main
+             процесса с Qt-биндингами. -->
+        <receiver
+            android:name="app.paranoia.client.ParanoiaForegroundService$PollAlarmReceiver"
+            android:enabled="true"
+            android:exported="false"
+            android:process=":notifications" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

@@ -2,7 +2,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 260" shape-rendering="geometricPrecision">
 
   <style><![CDATA[
-    .panel { fill: #08070a; stroke: #251015; stroke-width: 0; }
+    .panel { fill: none; }
     .void  { fill: #050406; }
     .red-deep { fill: #650710; }
     .red-dark { fill: #8f0b16; }

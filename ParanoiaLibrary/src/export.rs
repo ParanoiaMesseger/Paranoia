@@ -46,6 +46,8 @@ pub struct ExportKeyEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExportDialogue {
     pub peer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_server_id: Option<String>,
     pub keyring: Vec<ExportKeyEntry>,
 }
 
@@ -334,6 +336,7 @@ mod tests {
                 signing_key_b64: B64.encode([1u8; 32]),
                 dialogues: vec![ExportDialogue {
                     peer: "bob".into(),
+                    peer_server_id: None,
                     keyring: vec![ExportKeyEntry {
                         start_seq: 1,
                         key: B64.encode([0u8; 32]),
@@ -360,6 +363,7 @@ mod tests {
                 signing_key_b64: B64.encode([1u8; 32]),
                 dialogues: vec![ExportDialogue {
                     peer: "bob".into(),
+                    peer_server_id: None,
                     keyring: vec![
                         ExportKeyEntry {
                             start_seq: 1,
@@ -396,6 +400,7 @@ mod tests {
                 signing_key_b64: B64.encode([1u8; 32]),
                 dialogues: vec![ExportDialogue {
                     peer: "bob".into(),
+                    peer_server_id: None,
                     keyring: vec![
                         ExportKeyEntry {
                             start_seq: 1,

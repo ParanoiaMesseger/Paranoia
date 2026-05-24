@@ -1,12 +1,17 @@
-use crate::client_cover::ClientCover;
+use crate::{client_cover::ClientCover, crypto};
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, header};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// Общий потолок на запрос. Без него reqwest висит бесконечно, если сервер
+// принял соединение, но не отвечает (наблюдалось на холодном фоновом
+// polling'е из notifications-процесса — вызов notify_count не возвращался).
+// 60s с запасом перекрывает long-poll /call/poll (сервер ждёт максимум 30s).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Внутренний пакет на отправку (push).
 pub struct CorePush {
@@ -42,11 +47,62 @@ pub struct CoreDeterminate {
     pub sig: Vec<u8>,
 }
 
+/// Внутренний запрос /arrived GET.
+pub struct CoreArrivedGet {
+    pub sender: String,
+    pub partner: String,
+    pub dialogue_id: String,
+    pub sig: Vec<u8>,
+}
+
+/// Внутренний запрос /arrived PUT.
+pub struct CoreArrivedSet {
+    pub sender: String,
+    pub dialogue_id: String,
+    pub receipts_enabled: bool,
+    pub sig: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArrivedResponse {
+    pub partner_last_seq: Option<u64>,
+    pub ts: u64,
+}
+
 /// Ответ одного пакета с сервера (после pull).
 #[derive(Debug, Clone)]
 pub struct RawPacket {
     pub seq: u64,
     pub payload: Vec<u8>, // уже декодированный из base64
+}
+
+/// Внутренний запрос /call/signal — публикация сигнального конверта VoIP.
+/// `payload` — уже зашифрованные данные (см. `voip::signaling::seal`).
+pub struct CoreCallSignal {
+    pub sender: String,
+    pub recver: String,
+    pub kind: u8,
+    pub payload: Vec<u8>,
+    pub ts_ms: i64,
+    pub sig: Vec<u8>,
+}
+
+/// Внутренний запрос /call/poll — забрать входящие сигнальные конверты.
+pub struct CoreCallPoll {
+    pub user: String,
+    pub nonce: u64,
+    pub long_poll_ms: u32,
+    pub sig: Vec<u8>,
+}
+
+/// Принятый сигнальный конверт. `payload` ещё зашифрован — расшифровывает
+/// `voip::signaling::open` тем же ключом, что и `seal`.
+#[derive(Debug, Clone)]
+pub struct CallEnvelopeIn {
+    pub sender: String,
+    pub kind: u8,
+    pub payload: Vec<u8>,
+    pub ts_ms: i64,
 }
 
 // Для /reg оставляем простой формат без cover.
@@ -83,6 +139,7 @@ impl Transport {
         Self {
             client: Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             server_urls,
@@ -150,6 +207,58 @@ impl Transport {
         self.cover.unwrap_determinate_response(&resp)
     }
 
+    pub async fn call_signal(&self, core: &CoreCallSignal) -> Result<()> {
+        let body = self.cover.wrap_call_signal(core)?;
+        let resp = self.put_json("/call/signal", &body).await?;
+        self.cover.unwrap_call_signal_response(&resp)
+    }
+
+    pub async fn call_poll(&self, core: &CoreCallPoll) -> Result<Vec<CallEnvelopeIn>> {
+        let body = self.cover.wrap_call_poll(core)?;
+        let resp = self.put_json("/call/poll", &body).await?;
+        self.cover.unwrap_call_poll_response(&resp)
+    }
+
+    pub async fn arrived_get(&self, core: &CoreArrivedGet) -> Result<ArrivedResponse> {
+        let auth = arrived_auth_header(&core.sender, &core.sig);
+        let resp = self
+            .get_json_authorized(
+                "/arrived",
+                &[
+                    ("dialogue_id", core.dialogue_id.as_str()),
+                    ("partner", core.partner.as_str()),
+                ],
+                &auth,
+            )
+            .await?;
+        check_direct_ok(&resp, "Arrived")?;
+        let partner_last_seq = match resp.get("partner_last_seq") {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(
+                value
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("Arrived: invalid partner_last_seq"))?,
+            ),
+        };
+        let ts = resp.get("ts").and_then(Value::as_u64).unwrap_or(0);
+        Ok(ArrivedResponse {
+            partner_last_seq,
+            ts,
+        })
+    }
+
+    pub async fn arrived_set(&self, core: &CoreArrivedSet) -> Result<()> {
+        let sig = crypto::encode_b64(&core.sig);
+        let auth = arrived_auth_header(&core.sender, &core.sig);
+        let body = json!({
+            "dialogue_id": core.dialogue_id.as_str(),
+            "receipts_enabled": core.receipts_enabled,
+            "sig": sig,
+        });
+        let resp = self.put_json_authorized("/arrived", &body, &auth).await?;
+        check_direct_ok(&resp, "Arrived set")
+    }
+
     // ── HTTP утилита ────────────────────────────────────────────────────
 
     async fn put_json(&self, path: &str, body: &Value) -> Result<Value> {
@@ -157,6 +266,45 @@ impl Transport {
         for server_url in &self.server_urls {
             let url = format!("{}{}", server_url, path);
             match self.put_json_once(&url, body).await {
+                Ok(resp) => return Ok(resp),
+                Err(EndpointError::Retry(err)) => last_retry_error = Some(err),
+                Err(EndpointError::Stop(err)) => return Err(err),
+            }
+        }
+
+        match last_retry_error {
+            Some(err) => Err(err).context("all server endpoints unavailable"),
+            None => bail!("no server endpoints configured"),
+        }
+    }
+
+    async fn put_json_authorized(&self, path: &str, body: &Value, auth: &str) -> Result<Value> {
+        let mut last_retry_error = None;
+        for server_url in &self.server_urls {
+            let url = format!("{}{}", server_url, path);
+            match self.put_json_once_authorized(&url, body, auth).await {
+                Ok(resp) => return Ok(resp),
+                Err(EndpointError::Retry(err)) => last_retry_error = Some(err),
+                Err(EndpointError::Stop(err)) => return Err(err),
+            }
+        }
+
+        match last_retry_error {
+            Some(err) => Err(err).context("all server endpoints unavailable"),
+            None => bail!("no server endpoints configured"),
+        }
+    }
+
+    async fn get_json_authorized(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        auth: &str,
+    ) -> Result<Value> {
+        let mut last_retry_error = None;
+        for server_url in &self.server_urls {
+            let url = format!("{}{}", server_url, path);
+            match self.get_json_once_authorized(&url, query, auth).await {
                 Ok(resp) => return Ok(resp),
                 Err(EndpointError::Retry(err)) => last_retry_error = Some(err),
                 Err(EndpointError::Stop(err)) => return Err(err),
@@ -204,6 +352,94 @@ impl Transport {
             EndpointError::Stop(anyhow!(err).context("invalid server JSON response"))
         })
     }
+
+    async fn put_json_once_authorized(
+        &self,
+        url: &str,
+        body: &Value,
+        auth: &str,
+    ) -> std::result::Result<Value, EndpointError> {
+        let resp = match self
+            .client
+            .put(url)
+            .header(header::AUTHORIZATION, auth)
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) if err.is_builder() => {
+                return Err(EndpointError::Stop(
+                    anyhow!(err).context("invalid server endpoint"),
+                ));
+            }
+            Err(err) => {
+                return Err(EndpointError::Retry(
+                    anyhow!(err).context("server endpoint request failed"),
+                ));
+            }
+        };
+
+        let status = resp.status();
+        if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(EndpointError::Retry(anyhow!(
+                "server endpoint returned retryable HTTP status {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(EndpointError::Stop(anyhow!(
+                "server endpoint returned HTTP status {status}"
+            )));
+        }
+
+        resp.json::<Value>().await.map_err(|err| {
+            EndpointError::Stop(anyhow!(err).context("invalid server JSON response"))
+        })
+    }
+
+    async fn get_json_once_authorized(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+        auth: &str,
+    ) -> std::result::Result<Value, EndpointError> {
+        let url = url_with_query(url, query);
+        let resp = match self
+            .client
+            .get(url)
+            .header(header::AUTHORIZATION, auth)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) if err.is_builder() => {
+                return Err(EndpointError::Stop(
+                    anyhow!(err).context("invalid server endpoint"),
+                ));
+            }
+            Err(err) => {
+                return Err(EndpointError::Retry(
+                    anyhow!(err).context("server endpoint request failed"),
+                ));
+            }
+        };
+
+        let status = resp.status();
+        if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(EndpointError::Retry(anyhow!(
+                "server endpoint returned retryable HTTP status {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(EndpointError::Stop(anyhow!(
+                "server endpoint returned HTTP status {status}"
+            )));
+        }
+
+        resp.json::<Value>().await.map_err(|err| {
+            EndpointError::Stop(anyhow!(err).context("invalid server JSON response"))
+        })
+    }
 }
 
 fn push_server_url(server_urls: &mut Vec<String>, url: &str) {
@@ -211,6 +447,49 @@ fn push_server_url(server_urls: &mut Vec<String>, url: &str) {
     if !url.is_empty() && !server_urls.contains(&url) {
         server_urls.push(url);
     }
+}
+
+fn arrived_auth_header(sender: &str, sig: &[u8]) -> String {
+    format!("Paranoia {sender}:{}", crypto::encode_b64(sig))
+}
+
+fn check_direct_ok(body: &Value, op: &str) -> Result<()> {
+    if body.get("success").and_then(Value::as_bool) == Some(false)
+        || body.get("ok").and_then(Value::as_bool) == Some(false)
+    {
+        bail!("{op} failed: {body}");
+    }
+    Ok(())
+}
+
+fn url_with_query(url: &str, query: &[(&str, &str)]) -> String {
+    if query.is_empty() {
+        return url.to_string();
+    }
+    let mut value = String::from(url);
+    value.push('?');
+    for (idx, (key, val)) in query.iter().enumerate() {
+        if idx > 0 {
+            value.push('&');
+        }
+        value.push_str(&percent_encode_component(key));
+        value.push('=');
+        value.push_str(&percent_encode_component(val));
+    }
+    value
+}
+
+fn percent_encode_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -253,6 +532,22 @@ mod tests {
         }
 
         fn unwrap_determinate_response(&self, _body: &Value) -> Result<()> {
+            unreachable!()
+        }
+
+        fn wrap_call_signal(&self, _core: &CoreCallSignal) -> Result<Value> {
+            unreachable!()
+        }
+
+        fn wrap_call_poll(&self, _core: &CoreCallPoll) -> Result<Value> {
+            unreachable!()
+        }
+
+        fn unwrap_call_signal_response(&self, _body: &Value) -> Result<()> {
+            unreachable!()
+        }
+
+        fn unwrap_call_poll_response(&self, _body: &Value) -> Result<Vec<CallEnvelopeIn>> {
             unreachable!()
         }
     }

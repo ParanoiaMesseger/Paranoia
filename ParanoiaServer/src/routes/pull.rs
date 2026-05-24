@@ -68,21 +68,30 @@ async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
         "{}{}{}{}",
         req.sender, req.recver, req.after_seq, req.to_seq
     );
-    let valid = crypto::verify_signature(&sender_pub, signed_msg.as_bytes(), &sig).is_ok()
-        || crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok();
-
-    if !valid {
+    let signer = if crypto::verify_signature(&sender_pub, signed_msg.as_bytes(), &sig).is_ok() {
+        req.sender.clone()
+    } else if crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok() {
+        req.recver.clone()
+    } else {
         dbg!(
             "Invalid pull signature for dialogue {}<->{}",
             req.sender,
             req.recver
         );
         return fail("Invalid signature".into());
-    }
+    };
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
     match state.store.pull(&dialogue_id, req.after_seq, req.to_seq) {
         Ok(packets) => {
+            if let Some(pulled_seq) = packets.iter().map(|(seq, _)| *seq).max() {
+                if let Err(e) = state
+                    .store
+                    .update_last_seq(&signer, &dialogue_id, pulled_seq)
+                {
+                    return fail(format!("{e}"));
+                }
+            }
             let arr: Vec<Value> = packets
                 .into_iter()
                 .map(|(seq, data)| {

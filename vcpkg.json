@@ -1,0 +1,34 @@
+{
+  "builtin-baseline": "3855d4d6b52353ee2e2f73044327e59d01a18c84",
+  "dependencies": [
+    "opus",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "swscale",
+        "openh264"
+      ]
+    },
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "vaapi",
+        "nvcodec"
+      ],
+      "platform": "linux"
+    },
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "nvcodec",
+        "qsv",
+        "amf"
+      ],
+      "platform": "windows"
+    }
+  ]
+}

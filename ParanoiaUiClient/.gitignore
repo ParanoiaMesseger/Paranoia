@@ -1,6 +1,9 @@
 # This file is used to ignore files which are generated
 # ----------------------------------------------------------------------------
 
+/deps/opus
+/deps/ffmpeg
+/deps/openh264
 compile_commands.json
 .cache
 .vscode

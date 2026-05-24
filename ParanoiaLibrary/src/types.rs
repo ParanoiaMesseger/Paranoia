@@ -77,6 +77,11 @@ pub enum MessageContent {
     Delete {
         target_id: MessageId,
     },
+    /// Реакция на конкретное сообщение.
+    Reaction {
+        target_id: MessageId,
+        emoji: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

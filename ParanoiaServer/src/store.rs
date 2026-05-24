@@ -1,8 +1,27 @@
 use anyhow::{Context, Result};
-use rocksdb::{DB, IteratorMode, Options, WriteBatch};
+use rocksdb::{DB, DBCompressionType, IteratorMode, Options, WriteBatch};
+use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct PacketStore {
     db: DB,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptState {
+    pub last_seq: u64,
+    pub receipts_enabled: bool,
+    pub updated_at: u64,
+}
+
+impl Default for ReceiptState {
+    fn default() -> Self {
+        Self {
+            last_seq: 0,
+            receipts_enabled: true,
+            updated_at: 0,
+        }
+    }
 }
 
 // RocksDB внутри потокобезопасен для конкурентных чтений/записей
@@ -14,6 +33,8 @@ impl PacketStore {
     pub fn open(path: &str) -> Result<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
+        // Payload уже зашифрован на клиенте, поэтому сжатие почти не экономит диск.
+        opts.set_compression_type(DBCompressionType::None);
         let db = DB::open(&opts, path).with_context(|| format!("Cannot open RocksDB at {path}"))?;
         Ok(Self { db })
     }
@@ -113,10 +134,69 @@ impl PacketStore {
         }
         self.db.write(batch).context("RocksDB write batch failed")
     }
+
+    pub fn receipt_state(&self, username: &str, dialogue_id: &str) -> Result<ReceiptState> {
+        let key = make_receipt_key(username, dialogue_id);
+        let Some(value) = self.db.get(&key)? else {
+            return Ok(ReceiptState::default());
+        };
+        serde_json::from_slice(&value).context("Cannot decode receipt state")
+    }
+
+    pub fn update_last_seq(
+        &self,
+        username: &str,
+        dialogue_id: &str,
+        pulled_seq: u64,
+    ) -> Result<()> {
+        let mut state = self.receipt_state(username, dialogue_id)?;
+        if !state.receipts_enabled {
+            return Ok(());
+        }
+        state.last_seq = state.last_seq.max(pulled_seq);
+        state.updated_at = now_unix_ts();
+        self.write_receipt_state(username, dialogue_id, &state)
+    }
+
+    pub fn set_receipts_enabled(
+        &self,
+        username: &str,
+        dialogue_id: &str,
+        receipts_enabled: bool,
+    ) -> Result<()> {
+        let mut state = self.receipt_state(username, dialogue_id)?;
+        state.receipts_enabled = receipts_enabled;
+        state.updated_at = now_unix_ts();
+        self.write_receipt_state(username, dialogue_id, &state)
+    }
+
+    fn write_receipt_state(
+        &self,
+        username: &str,
+        dialogue_id: &str,
+        state: &ReceiptState,
+    ) -> Result<()> {
+        let key = make_receipt_key(username, dialogue_id);
+        let value = serde_json::to_vec(state)?;
+        self.db
+            .put(key, value)
+            .context("RocksDB put receipt failed")
+    }
 }
 
 fn make_key(dialogue_id: &str, seq: u64) -> String {
     format!("{dialogue_id}:{seq:020}")
+}
+
+fn make_receipt_key(username: &str, dialogue_id: &str) -> String {
+    format!("receipt:{username}:{dialogue_id}")
+}
+
+fn now_unix_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn parse_seq(key: &str, dialogue_id: &str) -> Result<u64> {

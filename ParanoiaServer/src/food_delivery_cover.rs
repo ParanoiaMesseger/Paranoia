@@ -1,6 +1,8 @@
 use crate::Cover;
 use crate::crypto::decode_b64;
 use crate::routes::{
+    call_poll::{ApiResponse as PollResp, CallEnvelopeOut, CallPollRequest},
+    call_signal::{ApiResponse as CallSignalResp, CallSignalRequest},
     determinate::{ApiResponse as DetResp, DeterminateRequest},
     notify::{ApiResponse as NotifyResp, NotifyRequest},
     pull::{ApiResponse as PullResp, PullRequest},
@@ -293,6 +295,129 @@ impl Cover for FoodDeliveryCover {
             "ok": resp.success,
             "status": if resp.success { "cleaned" } else { "error" },
             "message": resp.message,
+        })
+    }
+
+    // =================== CALL SIGNAL ==================
+
+    /// Внешний формат /call/signal — диспетчер курьеров отправляет инструкцию:
+    /// {
+    ///   "operation": "dispatchCourier",
+    ///   "courierId": "alice",
+    ///   "targetId": "bob",
+    ///   "stage": 0,
+    ///   "issuedAt": 1700000000000,
+    ///   "manifest": "<base64 payload>",
+    ///   "auth": "<sig base64>"
+    /// }
+    fn unwrap_call_signal(&self, body: &Value) -> Result<CallSignalRequest> {
+        let op = body["operation"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no operation"))?;
+        if op != "dispatchCourier" {
+            return Err(anyhow!("unsupported operation"));
+        }
+        Ok(CallSignalRequest {
+            sender: body["courierId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no courierId"))?
+                .to_string(),
+            recver: body["targetId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no targetId"))?
+                .to_string(),
+            kind: u8::try_from(
+                body["stage"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("no stage"))?,
+            )
+            .map_err(|_| anyhow!("stage out of u8 range"))?,
+            ts_ms: body["issuedAt"]
+                .as_i64()
+                .ok_or_else(|| anyhow!("no issuedAt"))?,
+            payload: body["manifest"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no manifest"))?
+                .to_string(),
+            sig: body["auth"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no auth"))?
+                .to_string(),
+        })
+    }
+
+    fn wrap_call_signal_response(&self, resp: &CallSignalResp) -> Value {
+        json!({
+            "ok": resp.success,
+            "status": if resp.success { "dispatched" } else { "error" },
+            "message": resp.message,
+        })
+    }
+
+    // ==================== CALL POLL ===================
+
+    /// Внешний формат /call/poll — курьер запрашивает свой список заданий:
+    /// {
+    ///   "operation": "pollDispatch",
+    ///   "courierId": "alice",
+    ///   "nonce": 123456,
+    ///   "waitMs": 25000,
+    ///   "auth": "<sig base64>"
+    /// }
+    fn unwrap_call_poll(&self, body: &Value) -> Result<CallPollRequest> {
+        let op = body["operation"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no operation"))?;
+        if op != "pollDispatch" {
+            return Err(anyhow!("unsupported operation"));
+        }
+        Ok(CallPollRequest {
+            user: body["courierId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no courierId"))?
+                .to_string(),
+            nonce: body["nonce"].as_u64().ok_or_else(|| anyhow!("no nonce"))?,
+            long_poll_ms: u32::try_from(
+                body["waitMs"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("no waitMs"))?,
+            )
+            .map_err(|_| anyhow!("waitMs out of u32 range"))?,
+            sig: body["auth"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no auth"))?
+                .to_string(),
+        })
+    }
+
+    /// Внешний формат ответа /call/poll:
+    /// {
+    ///   "ok": true,
+    ///   "tasks": [ { "from": "...", "stage": N, "manifest": "<b64>", "issuedAt": ts }, ... ]
+    /// }
+    fn wrap_call_poll_response(&self, resp: &PollResp) -> Value {
+        if !resp.success {
+            return json!({
+                "ok": false,
+                "status": "error",
+                "message": resp.message,
+            });
+        }
+        let tasks: Vec<Value> = resp
+            .items
+            .iter()
+            .map(|e: &CallEnvelopeOut| {
+                json!({
+                    "from": e.sender,
+                    "stage": e.kind,
+                    "manifest": e.payload,
+                    "issuedAt": e.ts_ms,
+                })
+            })
+            .collect();
+        json!({
+            "ok": true,
+            "tasks": tasks,
         })
     }
 }

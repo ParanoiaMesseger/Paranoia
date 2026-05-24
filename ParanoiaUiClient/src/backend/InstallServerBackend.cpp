@@ -8,6 +8,7 @@
 #include "utils/Utils.hpp"
 #include <ParanoiaFFI>
 #include <QCryptographicHash>
+#include <QFuture>
 #include <QThread>
 
 InstallServerBackend::InstallServerBackend(QObject *parent) : QObject{parent}, ssh(nullptr) {}
@@ -110,15 +111,18 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
             QThread::usleep(1000);
             QString url = m_domain;
             if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
-            admin::Admin{url, private_admin_key}.regUser("admin", public_admin_key).then(this, [this, url](bool res) {
-                if (res) {
-                    admin::Admin::admins.push_back({url, private_admin_key});
-                    admin::Admin::saveAdmins();
-                    on_scriptFinished(0);
-                } else {
-                    installError(currentStep, "Error on check server.");
-                }
-            });
+            admin::Admin{url, private_admin_key}
+                .regUser("admin", public_admin_key)
+                .then(this, [this, url](QFuture<bool> future) {
+                    const bool res = future.resultCount() > 0 && future.resultAt(0);
+                    if (res) {
+                        admin::Admin::admins.push_back({url, private_admin_key});
+                        admin::Admin::saveAdmins();
+                        on_scriptFinished(0);
+                    } else {
+                        installError(currentStep, "Error on check server.");
+                    }
+                });
         } break;
         case StepRegisterServer: {
             auto [clientPriv, clientPub] = ParanoiaFFI::generate_keypair();
@@ -131,7 +135,8 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
             const QString url      = m_domain.startsWith("http") ? m_domain : "https://" + m_domain;
             admin::Admin{url, private_admin_key}
                 .regUser(serverId, m_clientPubKey)
-                .then(this, [this, url, serverId](bool ok) {
+                .then(this, [this, url, serverId](QFuture<bool> future) {
+                    const bool ok = future.resultCount() > 0 && future.resultAt(0);
                     if (!ok) {
                         emit installError(StepRegisterServer, "Не удалось зарегистрировать клиентский профиль.");
                         return;

@@ -15,5 +15,6 @@ InputPanel {
 
     Component.onCompleted: {
         VirtualKeyboardSettings.activeLocales = ["en_US", "ru_RU"];
+        VirtualKeyboardSettings.defaultDictionaryDisabled = false;
     }
 }

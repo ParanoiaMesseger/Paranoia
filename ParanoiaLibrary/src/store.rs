@@ -256,6 +256,70 @@ impl LocalStore {
         Ok(count)
     }
 
+    pub fn mark_outgoing_read_until(
+        &self,
+        dialogue: &DialogueKey,
+        sender: &str,
+        up_to_seq: u64,
+    ) -> Result<usize> {
+        let conn = self.conn()?;
+        let read_json = serde_json::to_string(&MessageStatus::Read)?;
+        let sent_json = serde_json::to_string(&MessageStatus::Sent)?;
+        let delivered_json = serde_json::to_string(&MessageStatus::Delivered)?;
+        let count = conn.execute(
+            "UPDATE messages
+             SET status = ?1
+             WHERE dialogue_a = ?2
+               AND dialogue_b = ?3
+               AND sender = ?4
+               AND server_seq <= ?5
+               AND status IN (?6, ?7)",
+            params![
+                read_json,
+                dialogue.a,
+                dialogue.b,
+                sender,
+                up_to_seq as i64,
+                sent_json,
+                delivered_json,
+            ],
+        )?;
+        Ok(count)
+    }
+
+    pub fn latest_outgoing_status(
+        &self,
+        dialogue: &DialogueKey,
+        sender: &str,
+    ) -> Result<Option<(u64, MessageStatus)>> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT server_seq, status
+             FROM messages
+             WHERE dialogue_a = ?1
+               AND dialogue_b = ?2
+               AND sender = ?3
+               AND server_seq IS NOT NULL
+             ORDER BY server_seq DESC
+             LIMIT 1",
+            params![dialogue.a, dialogue.b, sender],
+            |row| {
+                let seq = row.get::<_, i64>(0)?;
+                let status_json = row.get::<_, String>(1)?;
+                let status = serde_json::from_str(&status_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?;
+                Ok((seq as u64, status))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn get_message_by_seq(&self, dialogue: &DialogueKey, seq: u64) -> Result<Option<String>> {
         let conn = self.conn()?;
         Ok(conn

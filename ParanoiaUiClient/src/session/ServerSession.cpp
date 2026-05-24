@@ -5,12 +5,11 @@
 
 #include <QJsonObject>
 
-ServerSession::ServerSession(std::unique_ptr<ParanoiaFFI> ffi, const QString &server, const QString &username,
+ServerSession::ServerSession(std::shared_ptr<ParanoiaFFI> ffi, const QString &server, const QString &username,
                              const QString &serverId, const QString &privateKey, const QString &profileId,
                              const QStringList &reserveServerUrls)
     : server(server), username(username), serverId(serverId), private_key(privateKey), profileId(profileId),
-      reserveServerUrls(Utils::normalizedServerUrls(reserveServerUrls, server)),
-      ffi(std::move(ffi))
+      reserveServerUrls(Utils::normalizedServerUrls(reserveServerUrls, server)), ffi(std::move(ffi))
 {
 }
 
@@ -57,10 +56,11 @@ void ServerSession::saveClientConfigForProfile(const QString &profileId, const Q
     if (!Paths::ensureProfileDir(profileId)) return;
     const QString normalizedServer = Utils::normalizedServerUrl(server);
     QJsonObject obj;
-    obj["server"]              = normalizedServer;
-    obj["reserve_server_urls"] = Utils::stringListToJsonArray(Utils::normalizedServerUrls(reserveServerUrls, normalizedServer));
-    obj["username"]            = username;
-    obj["server_id"]           = serverId;
-    obj["private_key"]         = privateKey;
+    obj["server"] = normalizedServer;
+    obj["reserve_server_urls"] =
+        Utils::stringListToJsonArray(Utils::normalizedServerUrls(reserveServerUrls, normalizedServer));
+    obj["username"]    = username;
+    obj["server_id"]   = serverId;
+    obj["private_key"] = privateKey;
     Utils::writeJsonObjectFile(Paths::profileClient(profileId), obj);
 }

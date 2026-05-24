@@ -11,7 +11,7 @@
 class ServerSession
 {
 public:
-    ServerSession(std::unique_ptr<ParanoiaFFI> ffi, const QString &server, const QString &username,
+    ServerSession(std::shared_ptr<ParanoiaFFI> ffi, const QString &server, const QString &username,
                   const QString &serverId, const QString &privateKey, const QString &profileId,
                   const QStringList &reserveServerUrls);
 
@@ -36,5 +36,5 @@ public:
     const QStringList reserveServerUrls;
     QList<Dialog> dialogs;
     mutable QMutex ffiMutex;
-    std::unique_ptr<ParanoiaFFI> ffi;
+    std::shared_ptr<ParanoiaFFI> ffi;
 };

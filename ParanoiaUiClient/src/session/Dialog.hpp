@@ -20,4 +20,5 @@ public:
     QString peerServerId;
     QList<DialogKeyEntry> keyring;
     QString lastMsg;
+    bool receiptsEnabled = true;
 };

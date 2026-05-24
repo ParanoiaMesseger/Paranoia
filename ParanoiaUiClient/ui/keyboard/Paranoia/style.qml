@@ -14,10 +14,11 @@ KeyboardStyle {
     readonly property color clrText:     "#F7E8EA"
     readonly property color clrHint:     "#56323A"
     readonly property color clrSpace:    "#0E0609"
+    readonly property bool landscapeMode: Screen.width > Screen.height
 
     // ── Design geometry ───────────────────────────────────
     keyboardDesignWidth:          480
-    keyboardDesignHeight:         Screen.width > Screen.height ? 100 : 260
+    keyboardDesignHeight:         landscapeMode ? 132 : 250
     keyboardRelativeLeftMargin:    5 / keyboardDesignWidth
     keyboardRelativeRightMargin:   5 / keyboardDesignWidth
     keyboardRelativeTopMargin:     8 / keyboardDesignHeight
@@ -29,7 +30,7 @@ KeyboardStyle {
     // ── Normal key ────────────────────────────────────────
     keyPanel: KeyPanel {
         Rectangle {
-            anchors { fill: parent; margins: 3 }
+            anchors { fill: parent; margins: 1 }
             radius: 5
             color: control.pressed ? clrPressed : clrKey
             border { color: clrBorder; width: 1 }
@@ -38,13 +39,13 @@ KeyboardStyle {
                 anchors.centerIn: parent
                 text: control.displayText
                 color: clrText
-                font.pixelSize: 28
-                font.weight: Font.Normal
+                font.pixelSize: 40
+                font.weight: Font.Light
             }
 
             Text {
                 visible: control.smallTextVisible
-                anchors { top: parent.top; right: parent.right; margins: 3 }
+                anchors { top: parent.top; right: parent.right; margins: 1 }
                 text: control.smallText
                 color: clrHint
                 font.pixelSize: 14
@@ -223,13 +224,56 @@ KeyboardStyle {
         }
     }
 
-    // ── Word candidate list (hidden) ──────────────────────
-    selectionListHeight: 0
-    selectionListDelegate: Item {}
-    selectionListHighlight: Item {}
-    selectionListBackground: Item {}
-    selectionListAdd: Transition {}
-    selectionListRemove: Transition {}
+    // ── Word candidate list ───────────────────────────────
+    selectionListHeight: landscapeMode ? 32 : 44
+    selectionListDelegate: SelectionListItem {
+        id: candidateItem
+        width: Math.max(76, candidateText.implicitWidth + 30)
+
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 3
+            radius: 6
+            color: candidateItem.ListView.isCurrentItem ? "#351018" : "transparent"
+            border.width: candidateItem.ListView.isCurrentItem ? 1 : 0
+            border.color: clrBorder
+        }
+
+        Text {
+            id: candidateText
+            anchors.centerIn: parent
+            text: decorateText(display, wordCompletionLength)
+            textFormat: Text.RichText
+            color: clrText
+            opacity: candidateItem.ListView.isCurrentItem ? 1 : 0.88
+            font.pixelSize: landscapeMode ? 14 : 16
+            font.family: Qt.application.font.family
+
+            function decorateText(value, completionLength) {
+                const textValue = value || ""
+                if (completionLength > 0)
+                    return textValue.slice(0, -completionLength) + "<u>" + textValue.slice(-completionLength) + "</u>"
+                return textValue
+            }
+        }
+    }
+    selectionListHighlight: Rectangle {
+        radius: 6
+        color: "#351018"
+        border.width: 1
+        border.color: clrBorder
+    }
+    selectionListBackground: Rectangle {
+        color: clrBg
+        border.width: 1
+        border.color: clrBorder
+    }
+    selectionListAdd: Transition {
+        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 120 }
+    }
+    selectionListRemove: Transition {
+        NumberAnimation { property: "opacity"; to: 0; duration: 100 }
+    }
 
     // ── Alternate keys popup (long-press) ─────────────────
     alternateKeysListItemWidth:    80

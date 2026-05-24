@@ -22,7 +22,7 @@ use crate::{
     },
     qr_exchange,
     types::DialogueKeyEntry,
-    types::{DialogueConfig, DialogueKey, Message, MessageContent},
+    types::{DialogueConfig, DialogueKey, Message, MessageContent, MessageStatus},
 };
 
 macro_rules! ffi_try {
@@ -40,7 +40,7 @@ thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::new("").unwrap());
 }
 
-fn set_last_error(msg: &str) {
+pub(crate) fn set_last_error(msg: &str) {
     LAST_ERROR.with(|e| {
         *e.borrow_mut() =
             CString::new(msg).unwrap_or_else(|_| CString::new("unknown error").unwrap());
@@ -84,6 +84,7 @@ fn panic_error_code(fallback_error: &str) -> &str {
         "attachment_error" => "attachment_panic",
         "receive_error" => "receive_panic",
         "notify_error" => "notify_panic",
+        "arrived_error" => "arrived_panic",
         "history_error" => "history_panic",
         "determinate_error" => "determinate_panic",
         "client_init_error" => "client_init_panic",
@@ -145,9 +146,8 @@ pub extern "C" fn paranoia_android_init(
         std::panic::set_hook(Box::new(|info| {
             let msg = format!("rust panic: {}", info);
             let tag = std::ffi::CString::new("ParanoiaService").unwrap();
-            let cmsg = std::ffi::CString::new(msg).unwrap_or_else(|_| {
-                std::ffi::CString::new("rust panic: <bad message>").unwrap()
-            });
+            let cmsg = std::ffi::CString::new(msg)
+                .unwrap_or_else(|_| std::ffi::CString::new("rust panic: <bad message>").unwrap());
             unsafe {
                 // ANDROID_LOG_ERROR = 6
                 paranoia_android_log_print(6, tag.as_ptr(), cmsg.as_ptr());
@@ -185,8 +185,18 @@ pub extern "C" fn paranoia_android_init(
 
 /// Непрозрачный хэндл для C++
 pub struct ParanoiaHandle {
-    client: ParanoiaClient,
-    rt: Runtime,
+    pub(crate) client: ParanoiaClient,
+    pub(crate) rt: Runtime,
+}
+
+impl ParanoiaHandle {
+    pub(crate) fn client(&self) -> &ParanoiaClient {
+        &self.client
+    }
+
+    pub(crate) fn runtime(&self) -> &Runtime {
+        &self.rt
+    }
 }
 
 fn handle_ref<'a>(handle: *mut ParanoiaHandle) -> anyhow::Result<&'a ParanoiaHandle> {
@@ -368,6 +378,37 @@ pub extern "C" fn paranoia_send_text_json_keyring(
     })
 }
 
+/// Отправить реакцию на сообщение с локальным keyring JSON.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_reaction_json_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    target_id: *const c_char,
+    emoji: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("send_error", || {
+        clear_last_error();
+        let target_id = ffi_try!(cstr_arg(target_id), invalid_argument_ptr());
+        let emoji = ffi_try!(cstr_arg(emoji), invalid_argument_ptr());
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.send_reaction(&target_id, &emoji)) {
+                Ok(msg) => message_to_c_string(&msg),
+                Err(e) => {
+                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
 /// Отправить файл, прочитав его с локального пути, через keyring-конфигурацию.
 /// Возвращает JSON-массив сообщений или NULL при ошибке.
 #[unsafe(no_mangle)]
@@ -481,6 +522,78 @@ pub extern "C" fn paranoia_notify_count_keyring(
                     set_last_error(&classify_network_error(
                         &anyhow_error_chain(&e),
                         "notify_error",
+                    ));
+                    -1
+                }
+            },
+        )
+    })
+}
+
+/// Обновить локальные READ-статусы через GET /arrived.
+/// Возвращает 0 при успехе и пишет количество изменённых локальных сообщений в out_changed.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_arrived_get_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    out_changed: *mut u64,
+) -> i32 {
+    ffi_catch_i32("arrived_error", || {
+        clear_last_error();
+        if out_changed.is_null() {
+            return invalid_argument_i32();
+        }
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| match h.rt.block_on(dialogue.refresh_arrived_status()) {
+                Ok(count) => {
+                    unsafe { *out_changed = count as u64 };
+                    0
+                }
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "arrived_error",
+                    ));
+                    -1
+                }
+            },
+        )
+    })
+}
+
+/// Включить/выключить read receipts для диалога через PUT /arrived.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_arrived_put_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    receipts_enabled: i32,
+) -> i32 {
+    ffi_catch_i32("arrived_error", || {
+        clear_last_error();
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| match h
+                .rt
+                .block_on(dialogue.set_receipts_enabled(receipts_enabled != 0))
+            {
+                Ok(()) => 0,
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "arrived_error",
                     ));
                     -1
                 }
@@ -993,7 +1106,7 @@ fn register_user_request(
     }
 }
 
-fn string_to_c(value: String) -> *mut c_char {
+pub(crate) fn string_to_c(value: String) -> *mut c_char {
     CString::new(value)
         .map(CString::into_raw)
         .unwrap_or_else(|_| {
@@ -1143,6 +1256,10 @@ fn message_to_json(m: &Message) -> serde_json::Value {
     obj.insert("id".into(), serde_json::json!(m.id));
     obj.insert("sender".into(), serde_json::json!(m.sender));
     obj.insert(
+        "status".into(),
+        serde_json::json!(message_status_label(&m.status)),
+    );
+    obj.insert(
         "ts".into(),
         serde_json::json!(m.timestamp.timestamp_millis()),
     );
@@ -1215,7 +1332,23 @@ fn message_to_json(m: &Message) -> serde_json::Value {
             obj.insert("kind".into(), serde_json::json!("delete"));
             obj.insert("content".into(), serde_json::json!("Delete(...)"));
         }
+        MessageContent::Reaction { target_id, emoji } => {
+            obj.insert("kind".into(), serde_json::json!("reaction"));
+            obj.insert("target_id".into(), serde_json::json!(target_id));
+            obj.insert("emoji".into(), serde_json::json!(emoji));
+            obj.insert("text".into(), serde_json::json!(emoji));
+            obj.insert("content".into(), serde_json::json!("Reaction(...)"));
+        }
     }
 
     serde_json::Value::Object(obj)
+}
+
+fn message_status_label(status: &MessageStatus) -> &'static str {
+    match status {
+        MessageStatus::Sending | MessageStatus::Sent => "pending",
+        MessageStatus::Delivered => "delivered",
+        MessageStatus::Read => "read",
+        MessageStatus::Failed => "failed",
+    }
 }

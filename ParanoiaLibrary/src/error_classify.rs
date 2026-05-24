@@ -73,6 +73,8 @@ pub(crate) fn classify_network_error(err: &str, fallback: &str) -> String {
             &[
                 "push failed",
                 "pull failed",
+                "arrived failed",
+                "arrived set failed",
                 "determinate failed",
                 "reg failed",
             ],
@@ -237,11 +239,17 @@ mod tests {
     #[test]
     fn apple_trust_errors_are_tls_errors() {
         assert_eq!(
-            classify_network_error("SecTrust evaluation failed with errSecCertificateExpired", "receive_error"),
+            classify_network_error(
+                "SecTrust evaluation failed with errSecCertificateExpired",
+                "receive_error"
+            ),
             "tls_error"
         );
         assert_eq!(
-            classify_network_error("certificate is not trusted by the platform verifier", "send_error"),
+            classify_network_error(
+                "certificate is not trusted by the platform verifier",
+                "send_error"
+            ),
             "tls_error"
         );
     }

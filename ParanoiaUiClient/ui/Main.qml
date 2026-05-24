@@ -13,6 +13,7 @@ ApplicationWindow {
     property bool importNavigationPending: false
     property string notificationProfileHint: ""
     property string notificationPeerHint: ""
+    readonly property bool startOnMainPage: Backend.hasStoredClientProfiles || Backend.loggedIn || Backend.hasAdminAccess
     readonly property bool virtualKeyboardEnabled: VirtualKeyboardAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
 
     onActiveChanged: {
@@ -21,18 +22,23 @@ ApplicationWindow {
     }
 
     function refreshNotificationPeerHint() {
-        const peer = Backend.takeNotificationPeer();
+        const peer = Notifications.takeNotificationPeer();
         if (peer && peer.length > 0) {
-            appWindow.notificationProfileHint = Backend.notificationHintProfileId || "";
+            appWindow.notificationProfileHint = Notifications.notificationHintProfileId || "";
             appWindow.notificationPeerHint = peer;
         }
     }
 
     function openMainPageIfReady() {
-        if ((Backend.loggedIn || Backend.hasAdminAccess) && (stackView.depth === 1 || appWindow.importNavigationPending)) {
-            appWindow.importNavigationPending = false;
-            stackView.replace(mainPage);
-        }
+        if (!(Backend.loggedIn || Backend.hasAdminAccess))
+            return;
+        if (stackView.depth !== 1 && !appWindow.importNavigationPending)
+            return;
+
+        appWindow.importNavigationPending = false;
+        if (stackView.currentItem && stackView.currentItem.objectName === "MainPage")
+            return;
+        stackView.replace(mainPage);
     }
 
     onClosing: function (close) {
@@ -67,6 +73,13 @@ ApplicationWindow {
         function onAdminStateChanged() {
             appWindow.openMainPageIfReady();
         }
+        function onSessionSwitched() {
+            while (stackView.depth > 1) stackView.pop(StackView.Immediate);
+        }
+    }
+
+    Connections {
+        target: Notifications
         function onNotificationAvailable(count, profileId, peer) {
             appWindow.notificationProfileHint = profileId || "";
             appWindow.notificationPeerHint = peer || "";
@@ -78,8 +91,13 @@ ApplicationWindow {
 
     Component.onCompleted: {
         appWindow.refreshNotificationPeerHint();
-        if (Backend.loggedIn || Backend.hasAdminAccess)
-            stackView.replace(mainPage);
+        appWindow.openMainPageIfReady();
+        if (VoIPAvailable) {
+            appWindow.callPageComponent = Qt.createComponent(
+                Qt.resolvedUrl("Pages/CallPage.qml"), Component.PreferSynchronous);
+            if (appWindow.callPageComponent.status === Component.Error)
+                console.warn("CallPage load error:", appWindow.callPageComponent.errorString());
+        }
     }
 
     StackView {
@@ -105,7 +123,13 @@ ApplicationWindow {
             return 0;
         }
 
-        initialItem: HelloPage {
+        initialItem: appWindow.startOnMainPage ? mainPage : helloPage
+    }
+
+    Component {
+        id: helloPage
+        HelloPage {
+            objectName: "HelloPage"
             onImportProfile: stackView.push(importProfilePage)
             onRegisterClient: stackView.push(clientRegistrationPage)
             onInstallServer: stackView.push(installServerPage)
@@ -158,6 +182,7 @@ ApplicationWindow {
     Component {
         id: mainPage
         MainPage {
+            objectName: "MainPage"
             highlightProfileId: appWindow.notificationProfileHint
             highlightPeer: appWindow.notificationPeerHint
             onOpenChat: function (profileId, peer) {
@@ -183,6 +208,7 @@ ApplicationWindow {
                     primaryDomain: primaryDomain
                 })
             }
+            onOpenVersionInfo: stackView.push(versionInfoPage)
         }
     }
 
@@ -242,6 +268,13 @@ ApplicationWindow {
     }
 
     Component {
+        id: versionInfoPage
+        VersionInfoPage {
+            onBack: stackView.pop()
+        }
+    }
+
+    Component {
         id: qrExchangePage
         QrExchangePage {
             onBack: stackView.pop()
@@ -249,6 +282,23 @@ ApplicationWindow {
                 stackView.pop()  // убираем QrExchangePage
                 stackView.pop()  // убираем AddDialogPage или UpdateKeyPage
             }
+        }
+    }
+
+    // CallPage.qml тянет QtMultimedia — её нет в сборках без VoIP, поэтому
+    // загружаем компонент динамически только когда VoIPAvailable=true.
+    property var callPageComponent: null
+
+    Connections {
+        target: VoIPAvailable ? CallControl : null
+        function onIncomingCall(peer, callId) {
+            if (!appWindow.callPageComponent || appWindow.callPageComponent.status !== Component.Ready) return
+            const props = { mode: "incoming", peerName: peer }
+            if (stackView.currentItem && stackView.currentItem.objectName === "CallPage") {
+                stackView.replace(appWindow.callPageComponent, props)
+                return
+            }
+            stackView.push(appWindow.callPageComponent, props)
         }
     }
 }

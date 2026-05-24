@@ -5,7 +5,7 @@
 
   <defs>
     <style><![CDATA[
-      .bg { fill: #050406; }
+      .bg { fill: none; }
       .word-stroke { fill: none; stroke: #e3172a; stroke-width: 10; stroke-linecap: square; stroke-linejoin: miter; }
       .word-shadow { fill: none; stroke: #5d0710; stroke-width: 10; stroke-linecap: square; stroke-linejoin: miter; }
       .word-hot { fill: #ff2738; }

@@ -13,6 +13,7 @@ namespace PlatformNotifications
 
     void registerBackgroundTasks();
     void setBackgroundPollCallback(std::function<void()> callback);
+    void setApplicationForeground(bool foreground);
     void startBackgroundPollingService();
     void stopBackgroundPollingService();
     void showMessageCount(quint64 count, const QString &profileId, const QString &peer = {});

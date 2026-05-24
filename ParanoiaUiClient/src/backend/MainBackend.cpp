@@ -1,46 +1,35 @@
 #include "MainBackend.hpp"
 
 #include "Paths.hpp"
+#include "NotificationCoordinator.hpp"
 #include "utils/adminStorage.hpp"
 #include "session/Dialog.hpp"
-#include "platform/PlatformNotifications.hpp"
 #include "session/ServerSession.hpp"
 #include "session/SessionStore.hpp"
 #include "utils/Utils.hpp"
 #include <ParanoiaFFI>
 
 #include <QCryptographicHash>
+#include <QFuture>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
-#include <QGuiApplication>
-#include <QNetworkInformation>
 #include <QMutexLocker>
-#include <QRandomGenerator>
-#include <QStandardPaths>
 #include <QThreadPool>
 #include <QtConcurrent>
 #include <QElapsedTimer>
-#include <QPointer>
-#include <QDebug>
 #include <QDir>
-#include <QFileInfo>
-#include <QUrl>
-#if defined(Q_OS_ANDROID)
-#include <QJniEnvironment>
-#include <android/log.h>
-#endif
+#include <QPointer>
+#include <QSet>
 #include <algorithm>
 
 namespace
 {
-    constexpr auto PendingRegistrationKeyFile = "pending_registration_key.json";
-
     QStringList reserveUrlsFromObject(const QJsonObject &obj, const QString &primaryUrl)
     {
-        return Utils::normalizedServerUrls(
-            Utils::stringListFromJsonArray(obj.value("reserve_server_urls").toArray()), primaryUrl);
+        return Utils::normalizedServerUrls(Utils::stringListFromJsonArray(obj.value("reserve_server_urls").toArray()),
+                                           primaryUrl);
     }
 
     QStringList appendReserveUrl(QStringList urls, const QString &primaryUrl, const QString &reserveUrl)
@@ -66,10 +55,7 @@ namespace
         return !privateServerId.isEmpty() && privateServerId == serverIdFromPubkey(pubkey);
     }
 
-    QJsonObject readPendingRegistrationKeyPair()
-    {
-        return Utils::readJsonObjectFile(QString::fromLatin1(PendingRegistrationKeyFile));
-    }
+    QJsonObject readPendingRegistrationKeyPair() { return Utils::readJsonObjectFile(Paths::pendingRegistrationKey()); }
 
     void savePendingRegistrationKeyPair(const QString &pubkey, const QString &privateKey)
     {
@@ -78,7 +64,7 @@ namespace
         obj["public_key"]  = pubkey;
         obj["private_key"] = privateKey;
         obj["updated_at"]  = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-        Utils::writeJsonObjectFile(QString::fromLatin1(PendingRegistrationKeyFile), obj);
+        Utils::writeJsonObjectFile(Paths::pendingRegistrationKey(), obj);
     }
 
     QStringList removeReserveUrl(QStringList urls, const QString &primaryUrl, const QString &reserveUrl)
@@ -87,49 +73,50 @@ namespace
         urls.removeAll(Utils::normalizedServerUrl(reserveUrl));
         return Utils::normalizedServerUrls(urls, primaryUrl);
     }
+
+    bool isLoadableClientProfile(const QString &profileId)
+    {
+        if (profileId.trimmed().isEmpty()) return false;
+        const auto obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+        return !obj.value("server").toString().trimmed().isEmpty() &&
+               !obj.value("private_key").toString().trimmed().isEmpty();
+    }
+
+    bool hasStoredClientProfileOnDisk()
+    {
+        QSet<QString> seen;
+        auto checkId = [&](const QString &profileId) {
+            const QString id = profileId.trimmed();
+            if (id.isEmpty() || seen.contains(id)) return false;
+            seen.insert(id);
+            return isLoadableClientProfile(id);
+        };
+
+        const QJsonObject manifest = Utils::loadProfilesManifest();
+        const QJsonArray profiles  = manifest.value("profiles").toArray();
+        for (const auto &value : profiles)
+            if (checkId(value.toObject().value("id").toString())) return true;
+        if (checkId(manifest.value("last_profile_id").toString())) return true;
+
+        const QDir profilesRoot = Paths::profilesRoot();
+        for (const auto &entry : profilesRoot.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+            if (checkId(entry.fileName())) return true;
+        return false;
+    }
 }
 
-MainBackend::MainBackend(QObject *parent) : QObject(parent)
+MainBackend::MainBackend(NotificationCoordinator &notifications, QObject *parent)
+    : QObject(parent), m_notifications(&notifications)
 {
-    m_pollTimer = new QTimer(this);
-    m_pollTimer->setSingleShot(true);
-    connect(m_pollTimer, &QTimer::timeout, this, &MainBackend::onPollTimer);
-    if (QNetworkInformation::loadDefaultBackend()) {
-        if (auto *networkInfo = QNetworkInformation::instance()) {
-            connect(networkInfo, &QNetworkInformation::reachabilityChanged, this, &MainBackend::onNetworkChanged);
-            connect(networkInfo, &QNetworkInformation::transportMediumChanged, this, &MainBackend::onNetworkChanged);
-        }
-    }
+    m_hasStoredClientProfiles = hasStoredClientProfileOnDisk();
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::loginStateChanged);
     connect(SessionStore::instance(), &SessionStore::sessionsChanged, this, &MainBackend::sessionsChanged);
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::sessionsChanged);
-    QPointer self(this);
-    PlatformNotifications::setBackgroundPollCallback([self]() {
-        // Runs on the Android service handler thread. Qt main thread event loop
-        // is suspended while the app is backgrounded, so we must not roundtrip
-        // through QMetaObject::invokeMethod here. Do the polling on a thread
-        // pool worker using the snapshot, then post the notification through
-        // the Android JNI bridge directly.
-        QThreadPool::globalInstance()->start([self]() {
-            if (!self) return;
-            self->runBackgroundPollFromService();
-        });
-        if (!self) return;
-        QMetaObject::invokeMethod(self, [self]() {
-            if (!self) return;
-            self->onNetworkChanged();
-        });
-    });
     loadDeviceKey();
     loadClientConfig();
 }
 
-MainBackend::~MainBackend()
-{
-    m_pollTimer->stop();
-    PlatformNotifications::setBackgroundPollCallback({});
-    PlatformNotifications::stopBackgroundPollingService();
-}
+MainBackend::~MainBackend() = default;
 
 bool MainBackend::isLoggedIn() const
 {
@@ -153,9 +140,20 @@ bool MainBackend::hasAdminAccess() const { return !admin::Admin::admins.empty();
 
 QString MainBackend::devicePubkey() const { return ParanoiaFFI::ecies_pubkey(m_devicePrivkey); }
 
-QString MainBackend::notificationHintPeer() const { return m_notificationHintPeer; }
+QString MainBackend::activeProfileId() const
+{
+    const auto session = SessionStore::instance()->activeSession();
+    return session ? session->profileId : QString();
+}
 
-QString MainBackend::notificationHintProfileId() const { return m_notificationHintProfileId; }
+bool MainBackend::hasStoredClientProfiles() const { return m_hasStoredClientProfiles; }
+
+void MainBackend::setHasStoredClientProfiles(bool hasProfiles)
+{
+    if (m_hasStoredClientProfiles == hasProfiles) return;
+    m_hasStoredClientProfiles = hasProfiles;
+    emit storedClientProfilesChanged();
+}
 
 // ── Key Generation ────────────────────────────────────────────────────────────
 
@@ -229,7 +227,7 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
         QMetaObject::invokeMethod(self, [self, dbPath, url, normalizedReserves, reserveUrlsJson, trimmedUsername,
                                          serverId, private_key, profileId, makeActive,
                                          rotateRegistrationKeyOnSuccess]() {
-            auto handle = std::make_unique<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
+            auto handle = std::make_shared<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
             if (!self) return;
             if (!handle || !handle->isRawOk()) {
                 if (makeActive) emit self->loginError("Не удалось подключиться. Проверьте адрес сервера и ключ.");
@@ -239,12 +237,25 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
             auto session = store->addSession(std::move(handle), url, trimmedUsername, serverId, private_key, profileId,
                                              normalizedReserves);
             session->loadDialogs();
+            if (!session->findDialog(QStringLiteral("Избранное"))) {
+                QCryptographicHash hasher(QCryptographicHash::Sha256);
+                hasher.addData(QByteArrayLiteral("paranoia:self-dialog:v1\n"));
+                hasher.addData(serverId.toUtf8());
+                hasher.addData(private_key.toUtf8());
+                const QByteArray derived = hasher.result();
+                QList<DialogKeyEntry> keyring;
+                keyring.append({1, derived.left(32)});
+                session->dialogs.append({QStringLiteral("Избранное"), serverId, keyring, QString(), true});
+                session->saveDialogs();
+            }
             session->saveClientConfig();
+            self->setHasStoredClientProfiles(true);
             if (rotateRegistrationKeyOnSuccess) self->rotateRegistrationKeyPair(private_key);
-            const bool notificationTargetsThisProfile = !self->m_notificationHintProfileId.isEmpty() &&
-                                                        self->m_notificationHintProfileId == profileId;
-            const bool notificationTargetsOtherProfile = !self->m_notificationHintProfileId.isEmpty() &&
-                                                         !notificationTargetsThisProfile;
+            const QString notificationHintProfileId = self->m_notifications->notificationHintProfileId();
+            const bool notificationTargetsThisProfile =
+                !notificationHintProfileId.isEmpty() && notificationHintProfileId == profileId;
+            const bool notificationTargetsOtherProfile =
+                !notificationHintProfileId.isEmpty() && !notificationTargetsThisProfile;
             if (notificationTargetsThisProfile ||
                 (makeActive && (!notificationTargetsOtherProfile || !store->activeSession()))) {
                 store->setActiveSession(session);
@@ -252,7 +263,7 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
                 emit self->loginStateChanged();
                 emit self->dialogsChanged();
             }
-            self->scheduleNotifyPoll(0);
+            self->m_notifications->schedulePoll(0);
         });
     });
 }
@@ -262,12 +273,18 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
 void MainBackend::activateProfile(const QString &profileId)
 {
     const auto obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
-    if (obj.isEmpty()) { emit loginError("Профиль не найден."); return; }
-    const QString server             = obj.value("server").toString();
-    const QString username           = obj.value("username").toString();
-    const QString private_key        = obj.value("private_key").toString();
-    const QStringList reserveUrls    = reserveUrlsFromObject(obj, server);
-    if (server.isEmpty() || private_key.isEmpty()) { emit loginError("Профиль повреждён."); return; }
+    if (obj.isEmpty()) {
+        emit loginError("Профиль не найден.");
+        return;
+    }
+    const QString server          = obj.value("server").toString();
+    const QString username        = obj.value("username").toString();
+    const QString private_key     = obj.value("private_key").toString();
+    const QStringList reserveUrls = reserveUrlsFromObject(obj, server);
+    if (server.isEmpty() || private_key.isEmpty()) {
+        emit loginError("Профиль повреждён.");
+        return;
+    }
     loginClientInternal(server, username, private_key, reserveUrls, true);
 }
 
@@ -286,7 +303,8 @@ void MainBackend::registerUser(const QString &domain, const QString &pubkey)
         emit registerUserError("Некорректный публичный ключ.");
         return;
     }
-    found->regUser(serverId, pubkey).then([this](bool ok) {
+    found->regUser(serverId, pubkey).then([this](QFuture<bool> future) {
+        const bool ok = future.resultCount() > 0 && future.resultAt(0);
         QMetaObject::invokeMethod(this, [this, ok]() {
             if (ok)
                 emit userRegistered();
@@ -325,8 +343,8 @@ QVariantList MainBackend::getReserveDomains(const QString &targetType, const QSt
 void MainBackend::addAdminReserveDomain(const QString &primaryDomain, const QString &reserveDomain)
 {
     const QString primaryUrl = Utils::normalizedServerUrl(primaryDomain);
-    auto found = std::ranges::find_if(admin::Admin::admins,
-                                      [&](const admin::Admin &a) { return a.domain == primaryUrl; });
+    auto found =
+        std::ranges::find_if(admin::Admin::admins, [&](const admin::Admin &a) { return a.domain == primaryUrl; });
     if (found == admin::Admin::admins.end()) {
         emit reserveDomainError("Нет прав администратора для этого сервера.");
         return;
@@ -359,15 +377,15 @@ void MainBackend::addClientReserveDomain(const QString &profileId, const QString
         return;
     }
 
-    auto *store                 = SessionStore::instance();
-    const auto session          = store->sessionForProfile(profileId);
-    const auto activeSession    = store->activeSession();
-    const QJsonObject obj       = Utils::readJsonObjectFile(Paths::profileClient(profileId));
-    QString primaryUrl          = obj.value("server").toString();
-    QString username            = obj.value("username").toString();
-    QString privateKey          = obj.value("private_key").toString();
-    QString serverId            = obj.value("server_id").toString();
-    QStringList reserveUrls     = reserveUrlsFromObject(obj, primaryUrl);
+    auto *store              = SessionStore::instance();
+    const auto session       = store->sessionForProfile(profileId);
+    const auto activeSession = store->activeSession();
+    const QJsonObject obj    = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+    QString primaryUrl       = obj.value("server").toString();
+    QString username         = obj.value("username").toString();
+    QString privateKey       = obj.value("private_key").toString();
+    QString serverId         = obj.value("server_id").toString();
+    QStringList reserveUrls  = reserveUrlsFromObject(obj, primaryUrl);
     if (session) {
         if (primaryUrl.isEmpty()) primaryUrl = session->server;
         if (username.isEmpty()) username = session->username;
@@ -509,7 +527,7 @@ void MainBackend::checkReserveDomain(const QString &targetType, const QString &t
         QElapsedTimer timer;
         timer.start();
         const QString resultJson = ParanoiaFFI::check_reserve_url(reserveUrl);
-        const qint64 pingMs = timer.elapsed();
+        const qint64 pingMs      = timer.elapsed();
 
         bool ok = false;
         QString msg;
@@ -523,7 +541,7 @@ void MainBackend::checkReserveDomain(const QString &targetType, const QString &t
                 msg = QStringLiteral("Невалидный ответ FFI");
             } else {
                 const auto obj = doc.object();
-                ok = obj.value("ok").toBool();
+                ok             = obj.value("ok").toBool();
                 if (ok) {
                     msg = QStringLiteral("Endpoint /notify доступен.");
                 } else {
@@ -655,13 +673,11 @@ void MainBackend::removeDialog(const QString &peer)
     auto session = SessionStore::instance()->activeSession();
     if (!session) return;
     session->dialogs.removeIf([&peer](const Dialog &d) { return d.peer == peer; });
-    m_notifiedPendingByPeer.remove(session->profileId + ":" + peer);
-    m_locallyReceivedPendingByPeer.remove(session->profileId + ":" + peer);
-    if (m_notificationHintProfileId == session->profileId && m_notificationHintPeer == peer) setNotificationHint({}, {});
+    m_notifications->clearPeer(session->profileId, peer);
     emit dialogRemoved(peer);
     emit dialogsChanged();
     session->saveDialogs();
-    scheduleNotifyPoll();
+    m_notifications->schedulePoll();
 }
 
 QVariantList MainBackend::getDialogs() const
@@ -674,9 +690,8 @@ QVariantList MainBackend::getDialogs() const
         result.append(QVariantMap{{"peer", dlg.peer},
                                   {"lastMsg", dlg.lastMsg},
                                   {"hasKey", !dlg.keyring.isEmpty()},
-                                  {"unreadCount", m_notifiedPendingByPeer.value(profileId + ":" + dlg.peer, 0)},
-                                  {"notificationHint", profileId == m_notificationHintProfileId &&
-                                                           dlg.peer == m_notificationHintPeer}});
+                                  {"unreadCount", m_notifications->unreadCount(profileId, dlg.peer)},
+                                  {"notificationHint", m_notifications->isNotificationHintFor(profileId, dlg.peer)}});
     return result;
 }
 
@@ -692,33 +707,6 @@ QVariantList MainBackend::getAdminServers() const
         result.append(m);
     }
     return result;
-}
-
-QString MainBackend::takeNotificationPeer()
-{
-    const auto target = PlatformNotifications::takeOpenTargetFromNotification();
-    if (!target.peer.isEmpty()) {
-        auto *store = SessionStore::instance();
-        QString profileId = target.profileId;
-        if (!profileId.isEmpty()) {
-            auto session = store->sessionForProfile(profileId);
-            if (session && session != store->activeSession()) {
-                store->setActiveSession(session);
-                m_activePeer.clear();
-                emit sessionReset();
-                emit dialogsChanged();
-                emit sessionSwitched();
-                scheduleNotifyPoll(0);
-            }
-        }
-        if (profileId.isEmpty()) {
-            const auto session = store->activeSession();
-            if (session) profileId = session->profileId;
-        }
-        setNotificationHint(profileId, target.peer);
-        emit dialogsChanged();
-    }
-    return m_notificationHintPeer;
 }
 
 // ── History Management ────────────────────────────────────────────────────────
@@ -744,10 +732,7 @@ void MainBackend::deleteDialogLocal(const QString &peer)
         QMetaObject::invokeMethod(self, [self, peerCopy, profileId, rc, err]() {
             if (!self) return;
             if (rc == 0) {
-                self->m_notifiedPendingByPeer.remove(profileId + ":" + peerCopy);
-                self->m_locallyReceivedPendingByPeer.remove(profileId + ":" + peerCopy);
-                if (self->m_notificationHintProfileId == profileId && self->m_notificationHintPeer == peerCopy)
-                    self->setNotificationHint({}, {});
+                self->m_notifications->clearPeer(profileId, peerCopy);
                 emit self->dialogRemoved(peerCopy);
                 emit self->dialogDeleted(peerCopy);
             } else
@@ -795,47 +780,6 @@ void MainBackend::clearServerHistory(const QString &peer, quint64 cutSeq)
     });
 }
 
-// ── Cross-backend slots ───────────────────────────────────────────────────────
-
-void MainBackend::onActivePeerChanged(const QString &peer)
-{
-    m_activePeer = peer;
-    if (!peer.isEmpty()) {
-        const auto session    = SessionStore::instance()->activeSession();
-        const QString profileId = session ? session->profileId : QString();
-        const QString key     = profileId + ":" + peer;
-        const bool hadPending = m_notifiedPendingByPeer.remove(key) > 0;
-        m_locallyReceivedPendingByPeer.remove(key);
-        if (m_notificationHintProfileId == profileId && m_notificationHintPeer == peer) setNotificationHint({}, {});
-        if (hadPending) emit dialogsChanged();
-    }
-}
-
-void MainBackend::onPeerMessagesRead(const QString &peer)
-{
-    const auto session    = SessionStore::instance()->activeSession();
-    const QString profileId = session ? session->profileId : QString();
-    const QString key     = profileId + ":" + peer;
-    const bool hadPending = m_notifiedPendingByPeer.remove(key) > 0;
-    m_locallyReceivedPendingByPeer.remove(key);
-    if (m_notificationHintProfileId == profileId && m_notificationHintPeer == peer) setNotificationHint({}, {});
-    if (hadPending) emit dialogsChanged();
-}
-
-void MainBackend::onBackgroundMessagesReceived(const QString &profileId, const QString &peer, quint64 count)
-{
-    if (profileId.isEmpty() || peer.isEmpty() || count == 0) return;
-    const QString key = profileId + ":" + peer;
-    m_locallyReceivedPendingByPeer[key] = m_locallyReceivedPendingByPeer.value(key, 0) + count;
-    m_notifiedPendingByPeer[key] = m_notifiedPendingByPeer.value(key, 0) + count;
-    quint64 total = 0;
-    for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it)
-        total += it.value();
-    setNotificationHint(profileId, peer);
-    emit dialogsChanged();
-    emit notificationAvailable(total, profileId, peer);
-}
-
 // ── Export / Import ───────────────────────────────────────────────────────────
 
 QVariantMap MainBackend::exportProfile(const QString &profileType, const QStringList &peers,
@@ -863,7 +807,8 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
             if (!peers.isEmpty() && !peers.contains(dlg.peer)) continue;
             if (dlg.keyring.isEmpty()) continue;
             QJsonObject dlgObj;
-            dlgObj["peer"] = dlg.peer;
+            dlgObj["peer"]           = dlg.peer;
+            dlgObj["peer_server_id"] = dlg.peerServerId;
             QJsonArray keyringArr;
             for (const auto &entry : dlg.keyring) {
                 if (entry.key.size() != 32 || entry.startSeq == 0) continue;
@@ -881,12 +826,12 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
         if (!peers.isEmpty() && exportedDialogues == 0)
             return ParanoiaFFI::errorResult("Нет выбранных диалогов с keyring для экспорта.");
         QJsonObject serverObj;
-        serverObj["url"]             = session->server;
+        serverObj["url"]                 = session->server;
         serverObj["reserve_server_urls"] = Utils::stringListToJsonArray(session->reserveServerUrls);
-        serverObj["username"]        = session->username;
-        serverObj["signing_key_b64"] = session->private_key;
-        serverObj["dialogues"]       = dialoguesArr;
-        payload["servers"]           = QJsonArray{serverObj};
+        serverObj["username"]            = session->username;
+        serverObj["signing_key_b64"]     = session->private_key;
+        serverObj["dialogues"]           = dialoguesArr;
+        payload["servers"]               = QJsonArray{serverObj};
     }
 
     if (includeAdmin) {
@@ -895,8 +840,8 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
             QJsonObject adminObj;
             adminObj["url"]                   = a.domain;
             adminObj["admin_private_key_b64"] = a.private_key;
-            adminObj["reserve_server_urls"]   = Utils::stringListToJsonArray(
-                Utils::normalizedServerUrls(a.reserveServerUrls, a.domain));
+            adminObj["reserve_server_urls"] =
+                Utils::stringListToJsonArray(Utils::normalizedServerUrls(a.reserveServerUrls, a.domain));
             adminArr.append(adminObj);
         }
         payload["admin_servers"] = adminArr;
@@ -973,10 +918,11 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
     QString activateUsername;
     QString activatePrivkey;
     QStringList activateReserveServerUrls;
-    const auto mergeKeyringEntry = [](QList<Dialog> &dialogs, const QString &peer, const QByteArray &key,
-                                      quint64 startSeq) -> int {
+    const auto mergeKeyringEntry = [](QList<Dialog> &dialogs, const QString &peer, const QString &peerServerId,
+                                      const QByteArray &key, quint64 startSeq) -> int {
         for (auto &dlg : dialogs) {
             if (dlg.peer != peer) continue;
+            if (dlg.peerServerId.isEmpty() && !peerServerId.isEmpty()) dlg.peerServerId = peerServerId;
             for (const auto &entry : dlg.keyring) {
                 if (entry.startSeq != startSeq) continue;
                 return entry.key == key ? 0 : -1;
@@ -986,7 +932,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
                       [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
             return 1;
         }
-        dialogs.append({peer, QString(), QList<DialogKeyEntry>{{startSeq, key}}, QString()});
+        dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, key}}, QString()});
         return 1;
     };
     if (allowClientImport) {
@@ -998,9 +944,9 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
         int totalDialogues  = 0;
         int totalKeyEntries = 0;
         for (const auto &serverVal : servers) {
-            const auto serverObj     = serverVal.toObject();
-            const QString url        = Utils::normalizedServerUrl(serverObj["url"].toString());
-            QStringList reserveUrls  = Utils::normalizedServerUrls(
+            const auto serverObj    = serverVal.toObject();
+            const QString url       = Utils::normalizedServerUrl(serverObj["url"].toString());
+            QStringList reserveUrls = Utils::normalizedServerUrls(
                 Utils::stringListFromJsonArray(serverObj["reserve_server_urls"].toArray()), url);
             const QString username   = serverObj["username"].toString().trimmed();
             const QString signingKey = serverObj["signing_key_b64"].toString().trimmed();
@@ -1031,8 +977,9 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
                 return ParanoiaFFI::errorResult("Слишком много диалогов в export payload.");
             totalDialogues += dialogues.size();
             for (const auto &dlgVal : dialogues) {
-                const auto dlgObj  = dlgVal.toObject();
-                const QString peer = dlgObj["peer"].toString();
+                const auto dlgObj          = dlgVal.toObject();
+                const QString peer         = dlgObj["peer"].toString();
+                const QString peerServerId = dlgObj["peer_server_id"].toString();
                 if (peer.isEmpty()) {
                     ++skippedEntries;
                     continue;
@@ -1054,7 +1001,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
                         ++skippedEntries;
                         continue;
                     }
-                    const int mergeResult = mergeKeyringEntry(targetDialogs, peer, key, startSeq);
+                    const int mergeResult = mergeKeyringEntry(targetDialogs, peer, peerServerId, key, startSeq);
                     if (mergeResult < 0) {
                         ++conflicts;
                         continue;
@@ -1076,9 +1023,9 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
             Utils::upsertProfileManifest(profileId, url, username, isCurrentClient || myProfileId.isEmpty());
             if (!profileExists) ++importedProfiles;
             if (myProfileId.isEmpty() && activatePrivkey.isEmpty()) {
-                activateServer   = url;
-                activateUsername = username;
-                activatePrivkey  = signingKey;
+                activateServer            = url;
+                activateUsername          = username;
+                activatePrivkey           = signingKey;
                 activateReserveServerUrls = reserveUrls;
             }
             if (isCurrentClient) {
@@ -1093,9 +1040,9 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
         if (adminServers.size() > Utils::MaxImportAdminServers)
             return ParanoiaFFI::errorResult("Слишком много admin-профилей в export payload.");
         for (const auto &adminVal : adminServers) {
-            const auto adminObj       = adminVal.toObject();
-            const QString url         = Utils::normalizedServerUrl(adminObj["url"].toString());
-            const QString private_key = adminObj["admin_private_key_b64"].toString().trimmed();
+            const auto adminObj           = adminVal.toObject();
+            const QString url             = Utils::normalizedServerUrl(adminObj["url"].toString());
+            const QString private_key     = adminObj["admin_private_key_b64"].toString().trimmed();
             const QStringList reserveUrls = Utils::normalizedServerUrls(
                 Utils::stringListFromJsonArray(adminObj["reserve_server_urls"].toArray()), url);
             if (url.isEmpty() || private_key.isEmpty()) continue;
@@ -1124,8 +1071,9 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
         admin::Admin::saveAdmins();
         emit adminStateChanged();
     }
-    if (!activatePrivkey.isEmpty()) loginClientInternal(activateServer, activateUsername, activatePrivkey,
-                                                        activateReserveServerUrls, true);
+    if (importedProfiles > 0 || !activatePrivkey.isEmpty()) setHasStoredClientProfiles(true);
+    if (!activatePrivkey.isEmpty())
+        loginClientInternal(activateServer, activateUsername, activatePrivkey, activateReserveServerUrls, true);
     return QVariantMap{
         {"ok", true},
         {"importedDialogues", importedDialogues},
@@ -1148,292 +1096,7 @@ QVariantMap MainBackend::deleteExportFile(const QString &filePath)
     return QVariantMap{{"ok", true}, {"deleted", true}};
 }
 
-// ── Polling ───────────────────────────────────────────────────────────────────
-
-void MainBackend::onPollTimer() { pollNotifications(); }
-
-void MainBackend::pollNotifications()
-{
-    if (m_notifyPollInFlight) {
-        scheduleNotifyPoll();
-        return;
-    }
-
-    struct NotifyTarget {
-        std::shared_ptr<ServerSession> session;
-        QString peer;
-        QString peerServerId;
-        QString keyringJson;
-        QString profileId;
-    };
-    struct NotifyCount {
-        QString key;
-        QString profileId;
-        QString peer;
-        quint64 count;
-    };
-    QList<NotifyTarget> targets;
-    const auto activeSession = SessionStore::instance()->activeSession();
-    const QString activePeer = m_activePeer;
-    const bool appActive     = QGuiApplication::applicationState() == Qt::ApplicationActive;
-
-    for (const auto &session : SessionStore::instance()->allSessions()) {
-        if (!session || !session->isLoggedIn()) continue;
-        const QString profileId = session->profileId;
-        for (const auto &dialog : session->dialogs) {
-            if (appActive && session == activeSession && !activePeer.isEmpty() && dialog.peer == activePeer) continue;
-            const QString keyringJson = dialog.keyringJson();
-            if (!dialog.peer.isEmpty() && !keyringJson.isEmpty())
-                targets.append({session, dialog.peer, dialog.peerServerId, keyringJson, profileId});
-        }
-    }
-
-    if (targets.isEmpty()) {
-        const bool hadPending = !m_notifiedPendingByPeer.isEmpty();
-        m_notifiedPendingByPeer.clear();
-        m_locallyReceivedPendingByPeer.clear();
-        setNotificationHint({}, {});
-        if (hadPending) emit dialogsChanged();
-        scheduleNotifyPoll();
-        return;
-    }
-
-    QPointer self(this);
-    m_notifyPollInFlight = true;
-    QThreadPool::globalInstance()->start([self, targets]() {
-        QList<NotifyCount> counts;
-        QString error;
-        bool anyFailed = false;
-        if (!self) return;
-        for (const auto &target : targets) {
-            uint64_t count    = 0;
-            const QString key = target.profileId + ":" + target.peer;
-            {
-                QMutexLocker locker(&target.session->ffiMutex);
-                if (!target.session->ffi) continue;
-                const QString myId =
-                    target.session->serverId.isEmpty() ? target.session->username : target.session->serverId;
-                const QString peerId = target.peerServerId.isEmpty() ? target.peer : target.peerServerId;
-                const int rc = target.session->ffi->notify_count_keyring(myId, peerId, target.keyringJson, count);
-                if (rc != 0) {
-                    anyFailed = true;
-                    if (error.isEmpty()) error = ParanoiaFFI::last_error();
-                    continue;
-                }
-            }
-            counts.append({key, target.profileId, target.peer, static_cast<quint64>(count)});
-        }
-        if (!self) return;
-        QMetaObject::invokeMethod(self, [self, counts, anyFailed, error]() {
-            if (!self) return;
-            self->m_notifyPollInFlight = false;
-            bool hasNewPending  = false;
-            bool pendingChanged = false;
-            QString newPendingProfileId;
-            QString newPendingPeer;
-            int newPendingPeers = 0;
-            QString hintProfileId;
-            QString hintPeer;
-            int pendingPeers = 0;
-            for (const auto &item : counts) {
-                const QString &key          = item.key;
-                const quint64 serverCount   = item.count;
-                const quint64 localCount    = self->m_locallyReceivedPendingByPeer.value(key, 0);
-                const quint64 combinedCount = localCount + serverCount;
-                if (combinedCount == 0) {
-                    pendingChanged = self->m_notifiedPendingByPeer.remove(key) > 0 || pendingChanged;
-                    continue;
-                }
-
-                ++pendingPeers;
-                if (pendingPeers == 1) {
-                    hintProfileId = item.profileId;
-                    hintPeer      = item.peer;
-                } else {
-                    hintProfileId.clear();
-                    hintPeer.clear();
-                }
-
-                const quint64 previousCombined = self->m_notifiedPendingByPeer.value(key, 0);
-                const quint64 previousLocal    = self->m_locallyReceivedPendingByPeer.value(key, 0);
-                const quint64 previousServer = previousCombined > previousLocal ? previousCombined - previousLocal : 0;
-                if (combinedCount != previousCombined) pendingChanged = true;
-                if (serverCount > previousServer) {
-                    hasNewPending = true;
-                    ++newPendingPeers;
-                    if (newPendingPeers == 1) {
-                        newPendingProfileId = item.profileId;
-                        newPendingPeer      = item.peer;
-                    } else {
-                        newPendingProfileId.clear();
-                        newPendingPeer.clear();
-                    }
-                }
-                self->m_notifiedPendingByPeer[key] = combinedCount;
-            }
-
-            quint64 total = 0;
-            for (auto it = self->m_notifiedPendingByPeer.constBegin(); it != self->m_notifiedPendingByPeer.constEnd(); ++it)
-                total += it.value();
-            if (hintPeer.isEmpty() && newPendingPeers == 1) {
-                hintProfileId = newPendingProfileId;
-                hintPeer      = newPendingPeer;
-            }
-            if (total == 0) {
-                self->setNotificationHint({}, {});
-            } else if (pendingChanged) {
-                self->setNotificationHint(hintProfileId, hintPeer);
-            }
-            if (pendingChanged) {
-                emit self->dialogsChanged();
-            }
-            if (hasNewPending) emit self->notificationAvailable(total, hintProfileId, hintPeer);
-            if (anyFailed) {
-                qWarning().noquote() << "Notify polling failed for some sessions:" << error;
-                ++self->m_notifyRetryCount;
-                self->scheduleNotifyPoll(self->retryNotifyDelayMs());
-            } else {
-                self->m_notifyRetryCount = 0;
-                self->scheduleNotifyPoll();
-            }
-        });
-    });
-}
-
-void MainBackend::onNetworkChanged()
-{
-    m_notifyRetryCount = 0;
-    scheduleNotifyPoll(0);
-    emit networkRestored();
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-void MainBackend::scheduleNotifyPoll(int delayMs)
-{
-    rebuildBackgroundPollSnapshot();
-    const auto &sessions = SessionStore::instance()->allSessions();
-    bool anyActive       = false;
-    for (const auto &s : sessions)
-        if (s && s->isLoggedIn() && !s->dialogs.isEmpty()) {
-            anyActive = true;
-            break;
-        }
-    if (!anyActive) {
-        m_pollTimer->stop();
-        PlatformNotifications::stopBackgroundPollingService();
-        return;
-    }
-    PlatformNotifications::startBackgroundPollingService();
-    if (delayMs < 0) delayMs = randomNotifyDelayMs();
-    m_pollTimer->start(delayMs);
-}
-
-void MainBackend::rebuildBackgroundPollSnapshot()
-{
-    std::vector<BackgroundPollTarget> next;
-    for (const auto &session : SessionStore::instance()->allSessions()) {
-        if (!session || !session->isLoggedIn()) continue;
-        for (const auto &dialog : session->dialogs) {
-            const QString keyringJson = dialog.keyringJson();
-            if (dialog.peer.isEmpty() || keyringJson.isEmpty()) continue;
-            next.push_back({session, session->profileId, dialog.peer, dialog.peerServerId, keyringJson});
-        }
-    }
-    QMutexLocker lock(&m_bgPollSnapshotMutex);
-    m_bgPollSnapshot.swap(next);
-}
-
-void MainBackend::runBackgroundPollFromService()
-{
-#if defined(Q_OS_ANDROID)
-    QJniEnvironment jniEnv; // ensure this thread is attached to the JVM so that
-                            // rustls-platform-verifier can make Android TLS JNI
-                            // calls during notify_count_keyring()
-#endif
-    std::vector<BackgroundPollTarget> targets;
-    {
-        QMutexLocker lock(&m_bgPollSnapshotMutex);
-        targets = m_bgPollSnapshot;
-    }
-#if defined(Q_OS_ANDROID)
-    __android_log_print(ANDROID_LOG_INFO, "ParanoiaService",
-                        "background notify poll started: targets=%zu", targets.size());
-#endif
-    if (targets.empty()) {
-#if defined(Q_OS_ANDROID)
-        __android_log_write(ANDROID_LOG_INFO, "ParanoiaService",
-                            "background notify poll finished: no targets");
-#endif
-        return;
-    }
-    quint64 total = 0;
-    int failures  = 0;
-    QString firstError;
-    QString hintProfileId;
-    QString hintPeer;
-    int pendingPeers = 0;
-    for (const auto &target : targets) {
-        uint64_t count = 0;
-        int rc;
-        {
-            QMutexLocker locker(&target.session->ffiMutex);
-            if (!target.session->ffi) continue;
-            const QString myId =
-                target.session->serverId.isEmpty() ? target.session->username : target.session->serverId;
-            const QString peerId = target.peerServerId.isEmpty() ? target.peer : target.peerServerId;
-            rc                   = target.session->ffi->notify_count_keyring(myId, peerId, target.keyringJson, count);
-        }
-        if (rc != 0) {
-            ++failures;
-            if (firstError.isEmpty()) firstError = ParanoiaFFI::last_error();
-            continue;
-        }
-        if (count > 0) {
-            total += static_cast<quint64>(count);
-            ++pendingPeers;
-            if (pendingPeers == 1) {
-                hintProfileId = target.profileId;
-                hintPeer      = target.peer;
-            } else {
-                hintProfileId.clear();
-                hintPeer.clear();
-            }
-        }
-    }
-#if defined(Q_OS_ANDROID)
-    __android_log_print(ANDROID_LOG_INFO, "ParanoiaService",
-                        "background notify poll finished: total=%llu pendingPeers=%d failures=%d",
-                        static_cast<unsigned long long>(total), pendingPeers, failures);
-#endif
-    if (failures > 0 && total == 0) {
-#if defined(Q_OS_ANDROID)
-        __android_log_print(ANDROID_LOG_WARN, "ParanoiaService",
-                            "background notify polling had failures: %s",
-                            firstError.toUtf8().constData());
-#endif
-        return;
-    }
-    if (total > 0) PlatformNotifications::showMessageCount(total, hintProfileId, hintPeer);
-}
-
-void MainBackend::setNotificationHint(const QString &profileId, const QString &peer)
-{
-    if (m_notificationHintProfileId == profileId && m_notificationHintPeer == peer) return;
-    m_notificationHintProfileId = profileId;
-    m_notificationHintPeer      = peer;
-    emit notificationHintPeerChanged();
-}
-
-int MainBackend::randomNotifyDelayMs() const { return QRandomGenerator::global()->bounded(2'000, 15'001); }
-
-int MainBackend::retryNotifyDelayMs() const
-{
-    const int shift  = std::min(m_notifyRetryCount, 6);
-    const int base   = std::min(1000 * (1 << shift), 60'000);
-    const int jitter = QRandomGenerator::global()->bounded((base / 5) + 1);
-    return base + jitter;
-}
 
 void MainBackend::upsertDialogKeyringEntry(const QString &peer, const QString &peerServerId,
                                            const QByteArray &sessionKey, quint64 startSeq, bool resetKeyring)
@@ -1458,14 +1121,14 @@ void MainBackend::upsertDialogKeyringEntry(const QString &peer, const QString &p
                       [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
             emit dialogsChanged();
             session->saveDialogs();
-            scheduleNotifyPoll();
+            m_notifications->schedulePoll();
             return;
         }
     }
     dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, sessionKey}}, QString()});
     emit dialogsChanged();
     session->saveDialogs();
-    scheduleNotifyPoll();
+    m_notifications->schedulePoll();
 }
 
 // ── Session Management ────────────────────────────────────────────────────────
@@ -1475,17 +1138,13 @@ QVariantList MainBackend::getSessionList() const
     const auto activeSession = SessionStore::instance()->activeSession();
     QVariantList result;
     for (const auto &session : SessionStore::instance()->allSessions()) {
-        quint64 total        = 0;
-        const QString prefix = session->profileId + ":";
-        for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it)
-            if (it.key().startsWith(prefix)) total += it.value();
         result.append(QVariantMap{
             {"profileId", session->profileId},
             {"server", session->server},
             {"reserveServerUrls", Utils::stringListToJsonArray(session->reserveServerUrls).toVariantList()},
             {"username", session->username},
             {"isActive", session == activeSession},
-            {"totalUnread", total},
+            {"totalUnread", m_notifications->totalUnreadForProfile(session->profileId)},
         });
     }
     return result;
@@ -1496,12 +1155,11 @@ void MainBackend::switchSession(const QString &profileId)
     auto session = SessionStore::instance()->sessionForProfile(profileId);
     if (!session || session == SessionStore::instance()->activeSession()) return;
     SessionStore::instance()->setActiveSession(session);
-    m_activePeer.clear();
-    setNotificationHint({}, {});
+    m_notifications->resetActiveContext();
     emit sessionReset();
     emit dialogsChanged();
     emit sessionSwitched();
-    scheduleNotifyPoll(0);
+    m_notifications->schedulePoll(0);
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -1517,9 +1175,9 @@ void MainBackend::loadClientConfig()
         if (profileId.isEmpty() || loaded.contains(profileId)) return;
         const auto obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
         if (obj.isEmpty()) return;
-        const QString server      = obj.value("server").toString();
-        const QString username    = obj.value("username").toString();
-        const QString private_key = obj.value("private_key").toString();
+        const QString server          = obj.value("server").toString();
+        const QString username        = obj.value("username").toString();
+        const QString private_key     = obj.value("private_key").toString();
         const QStringList reserveUrls = reserveUrlsFromObject(obj, server);
         if (server.isEmpty() || private_key.isEmpty()) return;
         loaded.insert(profileId);
@@ -1536,18 +1194,18 @@ void MainBackend::loadClientConfig()
 
 void MainBackend::saveDeviceKey() const
 {
-    QFile f("device_key.json");
+    QFile f(Paths::deviceKey());
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
     QJsonObject obj;
     obj["private_key_b64"] = m_devicePrivkey;
     f.write(QJsonDocument(obj).toJson());
     f.close();
-    Utils::setOwnerOnlyPermissions("device_key.json");
+    Utils::setOwnerOnlyPermissions(Paths::deviceKey());
 }
 
 void MainBackend::loadDeviceKey()
 {
-    auto doc = QJsonDocument::fromJson(Utils::readAll("device_key.json"));
+    auto doc = QJsonDocument::fromJson(Utils::readAll(Paths::deviceKey()));
     if (doc.isObject()) {
         const QString priv = doc.object()["private_key_b64"].toString();
         if (!priv.isEmpty() && QByteArray::fromBase64(priv.toLatin1()).size() == 32) {

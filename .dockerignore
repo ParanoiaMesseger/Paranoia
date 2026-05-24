@@ -1,0 +1,21 @@
+# Keep the docker build context small. CI images only need source + scripts/.
+.git
+**/target
+.cargo
+.cargo-target
+.cargo-target-*
+build_client
+build_android
+build_ios
+.qt
+.android
+.venv-aqt*
+release
+*.apk
+*.ipa
+ParanoiaUiClient/deps/opus
+ParanoiaUiClient/deps/openh264
+ParanoiaUiClient/deps/ffmpeg
+ParanoiaUiClient/android-build
+**/.idea
+**/.vscode

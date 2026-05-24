@@ -4,11 +4,15 @@
 
 namespace Paths
 {
-    const QDir profilesRoot        = QStringLiteral("profiles");
-    const QString profilesManifest = QStringLiteral("profiles.json");
-    const QString client           = QStringLiteral("client.json");
-    const QString dialogs          = QStringLiteral("dialogs.json");
-    const QString db               = QStringLiteral("paranoia.db");
+    const QString client  = QStringLiteral("client.json");
+    const QString dialogs = QStringLiteral("dialogs.json");
+    const QString db      = QStringLiteral("paranoia.db");
+
+    QDir appDataRoot();
+    QDir profilesRoot();
+    QString profilesManifest();
+    QString deviceKey();
+    QString pendingRegistrationKey();
 
     QDir profileDir(const QString &profileId);
     QString profileClient(const QString &profileId);

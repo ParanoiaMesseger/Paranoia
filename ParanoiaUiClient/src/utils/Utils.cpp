@@ -62,7 +62,8 @@ namespace Utils
 
     QString reserveServerUrlsJson(const QStringList &reserveServerUrls)
     {
-        return QString::fromUtf8(QJsonDocument(stringListToJsonArray(reserveServerUrls)).toJson(QJsonDocument::Compact));
+        return QString::fromUtf8(
+            QJsonDocument(stringListToJsonArray(reserveServerUrls)).toJson(QJsonDocument::Compact));
     }
 
     QString profileIdFor(const QString &server, const QString &username)
@@ -91,7 +92,7 @@ namespace Utils
 
     QJsonObject loadProfilesManifest()
     {
-        auto manifest = readJsonObjectFile(Paths::profilesManifest);
+        auto manifest = readJsonObjectFile(Paths::profilesManifest());
         if (!manifest.value("profiles").isArray()) manifest["profiles"] = QJsonArray{};
         return manifest;
     }
@@ -114,7 +115,7 @@ namespace Utils
             profiles.append(obj);
         manifest["profiles"] = profiles;
         if (makeLast) manifest["last_profile_id"] = profileId;
-        writeJsonObjectFile(Paths::profilesManifest, manifest);
+        writeJsonObjectFile(Paths::profilesManifest(), manifest);
     }
 
     bool decodeFixedBase64(const QString &value, int expectedSize, QByteArray *out)
