@@ -19,10 +19,12 @@
 extern "C" void paranoia_ios_register_background_tasks();
 extern "C" void paranoia_ios_schedule_background_polling();
 extern "C" void paranoia_ios_cancel_background_polling();
-extern "C" void paranoia_ios_show_message_count(unsigned long long count);
+extern "C" void paranoia_ios_show_message_count(unsigned long long count, const char *profileId, const char *peer);
+extern "C" bool paranoia_ios_take_open_target(char **out_profile_id, char **out_peer);
+extern "C" void paranoia_ios_free_string(char *value);
 #endif
 
-#if defined(OS_MACOS)
+#if defined(OS_MAC)
 extern "C" void paranoia_macos_register_notifications();
 extern "C" void paranoia_macos_show_message_count(unsigned long long count);
 #endif
@@ -130,10 +132,11 @@ namespace PlatformNotifications
                                            context.object<jobject>(), static_cast<jlong>(count),
                                            javaProfileId.object<jstring>(), javaPeer.object<jstring>());
 #elif defined(OS_IOS)
-        Q_UNUSED(profileId)
-        Q_UNUSED(peer)
-        paranoia_ios_show_message_count(static_cast<unsigned long long>(count));
-#elif defined(OS_DARWIN)
+        const QByteArray profileIdUtf8 = profileId.toUtf8();
+        const QByteArray peerUtf8      = peer.toUtf8();
+        paranoia_ios_show_message_count(static_cast<unsigned long long>(count),
+                                        profileIdUtf8.constData(), peerUtf8.constData());
+#elif defined(OS_MAC)
         Q_UNUSED(profileId)
         Q_UNUSED(peer)
         paranoia_macos_show_message_count(static_cast<unsigned long long>(count));
@@ -160,6 +163,19 @@ namespace PlatformNotifications
         } else {
             target.profileId = encoded.left(separator);
             target.peer      = encoded.mid(separator + 1);
+        }
+#elif defined(OS_IOS)
+        char *profileIdC = nullptr;
+        char *peerC      = nullptr;
+        if (paranoia_ios_take_open_target(&profileIdC, &peerC)) {
+            if (profileIdC) {
+                target.profileId = QString::fromUtf8(profileIdC);
+                paranoia_ios_free_string(profileIdC);
+            }
+            if (peerC) {
+                target.peer = QString::fromUtf8(peerC);
+                paranoia_ios_free_string(peerC);
+            }
         }
 #endif
         return target;

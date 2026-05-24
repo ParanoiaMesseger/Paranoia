@@ -136,6 +136,10 @@ else()
         if(PkgConfig_FOUND)
             pkg_check_modules(OPUS_PKG QUIET IMPORTED_TARGET opus)
             if(OPUS_PKG_FOUND)
+                # opus.pc выдаёт -I.../include/opus, но код использует
+                # #include <opus/opus.h> — нужен родительский каталог.
+                get_filename_component(_opus_inc_fixed "${OPUS_PKG_INCLUDE_DIRS}" DIRECTORY)
+                set_target_properties(PkgConfig::OPUS_PKG PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${_opus_inc_fixed}")
                 set(PARANOIA_HAS_OPUS 1)
                 set(PARANOIA_OPUS_TARGET PkgConfig::OPUS_PKG)
             endif()
@@ -238,7 +242,13 @@ elseif(PARANOIA_IS_IOS)
 else()
     find_package(FFMPEG COMPONENTS avcodec avutil swscale QUIET)
 
-    if(FFMPEG_FOUND)
+    # FFMPEG_FOUND ещё не гарантирует, что созданы imported targets — в Qt6.10
+    # /Homebrew окружении на macOS FindFFMPEG.cmake часто рапортует FOUND по
+    # найденным .dylib, но FFMPEG::avcodec/avutil/swscale не регистрирует.
+    # Без явного TARGET-чека дальше уйдём в target_link_libraries с несуществующим
+    # таргетом и упадём (gitlab job 2951). Проверяем все три — иначе откатываемся
+    # на pkg-config fallback ниже.
+    if(FFMPEG_FOUND AND TARGET FFMPEG::avcodec AND TARGET FFMPEG::avutil AND TARGET FFMPEG::swscale)
         set(PARANOIA_HAS_FFMPEG 1)
         set(PARANOIA_FFMPEG_TARGETS FFMPEG::avcodec FFMPEG::avutil FFMPEG::swscale)
     endif()
@@ -278,14 +288,40 @@ if(PARANOIA_IS_IOS)
 endif()
 
 if(PARANOIA_ENABLE_HUNSPELL)
-    find_package(PkgConfig QUIET)
+    if(PARANOIA_IS_IOS)
+        # На iOS: prebuilt из deps/hunspell/ios-<arch>/ (scripts/build_hunspell_ios.sh).
+        # pkg_check_modules нельзя использовать при cross-compile — host pkg-config
+        # находит macOS-версию hunspell и ложно помечает её как доступную для iOS.
+        _paranoia_resolve_ios_arch(_paranoia_ios_arch _paranoia_ios_prefix)
+        set(_hunspell_root "${CMAKE_CURRENT_SOURCE_DIR}/deps/hunspell/${_paranoia_ios_arch}")
 
-    if(PkgConfig_FOUND)
-        pkg_check_modules(HUNSPELL_PKG QUIET IMPORTED_TARGET hunspell)
-
-        if(HUNSPELL_PKG_FOUND)
+        if(EXISTS "${_hunspell_root}/include/hunspell/hunspell.h"
+            AND EXISTS "${_hunspell_root}/lib/libhunspell-1.7.a")
+            add_library(paranoia_hunspell_prebuilt STATIC IMPORTED)
+            set_target_properties(paranoia_hunspell_prebuilt PROPERTIES
+                IMPORTED_LOCATION "${_hunspell_root}/lib/libhunspell-1.7.a"
+                INTERFACE_INCLUDE_DIRECTORIES "${_hunspell_root}/include"
+            )
             set(PARANOIA_HAS_HUNSPELL 1)
-            set(PARANOIA_HUNSPELL_TARGET PkgConfig::HUNSPELL_PKG)
+            set(PARANOIA_HUNSPELL_TARGET paranoia_hunspell_prebuilt)
+            message(STATUS "Paranoia spellcheck: using prebuilt hunspell at ${_hunspell_root}")
+        else()
+            message(STATUS "Paranoia spellcheck: no prebuilt hunspell at ${_hunspell_root} — run scripts/build_hunspell_ios.sh")
+        endif()
+    else()
+        find_package(PkgConfig QUIET)
+
+        if(PkgConfig_FOUND)
+            pkg_check_modules(HUNSPELL_PKG QUIET IMPORTED_TARGET hunspell)
+
+            if(HUNSPELL_PKG_FOUND)
+                # hunspell.pc выдаёт Cflags: -I.../include/hunspell, но код
+                # использует #include <hunspell/hunspell.h> — нужен родитель.
+                get_filename_component(_hunspell_inc_fixed "${HUNSPELL_PKG_INCLUDE_DIRS}" DIRECTORY)
+                set_target_properties(PkgConfig::HUNSPELL_PKG PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${_hunspell_inc_fixed}")
+                set(PARANOIA_HAS_HUNSPELL 1)
+                set(PARANOIA_HUNSPELL_TARGET PkgConfig::HUNSPELL_PKG)
+            endif()
         endif()
     endif()
 endif()
@@ -446,6 +482,15 @@ if(PARANOIA_HAS_VOIP)
     qt_target_qml_sources(Paranoia
         QML_FILES ui/Pages/CallPage.qml
     )
+
+    if(PARANOIA_IS_IOS)
+        target_sources(Paranoia PRIVATE
+            src/voip/IosAudioSession.hpp
+            src/voip/IosAudioSession.mm
+        )
+        set_source_files_properties(src/voip/IosAudioSession.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_link_libraries(Paranoia PRIVATE "-framework AVFAudio")
+    endif()
 
     if(PARANOIA_HAS_VIDEO)
         target_sources(Paranoia PRIVATE
