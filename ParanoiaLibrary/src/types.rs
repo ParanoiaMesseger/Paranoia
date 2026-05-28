@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub type MessageId = String;
 
@@ -46,6 +46,12 @@ pub enum AttachmentKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageContent {
     Text(String),
+    TextReply {
+        text: String,
+        reply_to_id: MessageId,
+        reply_sender: String,
+        reply_text: String,
+    },
     File(FileAttachment),
     Image(FileAttachment),
     Voice(FileAttachment),
@@ -206,42 +212,8 @@ mod base64_vec {
     where
         D: Deserializer<'de>,
     {
-        struct BytesVisitor;
-
-        impl<'de> de::Visitor<'de> for BytesVisitor {
-            type Value = Vec<u8>;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("base64 string or legacy byte array")
-            }
-
-            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                B64.decode(value).map_err(E::custom)
-            }
-
-            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                self.visit_str(&value)
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
-            where
-                A: de::SeqAccess<'de>,
-            {
-                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(byte) = seq.next_element::<u8>()? {
-                    bytes.push(byte);
-                }
-                Ok(bytes)
-            }
-        }
-
-        deserializer.deserialize_any(BytesVisitor)
+        let s = String::deserialize(deserializer)?;
+        B64.decode(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -266,25 +238,4 @@ mod tests {
         assert_eq!(value["FileChunk"]["data"], json!("AQIDBA=="));
     }
 
-    #[test]
-    fn file_chunk_data_accepts_legacy_byte_array() {
-        let value = json!({
-            "FileChunk": {
-                "transfer_id": "transfer",
-                "index": 0,
-                "total": 1,
-                "filename": "payload.bin",
-                "mime_type": "application/octet-stream",
-                "total_size": 4,
-                "data": [1, 2, 3, 4]
-            }
-        });
-
-        let content: MessageContent =
-            serde_json::from_value(value).expect("deserialize legacy chunk");
-        match content {
-            MessageContent::FileChunk { data, .. } => assert_eq!(data, vec![1, 2, 3, 4]),
-            other => panic!("expected file chunk, got {other:?}"),
-        }
-    }
 }

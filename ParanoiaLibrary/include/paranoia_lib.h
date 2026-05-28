@@ -49,11 +49,23 @@ int paranoia_register_user(CSTR server_url, CSTR reserve_server_urls_json, CSTR 
 // Ключ выбирается локально по максимальному start_seq <= server_seq.
 char *paranoia_send_text_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, CSTR text);
 
+char *paranoia_send_text_reply_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
+                                            CSTR text, CSTR reply_to_id, CSTR reply_sender, CSTR reply_text);
+
 char *paranoia_send_reaction_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
                                           CSTR target_id, CSTR emoji);
 
 char *paranoia_send_file_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, CSTR file_path,
                                       CSTR mime_type);
+
+// Callback'и для прогресса отправки файла. Вызываются ПОСЛЕ успешной отправки
+// каждого chunk'а (1-based), из runtime-потока FFI — caller обязан перевести
+// результат в свой UI-thread.
+typedef void (*paranoia_progress_callback)(uint32_t chunk_index, uint32_t total, void *user_data);
+
+char *paranoia_send_file_json_keyring_with_progress(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
+                                                    CSTR keyring_json, CSTR file_path, CSTR mime_type,
+                                                    paranoia_progress_callback progress, void *user_data);
 
 // Получить новые сообщения с сервера.
 // Возвращает JSON-массив или NULL при сетевой ошибке.
@@ -83,15 +95,33 @@ char *paranoia_history_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR
 int paranoia_save_attachment_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, CSTR message_id,
                                      CSTR target_path);
 
-// Сохранить вложение во внутренний cache приложения и вернуть локальный путь.
-char *paranoia_cache_attachment_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
-                                        CSTR message_id);
+// Получить расшифрованные байты вложения В ПАМЯТЬ — без plaintext-копии
+// на диске. Plaintext остаётся в RAM; вызывающая сторона обязана освободить
+// буфер через paranoia_free_buffer(ptr, len). Persistent на диске — только
+// зашифрованный attachment-cache/<msg_id>.enc. Возвращает 0=ok, -1=ошибка.
+int paranoia_cache_attachment_bytes_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
+                                            CSTR keyring_json, CSTR message_id,
+                                            unsigned char **out_ptr, size_t *out_len);
+
+// Освободить буфер, возвращённый FFI'ями вида *_bytes_*. len ОБЯЗАН совпадать
+// с тем, что было возвращено в out_len. NULL-указатель безопасен.
+void paranoia_free_buffer(unsigned char *ptr, size_t len);
 
 // ── Управление историей
 // ─────────────────────────────────────────────────────── Удалить серверную
 // историю диалога до cut_seq включительно (determinate). Возвращает 0 при
 // успехе, -1 при ошибке.
 int paranoia_determinate_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, uint64_t cut_seq);
+
+// Удалить пакеты на сервере в диапазоне [from_seq, to_seq] (включительно).
+// from_seq == 0 означает "с начала диалога". Возвращает 0 при успехе, -1 при ошибке.
+int paranoia_remove_server_range_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
+                                         uint64_t from_seq, uint64_t to_seq);
+
+// Атомарно удалить пакеты диалога в [from_seq, to_seq] и на сервере, и
+// в локальной БД (single call для UI ranged-delete). Возвращает 0/-1.
+int paranoia_delete_dialogue_range_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
+                                           uint64_t from_seq, uint64_t to_seq);
 
 // Удалить локальные сообщения диалога до cut_seq включительно.
 int paranoia_delete_local_until_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
@@ -204,6 +234,24 @@ int paranoia_call_signal_send(ParanoiaHandle *h, CSTR from_user, CSTR to_user,
                               CSTR master_key_b64, unsigned char kind,
                               CSTR payload_json);
 
+// Callback для async-варианта call_signal_send. Вызывается из фоновой
+// tokio-задачи, поэтому caller обязан переключаться на свой поток сам.
+// `status == 0` — успех; `error_message` валиден только во время вызова
+// (NULL при status==0).
+typedef void (*paranoia_call_signal_cb)(void *userdata, int status,
+                                        CSTR error_message);
+
+// Асинхронный вариант paranoia_call_signal_send: сразу возвращает управление,
+// фактическая отправка идёт в tokio-runtime. Итог сообщается через `cb`
+// (`cb` может быть NULL — fire-and-forget).
+// `userdata` валиден на момент вызова cb — caller обязан не освобождать его
+// раньше. Handle тоже должен жить до cb.
+// Возвращает 0 если задача поставлена в очередь, -1 при ошибке подготовки.
+int paranoia_call_signal_send_async(ParanoiaHandle *h, CSTR from_user,
+                                    CSTR to_user, CSTR master_key_b64,
+                                    unsigned char kind, CSTR payload_json,
+                                    paranoia_call_signal_cb cb, void *userdata);
+
 // Long-poll входящих сигнальных конвертов.
 // peers_keys_json — JSON-массив [{"peer":"name","master_key_b64":"..."}, ...].
 // long_poll_ms    — 0 = сразу; >0 = ждать на сервере (клампится до 30000).
@@ -269,6 +317,11 @@ int paranoia_call_session_set_peer(ParanoiaCallSession *s, CSTR peer_addr);
 // Возвращает NULL при ошибке. Освобождать через paranoia_free_string.
 char *paranoia_call_session_local_addr(ParanoiaCallSession *s);
 
+// Текущий peer-адрес сессии (rx-источник, обновляется auto-discover'ом).
+// Пустая строка если peer ещё не определён. NULL при ошибке. Освобождать
+// через paranoia_free_string.
+char *paranoia_call_session_get_peer(ParanoiaCallSession *s);
+
 // Послать STUN Binding Request через UDP-сокет уже-запущенной сессии и
 // вернуть reflexive "ip:port". В отличие от paranoia_stun_discover (с
 // собственным сокетом), это даёт reflexive того же порта, что использует
@@ -314,6 +367,57 @@ void paranoia_call_session_stop(ParanoiaCallSession *s);
 // Освобождать через paranoia_free_string.
 char *paranoia_stun_discover(CSTR local_bind, CSTR stun_server,
                              unsigned int timeout_ms);
+
+// ── Local Vault (LocalStorageEncryptionPolicy.md)
+// Установить корень app data. Вызывать на старте до любых других vault-функций.
+int paranoia_vault_init(CSTR app_data_root);
+
+// 0=not_initialized, 1=locked, 2=unlocked, -1=ошибка (см. paranoia_last_error).
+int paranoia_vault_status(void);
+
+// Установить PIN впервые. 0=ok, 1=already_initialized, -1=internal.
+int paranoia_vault_set_pin(CSTR pin);
+
+// Разблокировать. 0=ok, 1=wrong_pin, 2=locked_out, 3=not_initialized, -1=internal.
+int paranoia_vault_unlock(CSTR pin);
+
+// Очистить master_key из RAM. Всегда 0.
+int paranoia_vault_lock(void);
+
+// Проверить старый PIN без замены активных ключей.
+// 0=ok, 1=wrong_pin, 3=not_initialized, -1=internal.
+int paranoia_vault_verify_pin(CSTR pin);
+
+// ── Транзакционный rekey ────────────────────────────────────────────────
+// Полный flow смены PIN с перешифровкой всех файлов и БД:
+//   1) paranoia_vault_verify_pin(old)  → проверить старый PIN
+//   2) paranoia_vault_rekey_begin(new) → подготовить новые ключи
+//   3) для каждого JSON-файла:  paranoia_vault_rekey_file(path)
+//   4) для каждой SQLite БД:    paranoia_vault_rekey_db(db_path)
+//   5) paranoia_vault_rekey_commit() → атомарно свапнуть и записать vault.json
+// При ошибке на любом шаге — paranoia_vault_rekey_abort().
+// ВНИМАНИЕ: abort НЕ откатывает уже перешифрованные файлы.
+int paranoia_vault_rekey_begin(CSTR new_pin);
+int paranoia_vault_rekey_file(CSTR path);
+int paranoia_vault_rekey_db(CSTR db_path);
+// salt_str — то же значение, что использовалось при первичном шифровании
+// (обычно UUID сообщения).
+int paranoia_vault_rekey_attachment(CSTR salt_str, CSTR path);
+int paranoia_vault_rekey_commit(void);
+int paranoia_vault_rekey_abort(void);
+
+// Сколько секунд осталось до конца текущего lockout-таймаута. 0=можно вводить.
+int paranoia_vault_lockout_seconds(uint64_t *out_secs);
+
+// Низкоуровневое шифрованное IO для JSON-файлов. 0=ok, -1=ошибка.
+int paranoia_vault_encrypt_json(CSTR path, const unsigned char *data, size_t len);
+// NULL=ошибка; иначе расшифрованный JSON как UTF-8 C-string (free через paranoia_free_string).
+char *paranoia_vault_decrypt_json(CSTR path);
+
+// Шифрование attachment'ов per-file ключом HKDF(files_key, salt_str, "attachment-v1").
+// salt_str — обычно UUID сообщения. 0=ok, -1=ошибка.
+int paranoia_vault_encrypt_attachment(CSTR salt_str, CSTR src_path, CSTR dst_path);
+int paranoia_vault_decrypt_attachment(CSTR salt_str, CSTR src_path, CSTR dst_path);
 
 #ifdef __cplusplus
 }

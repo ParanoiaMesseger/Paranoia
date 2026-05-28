@@ -1,5 +1,5 @@
 use crate::types::{DialogueKey, Message, MessageStatus};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::sync::{Mutex, MutexGuard};
@@ -9,9 +9,31 @@ pub struct LocalStore {
 }
 
 impl LocalStore {
-    pub fn open(path: &str) -> Result<Self> {
+    /// Открыть базу данных в режиме SQLCipher.
+    /// Параметры по политике (LocalStorageEncryptionPolicy.md §5.2):
+    /// - PRAGMA key = "x'<hex-32B>'"
+    /// - PRAGMA cipher_page_size = 4096
+    /// - PRAGMA kdf_iter = 1  (внешний KDF — Argon2id)
+    /// - PRAGMA cipher_hmac_algorithm = HMAC_SHA512
+    pub fn open(path: &str, db_key: &[u8; 32]) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // ВАЖНО: cipher_* параметры ДОЛЖНЫ быть выставлены ДО PRAGMA key.
+        // SQLCipher применяет page_size/kdf_iter/hmac_algorithm к шифрованию
+        // header'а в момент derive ключа; если их установить после key —
+        // они либо игнорируются (для существующего файла) либо приводят к
+        // несовместимости с заявленной политикой §5.2.
+        conn.execute_batch(
+            "PRAGMA cipher_page_size = 4096;\
+             PRAGMA kdf_iter = 1;\
+             PRAGMA cipher_hmac_algorithm = HMAC_SHA512;",
+        )?;
+        let key_pragma = format!("PRAGMA key = \"x'{}'\";", hex::encode(db_key));
+        conn.execute_batch(&key_pragma)
+            .map_err(|e| anyhow!("sqlcipher key: {e}"))?;
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+        // Проверка ключа: первая операция чтения упадёт если ключ неверный.
+        conn.query_row("SELECT count(*) FROM sqlite_master;", [], |_| Ok(()))
+            .map_err(|e| anyhow!("sqlcipher key verification failed: {e}"))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -208,6 +230,59 @@ impl LocalStore {
             "UPDATE messages SET status = ?1 WHERE id = ?2",
             params![serde_json::to_string(&status)?, message_id],
         )?;
+        Ok(())
+    }
+
+    /// Вернуть все server_seq у локальных сообщений диалога, у которых статус
+    /// уже подтверждён сервером (Delivered/Read). Использует tombstone sweep
+    /// в `Dialogue::receive`, чтобы не задеть наши же исходящие в полёте.
+    pub fn get_delivered_server_seqs(&self, dialogue: &DialogueKey) -> Result<Vec<u64>> {
+        let conn = self.conn()?;
+        let delivered_json = serde_json::to_string(&MessageStatus::Delivered)?;
+        let read_json = serde_json::to_string(&MessageStatus::Read)?;
+        let mut stmt = conn.prepare(
+            "SELECT server_seq
+             FROM messages
+             WHERE dialogue_a = ?1
+               AND dialogue_b = ?2
+               AND server_seq IS NOT NULL
+               AND status IN (?3, ?4)",
+        )?;
+        let rows = stmt.query_map(
+            params![dialogue.a, dialogue.b, delivered_json, read_json],
+            |row| row.get::<_, i64>(0).map(|v| v as u64),
+        )?;
+        rows.collect::<rusqlite::Result<Vec<u64>>>()
+            .map_err(Into::into)
+    }
+
+    /// Удалить локальные сообщения по конкретному списку `server_seq`.
+    /// Пустой список — no-op.
+    pub fn delete_messages_by_seqs(
+        &self,
+        dialogue: &DialogueKey,
+        seqs: &[u64],
+    ) -> Result<()> {
+        if seqs.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn()?;
+        let mut del_msg = conn.prepare(
+            "DELETE FROM messages
+             WHERE dialogue_a = ?1
+               AND dialogue_b = ?2
+               AND server_seq = ?3",
+        )?;
+        let mut del_map = conn.prepare(
+            "DELETE FROM seq_map
+             WHERE dialogue_a = ?1
+               AND dialogue_b = ?2
+               AND server_seq = ?3",
+        )?;
+        for &seq in seqs {
+            del_msg.execute(params![dialogue.a, dialogue.b, seq as i64])?;
+            del_map.execute(params![dialogue.a, dialogue.b, seq as i64])?;
+        }
         Ok(())
     }
 

@@ -10,7 +10,7 @@ pub struct PullRequest {
     pub sender: String,
     pub recver: String,
     pub after_seq: u64,
-    pub to_seq: u64, // 0 = как раньше; иначе ограниченный диапазон
+    pub to_seq: u64, // строго > after_seq
     pub sig: String, // подпись от sender+recver+after_seq+to_seq
 }
 
@@ -47,7 +47,7 @@ async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
         }
     };
 
-    if req.to_seq != 0 && req.to_seq < req.after_seq {
+    if req.to_seq == 0 || req.to_seq <= req.after_seq {
         return fail("Invalid pull range".into());
     }
 

@@ -36,6 +36,7 @@ public:
 
 signals:
     void notificationAvailable(quint64 count, const QString &profileId, const QString &peer);
+    void notificationsCleared();
     void notificationHintPeerChanged();
     void dialogsChanged();
     void networkRestored();

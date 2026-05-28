@@ -20,6 +20,7 @@ extern "C" void paranoia_ios_register_background_tasks();
 extern "C" void paranoia_ios_schedule_background_polling();
 extern "C" void paranoia_ios_cancel_background_polling();
 extern "C" void paranoia_ios_show_message_count(unsigned long long count, const char *profileId, const char *peer);
+extern "C" void paranoia_ios_clear_delivered_notifications();
 extern "C" bool paranoia_ios_take_open_target(char **out_profile_id, char **out_peer);
 extern "C" void paranoia_ios_free_string(char *value);
 #endif
@@ -27,6 +28,7 @@ extern "C" void paranoia_ios_free_string(char *value);
 #if defined(OS_MAC)
 extern "C" void paranoia_macos_register_notifications();
 extern "C" void paranoia_macos_show_message_count(unsigned long long count);
+extern "C" void paranoia_macos_clear_delivered_notifications();
 #endif
 
 namespace
@@ -145,6 +147,23 @@ namespace PlatformNotifications
         Q_UNUSED(profileId)
         Q_UNUSED(peer)
 #endif
+    }
+
+    void clearAccumulatedNotifications()
+    {
+#if defined(OS_ANDROID)
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return;
+        QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaForegroundService",
+                                           "clearMessageNotifications",
+                                           "(Landroid/content/Context;)V", context.object<jobject>());
+#elif defined(OS_IOS)
+        paranoia_ios_clear_delivered_notifications();
+#elif defined(OS_MAC)
+        paranoia_macos_clear_delivered_notifications();
+#endif
+        // Для Linux/Windows очистка происходит на уровне DesktopTray
+        // (см. DesktopTray::clearAccumulatedNotifications).
     }
 
     NotificationTarget takeOpenTargetFromNotification()

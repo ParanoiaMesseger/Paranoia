@@ -47,10 +47,29 @@ DesktopTray::DesktopTray(QQmlApplicationEngine &engine) {}
 void DesktopTray::notificationAvailable(quint64 count)
 {
 #if PARANOIA_DESKTOP_TRAY
+#if defined(OS_LINUX)
+    // Через D-Bus daemon видит replaces_id и заменяет карточку — шторка
+    // не накапливает копии. Tray::showMessage используем только fallback'ом,
+    // если сессионный bus недоступен (headless/контейнер).
+    if (linuxNotifier_.isAvailable() && linuxNotifier_.showMessageCount(count)) return;
+#endif
     if (tray_.isVisible())
         tray_.showMessage(QStringLiteral("Paranoia"), QStringLiteral("Новых сообщений: %1").arg(count),
                           QSystemTrayIcon::Information, 10000);
 #else
     Q_UNUSED(count);
+#endif
+}
+
+void DesktopTray::clearAccumulatedNotifications()
+{
+#if PARANOIA_DESKTOP_TRAY
+#if defined(OS_LINUX)
+    linuxNotifier_.closeCurrent();
+#endif
+    // QSystemTrayIcon::showMessage не отдаёт handle — закрыть конкретную
+    // карточку нельзя. Полагаемся на timeout (10s) для fallback-пути.
+#else
+    // ничего не делаем — окружение без tray не показывает баннеров.
 #endif
 }

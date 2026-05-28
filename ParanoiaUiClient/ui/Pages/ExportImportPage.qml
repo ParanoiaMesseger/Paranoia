@@ -17,13 +17,6 @@ Rectangle {
     signal back
     signal profileImported
 
-    function localFilePath(fileUrl) {
-        let value = decodeURIComponent(String(fileUrl));
-        if (value.startsWith("file://"))
-            value = value.substring(7);
-        return value;
-    }
-
     function refreshExportDialogs() {
         const dialogs = Backend.getDialogs();
         exportDialogList.model = dialogs;
@@ -79,7 +72,7 @@ Rectangle {
         defaultSuffix: "json"
         nameFilters: ["Paranoia export (*.json)", "JSON (*.json)"]
         onAccepted: {
-            exportFilePath = root.localFilePath(selectedFile);
+            exportFilePath = Backend.urlToLocalPath(selectedFile);
             exportFeedback.text = "";
             const profile = ["client", "admin", "full"][profileCombo.currentIndex];
             const peers = profile === "admin" ? [] : root.selectedPeerNames();
@@ -104,7 +97,7 @@ Rectangle {
         fileMode: FileDialog.OpenFile
         nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
         onAccepted: {
-            importFilePath = root.localFilePath(selectedFile);
+            importFilePath = Backend.urlToLocalPath(selectedFile);
             importFeedback.text = "";
             deleteFileBanner.visible = false;
             const res = Backend.importProfile(importFilePath.trim());

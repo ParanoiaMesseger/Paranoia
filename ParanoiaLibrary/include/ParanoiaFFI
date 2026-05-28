@@ -40,6 +40,14 @@ public:
     QString send_text_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR text)
     { return RS_QS(::paranoia_send_text_json_keyring(ptr, QS_RS4(user_a, user_b, keyring_json, text))); }
 
+    QString send_text_reply_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR text, QSTR reply_to_id,
+                                         QSTR reply_sender, QSTR reply_text)
+    {
+        return RS_QS(::paranoia_send_text_reply_json_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json),
+                                                             QS_RS(text), QS_RS(reply_to_id), QS_RS(reply_sender),
+                                                             QS_RS(reply_text)));
+    }
+
     QString send_reaction_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR target_id, QSTR emoji)
     {
         return RS_QS(::paranoia_send_reaction_json_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json),
@@ -50,6 +58,18 @@ public:
     {
         return RS_QS(::paranoia_send_file_json_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json),
                                                        QS_RS(file_path), QS_RS(mime_type)));
+    }
+
+    // Вариант с прогресс-callback'ом. progress будет дёрнут из runtime-потока
+    // FFI; вызывающая сторона должна сама перенести результат в свой UI-thread
+    // (через QMetaObject::invokeMethod(..., Qt::QueuedConnection)).
+    QString send_file_json_keyring_with_progress(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path,
+                                                 QSTR mime_type, ::paranoia_progress_callback progress,
+                                                 void *user_data)
+    {
+        return RS_QS(::paranoia_send_file_json_keyring_with_progress(
+            ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type),
+            progress, user_data));
     }
 
     QString receive_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json)
@@ -76,14 +96,32 @@ public:
                                                   QS_RS(message_id), QS_RS(target_path));
     }
 
-    QString cache_attachment_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR message_id)
+    /// Получить расшифрованные байты вложения в память (plaintext на диск НЕ
+    /// пишется). Caller получает владение QByteArray; FFI-буфер освобождается
+    /// здесь же через paranoia_free_buffer. Пустой QByteArray = ошибка.
+    QByteArray cache_attachment_bytes_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR message_id)
     {
-        return RS_QS(::paranoia_cache_attachment_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json),
-                                                         QS_RS(message_id)));
+        unsigned char *buf = nullptr;
+        size_t len = 0;
+        const int rc = ::paranoia_cache_attachment_bytes_keyring(
+            ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(message_id), &buf, &len);
+        if (rc != 0 || !buf || len == 0) {
+            if (buf) ::paranoia_free_buffer(buf, len);
+            return {};
+        }
+        QByteArray out(reinterpret_cast<const char *>(buf), static_cast<qsizetype>(len));
+        ::paranoia_free_buffer(buf, len);
+        return out;
     }
 
     int determinate_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t cut_seq)
     { return ::paranoia_determinate_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), cut_seq); }
+
+    int remove_server_range_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t from_seq, uint64_t to_seq)
+    { return ::paranoia_remove_server_range_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), from_seq, to_seq); }
+
+    int delete_dialogue_range_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t from_seq, uint64_t to_seq)
+    { return ::paranoia_delete_dialogue_range_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), from_seq, to_seq); }
 
     int delete_local_until_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t cut_seq)
     { return ::paranoia_delete_local_until_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), cut_seq); }
@@ -96,6 +134,13 @@ public:
 
     int callSignalSend(QSTR from_user, QSTR to_user, QSTR master_key_b64, unsigned char kind, QSTR payload_json)
     { return paranoia_call_signal_send(ptr, QS_RS3(from_user, to_user, master_key_b64), kind, QS_RS(payload_json)); }
+
+    int callSignalSendAsync(QSTR from_user, QSTR to_user, QSTR master_key_b64, unsigned char kind, QSTR payload_json,
+                            paranoia_call_signal_cb cb, void *userdata)
+    {
+        return paranoia_call_signal_send_async(ptr, QS_RS3(from_user, to_user, master_key_b64), kind,
+                                               QS_RS(payload_json), cb, userdata);
+    }
 
     QString callPoll(QSTR user, QSTR peers_keys_json, unsigned int long_poll_ms)
     { return RS_QS(paranoia_call_poll(ptr, QS_RS2(user, peers_keys_json), long_poll_ms)); }
@@ -162,6 +207,79 @@ public:
     static QVariantMap errorResult(const QString &message) { return QVariantMap{{"ok", false}, {"error", message}}; }
 
     static QVariantMap lastRustErrorResult() { return errorResult(last_error()); }
+
+    // ── Local Vault ───────────────────────────────────────────────────────
+    enum class VaultStatus { NotInitialized = 0, Locked = 1, Unlocked = 2, Error = -1 };
+    enum class VaultUnlockResult { Ok = 0, WrongPin = 1, LockedOut = 2, NotInitialized = 3, Internal = -1 };
+
+    static int vault_init(QSTR app_data_root)
+    { return ::paranoia_vault_init(QS_RS(app_data_root)); }
+
+    static VaultStatus vault_status()
+    {
+        const int rc = ::paranoia_vault_status();
+        if (rc == 0) return VaultStatus::NotInitialized;
+        if (rc == 1) return VaultStatus::Locked;
+        if (rc == 2) return VaultStatus::Unlocked;
+        return VaultStatus::Error;
+    }
+
+    static int vault_set_pin(QSTR pin) { return ::paranoia_vault_set_pin(QS_RS(pin)); }
+
+    static VaultUnlockResult vault_unlock(QSTR pin)
+    {
+        const int rc = ::paranoia_vault_unlock(QS_RS(pin));
+        switch (rc) {
+            case 0: return VaultUnlockResult::Ok;
+            case 1: return VaultUnlockResult::WrongPin;
+            case 2: return VaultUnlockResult::LockedOut;
+            case 3: return VaultUnlockResult::NotInitialized;
+            default: return VaultUnlockResult::Internal;
+        }
+    }
+
+    static int vault_lock() { return ::paranoia_vault_lock(); }
+
+    static int vault_verify_pin(QSTR pin) { return ::paranoia_vault_verify_pin(QS_RS(pin)); }
+
+    static int vault_rekey_begin(QSTR new_pin) { return ::paranoia_vault_rekey_begin(QS_RS(new_pin)); }
+    static int vault_rekey_file(QSTR path) { return ::paranoia_vault_rekey_file(QS_RS(path)); }
+    static int vault_rekey_db(QSTR db_path) { return ::paranoia_vault_rekey_db(QS_RS(db_path)); }
+    static int vault_rekey_attachment(QSTR salt_str, QSTR path)
+    { return ::paranoia_vault_rekey_attachment(QS_RS(salt_str), QS_RS(path)); }
+    static int vault_rekey_commit() { return ::paranoia_vault_rekey_commit(); }
+    static int vault_rekey_abort() { return ::paranoia_vault_rekey_abort(); }
+
+    static quint64 vault_lockout_seconds()
+    {
+        uint64_t out = 0;
+        if (::paranoia_vault_lockout_seconds(&out) == 0) return static_cast<quint64>(out);
+        return 0;
+    }
+
+    static int vault_encrypt_json(QSTR path, const QByteArray &data)
+    {
+        return ::paranoia_vault_encrypt_json(QS_RS(path),
+                                             reinterpret_cast<const unsigned char *>(data.constData()),
+                                             static_cast<size_t>(data.size()));
+    }
+
+    static QByteArray vault_decrypt_json(QSTR path)
+    {
+        char *ptr = ::paranoia_vault_decrypt_json(QS_RS(path));
+        if (!ptr) return {};
+        // Deep copy — QByteArray(const char *, qsizetype) копирует байты.
+        // fromRawData дал бы shallow и UB после free_string.
+        QByteArray copy(ptr, static_cast<qsizetype>(qstrlen(ptr)));
+        ::paranoia_free_string(ptr);
+        return copy;
+    }
+
+    static int vault_encrypt_attachment(QSTR salt_str, QSTR src_path, QSTR dst_path)
+    { return ::paranoia_vault_encrypt_attachment(QS_RS(salt_str), QS_RS(src_path), QS_RS(dst_path)); }
+
+    static int vault_decrypt_attachment(QSTR salt_str, QSTR src_path, QSTR dst_path)
+    { return ::paranoia_vault_decrypt_attachment(QS_RS(salt_str), QS_RS(src_path), QS_RS(dst_path)); }
 
 private:
     ParanoiaHandle *ptr = nullptr;

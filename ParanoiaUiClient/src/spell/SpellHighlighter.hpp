@@ -4,6 +4,7 @@
 #include <QQmlEngine>
 #include <QPointer>
 #include <QQuickTextDocument>
+#include <QStringList>
 
 class SpellSyntaxHighlighter;
 
@@ -30,6 +31,10 @@ public:
     void setLocale(const QString &locale);
 
     bool available() const;
+
+    // Returns {start, length, word, suggestions} for the misspelled word at `position`,
+    // or an empty map when the position is not over a misspelled word.
+    Q_INVOKABLE QVariantMap misspelledAt(int position, int maxSuggestions = 5) const;
 
 signals:
     void textDocumentChanged();

@@ -63,5 +63,45 @@
     </array>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
+    <!-- Регистрация в Share-sheet'е и в "Открыть с помощью" в Files.
+         Share-extension (см. ios/ShareExtension) кладёт shared payload в App
+         Group group.app.paranoia.client и затем открывает основное приложение
+         через URL-схему paranoia://share — её разрешает CFBundleURLTypes ниже.
+         CFBundleDocumentTypes отвечает за «Открыть в Paranoia» при работе с
+         документами и медиа из системных приложений. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Документ</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.item</string>
+                <string>public.content</string>
+                <string>public.image</string>
+                <string>public.movie</string>
+                <string>public.audio</string>
+                <string>public.text</string>
+                <string>public.data</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>app.paranoia.client</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>paranoia</string>
+            </array>
+        </dict>
+    </array>
+    <key>UISupportsDocumentBrowser</key>
+    <true/>
 </dict>
 </plist>

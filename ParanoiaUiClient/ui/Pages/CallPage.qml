@@ -1,19 +1,16 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
+import QtQuick.Effects
 import QtMultimedia
 import ParanoiaUiClient
 
 // Страница голосового / видео-звонка.
 //
 // Поддерживает три режима:
-// - mode="outgoing" — отправили Offer, ждём Answer (или peer его сразу принял
-//   и идёт running). Кнопка «Завершить».
+// - mode="outgoing" — отправили Offer, ждём Answer. Кнопка «Завершить».
 // - mode="incoming" — нам прислали Offer; кнопки «Принять/Отклонить».
-// - mode="running"  — звонок установлен; кнопка «Завершить» + камера.
-//
-// Если в сборке есть video (VideoAvailable): фон страницы — удалённое видео,
-// сверху-справа маленькое окошко локального preview, внизу — кнопка камеры.
+// - mode="running"  — звонок установлен; mic mute / camera toggle / camera switch / hangup.
 Rectangle {
     id: root
     objectName: "CallPage"
@@ -31,11 +28,19 @@ Rectangle {
         else if (CallControl.callState === "incoming") mode = "incoming"
     }
 
-    Component.onCompleted: refreshModeFromState()
+    Component.onCompleted: {
+        refreshModeFromState()
+        if (typeof OrientationLock !== "undefined" && OrientationLock) {
+            OrientationLock.lockPortrait()
+        }
+    }
     Component.onDestruction: {
         if (Call) {
             Call.setRemoteVideoOutput(null)
             Call.setLocalVideoOutput(null)
+        }
+        if (typeof OrientationLock !== "undefined" && OrientationLock) {
+            OrientationLock.unlock()
         }
     }
 
@@ -51,14 +56,9 @@ Rectangle {
         function onControllerError(msg) { lastError = msg }
     }
 
-    // Ошибки самого CallEngine (mic/камера/кодек) тоже должны быть видны
-    // пользователю — иначе кнопка «Вкл. камеру» при сбое выглядит как
-    // неработающая.
     Connections {
         target: VoIPAvailable ? Call : null
         function onErrorOccurred(msg) {
-            // Состояние FFI («ffi-state:…») оставляем только в логе — это
-            // диагностика, а не пользовательская ошибка.
             if (typeof msg === "string" && msg.indexOf("ffi-state:") === 0) return
             lastError = msg
         }
@@ -76,37 +76,126 @@ Rectangle {
     VideoOutput {
         id: remoteVideo
         anchors.fill: parent
-        visible: VideoAvailable && mode === "running"
-                 && (CallControl.remoteHasVideo || (Call && Call.remoteVideoActive))
+        // Видимость теперь зависит от РЕАЛЬНОЙ активности видео-кадров
+        // (Call.remoteVideoActive сбрасывается в C++ по таймауту 1.5s без
+        // фреймов), а не только от заявленного remoteHasVideo. Иначе после
+        // выключения камеры peer'ом тут остаётся замёрзший последний кадр.
+        visible: VideoAvailable && mode === "running" && Call && Call.remoteVideoActive
         fillMode: VideoOutput.PreserveAspectCrop
         Component.onCompleted: {
             if (Call) Call.setRemoteVideoOutput(remoteVideo)
         }
     }
 
-    // ── Локальный preview (overlay в углу) ─────────────────────────────
+    // Аватар-заглушка: круг с первой буквой имени собеседника. Показывается
+    // когда удалённого видео нет (камера выключена / не была включена) во
+    // время активного звонка. Цвет — акцент темы (одиночные звонки, групповых
+    // не планируем); позже сюда поедет реальная аватарка.
+    Item {
+        id: remoteAvatarPlaceholder
+        anchors.fill: parent
+        visible: mode === "running" && !(Call && Call.remoteVideoActive)
+
+        readonly property string _displayName: peerName.length > 0 ? peerName : "?"
+        readonly property string _initial: _displayName.length > 0
+                                           ? _displayName.charAt(0).toUpperCase()
+                                           : "?"
+
+        Rectangle {
+            id: avatarCircle
+            anchors.centerIn: parent
+            width: Math.min(parent.width, parent.height) * 0.32
+            height: width
+            radius: width / 2
+            color: Theme.bgButton
+            border.color: Theme.accent
+            border.width: 2
+
+            Label {
+                anchors.centerIn: parent
+                text: remoteAvatarPlaceholder._initial
+                color: Theme.textPrimary
+                font.pixelSize: avatarCircle.width * 0.45
+                font.weight: Font.DemiBold
+            }
+        }
+    }
+
+    // Полупрозрачная подложка под текстом/контролами поверх видео — чтобы
+    // имя/таймер читались на произвольной картинке. Не нужна когда показан
+    // placeholder: там и так контрастный фон.
     Rectangle {
+        id: scrim
+        anchors.fill: parent
+        visible: remoteVideo.visible
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.55) }
+            GradientStop { position: 0.35; color: Qt.rgba(0, 0, 0, 0.0) }
+            GradientStop { position: 0.65; color: Qt.rgba(0, 0, 0, 0.0) }
+            GradientStop { position: 1.0; color: Qt.rgba(0, 0, 0, 0.65) }
+        }
+    }
+
+    // ── Локальный preview (overlay в углу) ─────────────────────────────
+    Item {
         id: localPreviewFrame
         visible: VideoAvailable && mode === "running" && Call && Call.videoActive
-        width: Math.min(parent.width * 0.28, 240)
-        height: width * 9 / 16
-        color: "#000000"
-        radius: 8
-        border.color: Theme.border
-        border.width: 1
+        // Рамка повторяет aspect фактического кадра: при portrait-камере
+        // (телефон вертикально) — 9:16, при landscape — 16:9. Aspect берётся
+        // из Call.localVideoPortrait.
+        readonly property bool _portrait: Call && Call.localVideoPortrait
+        width: _portrait ? Math.min(parent.width * 0.22, 180)
+                         : Math.min(parent.width * 0.32, 280)
+        height: _portrait ? width * 16 / 9 : width * 9 / 16
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.margins: 16
         z: 10
 
+        // VideoOutput сам по себе игнорирует rounded-clip родителя (Qt SG
+        // умеет только прямоугольный hardware-clip). Чтобы скруглить
+        // углы — рендерим в offscreen texture через layer.enabled и потом
+        // накладываем маску (MultiEffect.maskSource) — белый прямоугольник
+        // с тем же radius. Содержимое за пределами маски становится прозрачным.
         VideoOutput {
             id: localPreview
             anchors.fill: parent
-            anchors.margins: 2
-            fillMode: VideoOutput.PreserveAspectCrop
+            fillMode: VideoOutput.PreserveAspectFit
+            layer.enabled: true
+            layer.smooth: true
+            layer.effect: MultiEffect {
+                maskEnabled: true
+                maskSource: localPreviewMask
+                maskThresholdMin: 0.5
+                maskSpreadAtMin: 1.0
+            }
             Component.onCompleted: {
                 if (Call) Call.setLocalVideoOutput(localPreview)
             }
+        }
+
+        // Источник маски — невидимый Rectangle с radius'ом. layer.enabled
+        // превращает его в текстуру, которую MultiEffect.maskSource читает.
+        Item {
+            id: localPreviewMask
+            anchors.fill: parent
+            visible: false
+            layer.enabled: true
+            Rectangle {
+                anchors.fill: parent
+                radius: 12
+                color: "white"
+            }
+        }
+
+        // Бордюр поверх скруглённого видео — отдельным Rectangle, не выкусывая
+        // его маской (бордюру Rectangle.border сам красит rounded корректно).
+        Rectangle {
+            anchors.fill: parent
+            color: "transparent"
+            radius: 12
+            border.color: Theme.border
+            border.width: 1
         }
     }
 
@@ -123,6 +212,21 @@ Rectangle {
             color: remoteVideo.visible ? "white" : Theme.textPrimary
             style: remoteVideo.visible ? Text.Outline : Text.Normal
             styleColor: "black"
+        }
+
+        // Мнемосхема пути звонка под именем абонента. Скрываем когда
+        // активно удалённое видео — там нужна максимальная площадь под кадр.
+        CallPathIndicator {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: 280
+            Layout.preferredHeight: 90
+            visible: VoIPAvailable && !remoteVideo.visible &&
+                     (mode === "outgoing" || mode === "running")
+            txPath:     VoIPAvailable && CallControl ? CallControl.currentPath : 0
+            rxPath:     VoIPAvailable && CallControl ? CallControl.rxPath : 0
+            pathLabel:  VoIPAvailable && CallControl ? CallControl.currentPathLabel : ""
+            turnServer: VoIPAvailable && CallControl ? CallControl.activeTurnServer : ""
+            active:     VoIPAvailable && Call ? Call.mediaReceived : false
         }
 
         Label {
@@ -159,25 +263,105 @@ Rectangle {
         Item { Layout.fillHeight: true }
 
         // ── Опция «с видео» для исходящих ─────────────────────────────
-        CheckBox {
+        // Самописный toggle вместо QtQuick.Controls CheckBox: дефолтный
+        // CheckBox берёт системные цвета и почти не виден на тёмном фоне
+        // (особенно поверх удалённого видео). Здесь — контрастная подложка.
+        Rectangle {
+            id: wantVideoToggle
             Layout.alignment: Qt.AlignHCenter
             visible: VideoAvailable && mode === "outgoing"
-            text: qsTr("С видео")
-            checked: CallControl ? CallControl.wantVideo : false
-            onToggled: { if (CallControl) CallControl.wantVideo = checked }
+            implicitWidth: wantVideoRow.implicitWidth + 24
+            implicitHeight: 40
+            radius: Theme.radiusMd
+            color: Qt.rgba(0, 0, 0, 0.55)
+            border.width: 1
+            border.color: Theme.border
+
+            RowLayout {
+                id: wantVideoRow
+                anchors.centerIn: parent
+                spacing: 10
+
+                Rectangle {
+                    id: checkBox
+                    implicitWidth: 22
+                    implicitHeight: 22
+                    radius: 4
+                    color: CallControl && CallControl.wantVideo ? Theme.accent : "transparent"
+                    border.color: CallControl && CallControl.wantVideo ? Theme.accentHover : Theme.textPrimary
+                    border.width: 2
+
+                    AppIcon {
+                        anchors.centerIn: parent
+                        width: 16; height: 16
+                        name: "check"
+                        iconColor: "white"
+                        strokeWidth: 2.5
+                        visible: CallControl && CallControl.wantVideo
+                    }
+                }
+
+                Label {
+                    text: qsTr("С видео")
+                    color: "white"
+                    font.pixelSize: Theme.fontMd
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (CallControl) CallControl.wantVideo = !CallControl.wantVideo
+            }
         }
 
+        // ── Кнопки управления ─────────────────────────────────────────
         RowLayout {
             Layout.alignment: Qt.AlignHCenter
-            spacing: 16
+            spacing: 18
 
-            ParaButton {
+            // running: микрофон mute
+            CallControlButton {
+                visible: mode === "running" && Call !== null
+                // Конвенция как в Telegram/WhatsApp: иконка показывает ДЕЙСТВИЕ
+                // (что произойдёт при нажатии), а не текущее состояние. То есть
+                // микрофон работает → видим перечёркнутую иконку («нажми чтобы
+                // замьютить»); микрофон замьючен → видим обычную («нажми чтобы
+                // включить»). Это интуитивнее: иконка отвечает на вопрос «что
+                // станет», а не «что сейчас».
+                iconName: Call && Call.micMuted ? "mic" : "micOff"
+                tone: Call && Call.micMuted ? "warning" : "neutral"
+                tooltip: Call && Call.micMuted ? qsTr("Включить микрофон") : qsTr("Выключить микрофон")
+                onClicked: if (Call) Call.setMicMuted(!Call.micMuted)
+            }
+
+            // running: камера on/off — та же конвенция (см. комментарий выше).
+            CallControlButton {
+                visible: VideoAvailable && mode === "running"
+                iconName: Call && Call.videoActive ? "videoOff" : "video"
+                tone: Call && Call.videoActive ? "neutral" : "warning"
+                tooltip: Call && Call.videoActive ? qsTr("Выключить камеру") : qsTr("Включить камеру")
+                onClicked: CallControl.toggleVideo(!(Call && Call.videoActive))
+            }
+
+            // running: переключение камер
+            CallControlButton {
+                visible: VideoAvailable && mode === "running" && Call && Call.videoActive
+                         && Call.hasMultipleCameras()
+                iconName: "cameraSwitch"
+                tone: "neutral"
+                tooltip: qsTr("Сменить камеру")
+                onClicked: if (Call) Call.switchCamera()
+            }
+
+            // incoming: принять
+            CallControlButton {
                 visible: mode === "incoming"
-                implicitWidth: 100
-                text: qsTr("Принять")
+                iconName: "phone"
+                tone: "accept"
+                tooltip: qsTr("Принять")
                 onClicked: {
                     lastError = ""
-                    // При входящем с видео — авто-включаем камеру у себя.
                     if (CallControl.remoteHasVideo && VideoAvailable) {
                         CallControl.wantVideo = true
                     }
@@ -186,24 +370,73 @@ Rectangle {
                     }
                 }
             }
-            ParaButton {
-                implicitWidth: 100
-                visible: mode === "incoming"
-                text: qsTr("Отклонить")
-                onClicked: CallControl.rejectIncomingCall("user_rejected")
+
+            // incoming: отклонить, outgoing/running: завершить
+            CallControlButton {
+                visible: mode === "incoming" || mode === "outgoing" || mode === "running"
+                iconName: "phoneHangup"
+                tone: "hangup"
+                tooltip: mode === "incoming" ? qsTr("Отклонить") : qsTr("Завершить")
+                onClicked: {
+                    if (mode === "incoming") {
+                        CallControl.rejectIncomingCall("user_rejected")
+                    } else {
+                        CallControl.hangupCall("user_hangup")
+                    }
+                }
             }
-            ParaButton {
-                implicitWidth: 100
-                visible: VideoAvailable && mode === "running"
-                text: Call && Call.videoActive ? qsTr("Выкл. камеру") : qsTr("Вкл. камеру")
-                onClicked: CallControl.toggleVideo(!(Call && Call.videoActive))
-            }
-            ParaButton {
-                implicitWidth: 100
-                visible: mode === "outgoing" || mode === "running"
-                text: qsTr("Завершить")
-                onClicked: CallControl.hangupCall("user_hangup")
-            }
+        }
+    }
+
+    // Компактная кнопка управления звонком: круг с иконкой.
+    component CallControlButton: Rectangle {
+        id: btn
+        property string iconName: ""
+        property string tone: "neutral"  // neutral / accept / hangup / warning
+        property string tooltip: ""
+
+        signal clicked()
+
+        implicitWidth: 64
+        implicitHeight: 64
+        radius: width / 2
+
+        property bool _isHovered: btnArea.containsMouse
+        property bool _isPressed: btnArea.pressed
+
+        color: {
+            const baseAlpha = _isPressed ? 0.85 : 0.7
+            if (tone === "accept")  return Qt.rgba(0.10, 0.65, 0.30, baseAlpha)
+            if (tone === "hangup")  return Qt.rgba(0.80, 0.10, 0.13, baseAlpha)
+            if (tone === "warning") return Qt.rgba(0.95, 0.55, 0.10, baseAlpha)
+            return _isHovered ? Qt.rgba(1, 1, 1, 0.28) : Qt.rgba(0, 0, 0, 0.45)
+        }
+        border.width: 1
+        border.color: tone === "neutral" ? Theme.border : "transparent"
+        scale: _isPressed ? 0.94 : 1.0
+
+        Behavior on color { ColorAnimation { duration: 110 } }
+        Behavior on scale { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+
+        AppIcon {
+            anchors.centerIn: parent
+            width: 28
+            height: 28
+            name: iconName
+            iconColor: "white"
+            fillColor: btn.color
+            strokeWidth: 2
+        }
+
+        MouseArea {
+            id: btnArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: btn.clicked()
+            ToolTip.visible: btn._isHovered && btn.tooltip.length > 0
+            ToolTip.text: btn.tooltip
+            ToolTip.delay: 600
         }
     }
 }

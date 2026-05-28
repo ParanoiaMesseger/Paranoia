@@ -212,7 +212,6 @@ build_one_abi() {
             --disable-autodetect
             --disable-avdevice
             --disable-avformat
-            --disable-avfilter
             --disable-swresample
             --disable-postproc
             --disable-network
@@ -220,6 +219,24 @@ build_one_abi() {
             --enable-avcodec
             --enable-avutil
             --enable-swscale
+            --enable-avfilter
+            # Минимальный набор фильтров для видео-pipeline'а звонков:
+            #   buffer/buffersink — вход/выход графа
+            #   transpose         — повороты 90°/270°
+            #   vflip/hflip       — флипы (для mirrored-камеры)
+            #   scale             — масштабирование
+            #   format            — преобразование пиксельных форматов (NV12/NV21 → YUV420P)
+            #   pad               — letterbox чёрными полосами при не-совпадении aspect ratio
+            #   null              — обязателен для linking филтр-graph'а
+            --enable-filter=buffer
+            --enable-filter=buffersink
+            --enable-filter=transpose
+            --enable-filter=vflip
+            --enable-filter=hflip
+            --enable-filter=scale
+            --enable-filter=format
+            --enable-filter=pad
+            --enable-filter=null
             --enable-decoder=h264
             --enable-parser=h264
             --extra-cflags="$extra_cflags"
@@ -249,7 +266,9 @@ build_one_abi() {
     if [ ! -f "$prefix/lib/libavcodec.a" ] \
        || [ ! -f "$prefix/lib/libavutil.a" ] \
        || [ ! -f "$prefix/lib/libswscale.a" ] \
-       || [ ! -f "$prefix/include/libavcodec/avcodec.h" ]; then
+       || [ ! -f "$prefix/lib/libavfilter.a" ] \
+       || [ ! -f "$prefix/include/libavcodec/avcodec.h" ] \
+       || [ ! -f "$prefix/include/libavfilter/avfilter.h" ]; then
         echo "ERROR: FFmpeg install for $abi did not produce expected files" >&2
         exit 1
     fi

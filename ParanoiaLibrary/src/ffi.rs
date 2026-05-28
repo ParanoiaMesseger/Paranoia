@@ -378,6 +378,46 @@ pub extern "C" fn paranoia_send_text_json_keyring(
     })
 }
 
+/// Отправить текстовый ответ на сообщение с локальным keyring JSON.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_text_reply_json_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    text: *const c_char,
+    reply_to_id: *const c_char,
+    reply_sender: *const c_char,
+    reply_text: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("send_error", || {
+        clear_last_error();
+        let text = ffi_try!(cstr_arg(text), invalid_argument_ptr());
+        let reply_to_id = ffi_try!(cstr_arg(reply_to_id), invalid_argument_ptr());
+        let reply_sender = ffi_try!(cstr_arg(reply_sender), invalid_argument_ptr());
+        let reply_text = ffi_try!(cstr_arg(reply_text), invalid_argument_ptr());
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.send_text_reply(
+                text,
+                reply_to_id,
+                reply_sender,
+                reply_text,
+            )) {
+                Ok(msg) => message_to_c_string(&msg),
+                Err(e) => {
+                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
 /// Отправить реакцию на сообщение с локальным keyring JSON.
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_send_reaction_json_keyring(
@@ -420,6 +460,43 @@ pub extern "C" fn paranoia_send_file_json_keyring(
     file_path: *const c_char,
     mime_type: *const c_char,
 ) -> *mut c_char {
+    paranoia_send_file_json_keyring_with_progress(
+        handle,
+        user_a,
+        user_b,
+        keyring_json,
+        file_path,
+        mime_type,
+        None,
+        std::ptr::null_mut(),
+    )
+}
+
+/// Тип callback'а для прогресса отправки файла. chunk_index — индекс уже
+/// отосланного chunk'а (1-based), total — общее число chunk'ов. user_data —
+/// opaque-указатель, переданный вызывающей стороной (например, id transfer'а
+/// или this-pointer).
+pub type ProgressCallback =
+    extern "C" fn(chunk_index: u32, total: u32, user_data: *mut std::ffi::c_void);
+
+/// То же, что paranoia_send_file_json_keyring, но дополнительно дёргает
+/// `progress` (если задан) после успешной отправки каждого chunk'а. callback
+/// гарантированно вызывается из runtime-потока FFI; вызывающая сторона должна
+/// маршалить результат обратно в свой UI-thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_file_json_keyring_with_progress(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    file_path: *const c_char,
+    mime_type: *const c_char,
+    progress: Option<ProgressCallback>,
+    user_data: *mut std::ffi::c_void,
+) -> *mut c_char {
+    // user_data приходит как *mut c_void, но захватывать его в FnMut напрямую
+    // не получается (raw-указатели не Send). Пакуем в usize.
+    let user_data_addr = user_data as usize;
     ffi_catch_ptr("send_error", || {
         clear_last_error();
         let path = ffi_try!(cstr_arg(file_path), invalid_argument_ptr());
@@ -435,16 +512,23 @@ pub extern "C" fn paranoia_send_file_json_keyring(
             mime_type
         };
 
+        let on_progress = move |chunk_index: u32, total: u32| {
+            if let Some(cb) = progress {
+                cb(chunk_index, total, user_data_addr as *mut std::ffi::c_void);
+            }
+        };
+
         with_keyring_dialogue(
             handle,
             user_a,
             user_b,
             keyring_json,
             std::ptr::null_mut(),
-            |h, dialogue| match h.rt.block_on(dialogue.send_file_path(
+            |h, dialogue| match h.rt.block_on(dialogue.send_file_path_with_progress(
                 filename,
                 mime_type,
                 std::path::Path::new(&path),
+                on_progress,
             )) {
                 Ok(msgs) => messages_to_c_string(&msgs),
                 Err(e) => {
@@ -666,31 +750,67 @@ pub extern "C" fn paranoia_save_attachment_keyring(
 
 /// Сохранить вложение во внутренний cache приложения и вернуть локальный путь.
 #[unsafe(no_mangle)]
-pub extern "C" fn paranoia_cache_attachment_keyring(
+pub extern "C" fn paranoia_cache_attachment_bytes_keyring(
     handle: *mut ParanoiaHandle,
     user_a: *const c_char,
     user_b: *const c_char,
     keyring_json: *const c_char,
     message_id: *const c_char,
-) -> *mut c_char {
-    ffi_catch_ptr("attachment_error", || {
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    ffi_catch_i32("attachment_error", || {
         clear_last_error();
-        let message_id = ffi_try!(cstr_arg(message_id), invalid_argument_ptr());
+        if out_ptr.is_null() || out_len.is_null() {
+            return invalid_argument_i32();
+        }
+        unsafe {
+            *out_ptr = std::ptr::null_mut();
+            *out_len = 0;
+        }
+        let message_id = ffi_try!(cstr_arg(message_id), invalid_argument_i32());
         with_keyring_dialogue(
             handle,
             user_a,
             user_b,
             keyring_json,
-            std::ptr::null_mut(),
-            |h, dialogue| match h.rt.block_on(dialogue.cache_attachment(&message_id)) {
-                Ok(path) => string_to_c(path),
+            -1,
+            |h, dialogue| match h.rt.block_on(dialogue.cache_attachment_bytes(&message_id)) {
+                Ok(bytes) => {
+                    // Vec<u8> → Box<[u8]>: into_boxed_slice гарантирует cap == len.
+                    // Освобождать через paranoia_free_buffer (Box::from_raw).
+                    let boxed: Box<[u8]> = bytes.into_boxed_slice();
+                    let len = boxed.len();
+                    let raw: *mut [u8] = Box::into_raw(boxed);
+                    let ptr = raw as *mut u8;
+                    unsafe {
+                        *out_ptr = ptr;
+                        *out_len = len;
+                    }
+                    0
+                }
                 Err(e) => {
                     set_last_error(&anyhow_error_chain(&e));
-                    std::ptr::null_mut()
+                    -1
                 }
             },
         )
     })
+}
+
+/// Освободить буфер, возвращённый из FFI (например, через
+/// paranoia_cache_attachment_bytes_keyring). Безопасно при ptr == NULL.
+/// len ОБЯЗАН совпадать с тем, что было возвращено в out_len.
+/// Реконструируем Box<[u8]> — cap == len гарантирован (в отличие от Vec).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_free_buffer(ptr: *mut u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    unsafe {
+        let slice: *mut [u8] = std::slice::from_raw_parts_mut(ptr, len);
+        let _ = Box::from_raw(slice);
+    }
 }
 
 /// Удалить серверную историю диалога до cut_seq включительно при keyring-конфигурации.
@@ -719,6 +839,83 @@ pub extern "C" fn paranoia_determinate_keyring(
                     ));
                     -1
                 }
+            },
+        )
+    })
+}
+
+/// Удалить пакеты на сервере в диапазоне `[from_seq, to_seq]` (включительно).
+/// `from_seq == 0` означает «с начала диалога».
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_remove_server_range_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    from_seq: u64,
+    to_seq: u64,
+) -> i32 {
+    ffi_catch_i32("determinate_error", || {
+        clear_last_error();
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| match h
+                .rt
+                .block_on(dialogue.remove_server_range(from_seq, to_seq))
+            {
+                Ok(_) => 0,
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "determinate_error",
+                    ));
+                    -1
+                }
+            },
+        )
+    })
+}
+
+/// Удалить пакеты диалога в диапазоне `[from_seq, to_seq]` (включительно)
+/// одновременно на сервере и в локальной БД. `from_seq == 0` означает «с
+/// начала диалога».
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_delete_dialogue_range_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    from_seq: u64,
+    to_seq: u64,
+) -> i32 {
+    ffi_catch_i32("determinate_error", || {
+        clear_last_error();
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| {
+                if let Err(e) = h
+                    .rt
+                    .block_on(dialogue.remove_server_range(from_seq, to_seq))
+                {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "determinate_error",
+                    ));
+                    return -1;
+                }
+                if let Err(e) = dialogue.delete_local_range(from_seq, to_seq) {
+                    set_last_error(&anyhow_error_chain(&e));
+                    return -1;
+                }
+                0
             },
         )
     })
@@ -1269,10 +1466,18 @@ fn message_to_json(m: &Message) -> serde_json::Value {
         MessageContent::Text(text) => {
             obj.insert("kind".into(), serde_json::json!("text"));
             obj.insert("text".into(), serde_json::json!(text));
-            obj.insert(
-                "content".into(),
-                serde_json::json!(format!("Text({text:?})")),
-            );
+        }
+        MessageContent::TextReply {
+            text,
+            reply_to_id,
+            reply_sender,
+            reply_text,
+        } => {
+            obj.insert("kind".into(), serde_json::json!("text"));
+            obj.insert("text".into(), serde_json::json!(text));
+            obj.insert("reply_to_id".into(), serde_json::json!(reply_to_id));
+            obj.insert("reply_sender".into(), serde_json::json!(reply_sender));
+            obj.insert("reply_text".into(), serde_json::json!(reply_text));
         }
         MessageContent::File(file) | MessageContent::Image(file) | MessageContent::Voice(file) => {
             let kind = match &m.content {
@@ -1302,7 +1507,6 @@ fn message_to_json(m: &Message) -> serde_json::Value {
                 serde_json::json!(file.body_from_seq),
             );
             obj.insert("body_to_seq".into(), serde_json::json!(file.body_to_seq));
-            obj.insert("content".into(), serde_json::json!("File(...)"));
         }
         MessageContent::FileHeader {
             filename,
@@ -1312,7 +1516,6 @@ fn message_to_json(m: &Message) -> serde_json::Value {
             obj.insert("kind".into(), serde_json::json!("file_header"));
             obj.insert("filename".into(), serde_json::json!(filename));
             obj.insert("size".into(), serde_json::json!(total_size));
-            obj.insert("content".into(), serde_json::json!("FileHeader(...)"));
         }
         MessageContent::FileChunk {
             filename,
@@ -1322,22 +1525,17 @@ fn message_to_json(m: &Message) -> serde_json::Value {
             obj.insert("kind".into(), serde_json::json!("file_chunk"));
             obj.insert("filename".into(), serde_json::json!(filename));
             obj.insert("size".into(), serde_json::json!(total_size));
-            obj.insert("content".into(), serde_json::json!("FileChunk(...)"));
         }
         MessageContent::ReadReceipt { .. } => {
             obj.insert("kind".into(), serde_json::json!("read_receipt"));
-            obj.insert("content".into(), serde_json::json!("ReadReceipt(...)"));
         }
         MessageContent::Delete { .. } => {
             obj.insert("kind".into(), serde_json::json!("delete"));
-            obj.insert("content".into(), serde_json::json!("Delete(...)"));
         }
         MessageContent::Reaction { target_id, emoji } => {
             obj.insert("kind".into(), serde_json::json!("reaction"));
             obj.insert("target_id".into(), serde_json::json!(target_id));
             obj.insert("emoji".into(), serde_json::json!(emoji));
-            obj.insert("text".into(), serde_json::json!(emoji));
-            obj.insert("content".into(), serde_json::json!("Reaction(...)"));
         }
     }
 
@@ -1351,4 +1549,368 @@ fn message_status_label(status: &MessageStatus) -> &'static str {
         MessageStatus::Read => "read",
         MessageStatus::Failed => "failed",
     }
+}
+
+// ── Local Vault (LocalStorageEncryptionPolicy.md) ────────────────────────────
+
+/// Установить корень app data, в котором хранится `vault.json` и весь профильный
+/// контент. Вызывать на старте приложения ДО любых других vault-функций.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_init(app_data_root: *const c_char) -> i32 {
+    ffi_catch_i32("vault_init_error", || {
+        clear_last_error();
+        let root = ffi_try!(cstr_arg(app_data_root), invalid_argument_i32());
+        crate::local_vault::vault::set_app_data_root(std::path::PathBuf::from(root));
+        // Прерванный rekey оставляет .rekey-staging/ — восстанавливаем
+        // ДО любых попыток разблокировать vault. Если recovery упадёт —
+        // ловим, но не разваливаем init (UI всё равно покажет SetPin / Unlock,
+        // а сама ошибка попадёт в last_error для логов).
+        if let Err(e) = crate::local_vault::recover_pending_rekey() {
+            set_last_error(&format!("vault_recover_pending_rekey: {e}"));
+        }
+        0
+    })
+}
+
+/// Узнать состояние vault: 0=not_initialized, 1=locked, 2=unlocked, -1=ошибка.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_status() -> i32 {
+    ffi_catch_i32("vault_status_error", || {
+        clear_last_error();
+        match crate::local_vault::status() {
+            Ok(s) => s as i32,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Установить PIN впервые. 0=ok, 1=already_initialized, -1=internal.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_set_pin(pin: *const c_char) -> i32 {
+    ffi_catch_i32("vault_set_pin_error", || {
+        clear_last_error();
+        let pin = ffi_try!(cstr_arg(pin), invalid_argument_i32());
+        match crate::local_vault::set_pin(&pin) {
+            Ok(()) => 0,
+            Err(e) => {
+                let msg = anyhow_error_chain(&e);
+                set_last_error(&msg);
+                if msg.contains("already initialized") {
+                    1
+                } else {
+                    -1
+                }
+            }
+        }
+    })
+}
+
+/// Разблокировать. Коды: 0=ok, 1=wrong_pin, 2=locked_out, 3=not_initialized, -1=internal.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_unlock(pin: *const c_char) -> i32 {
+    ffi_catch_i32("vault_unlock_error", || {
+        clear_last_error();
+        let pin = ffi_try!(cstr_arg(pin), invalid_argument_i32());
+        match crate::local_vault::unlock(&pin) {
+            Ok(()) => 0,
+            Err(e) => {
+                let msg = anyhow_error_chain(&e);
+                set_last_error(&msg);
+                if msg.contains("wrong_pin") {
+                    1
+                } else if msg.contains("locked_out") {
+                    2
+                } else if msg.contains("not_initialized") {
+                    3
+                } else {
+                    -1
+                }
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_lock() -> i32 {
+    ffi_catch_i32("vault_lock_error", || {
+        clear_last_error();
+        crate::local_vault::lock();
+        0
+    })
+}
+
+/// Проверить PIN без замены активных ключей. 0=ok, 1=wrong_pin, 3=not_init, -1=internal.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_verify_pin(pin: *const c_char) -> i32 {
+    ffi_catch_i32("vault_verify_pin_error", || {
+        clear_last_error();
+        let pin = ffi_try!(cstr_arg(pin), invalid_argument_i32());
+        match crate::local_vault::verify_pin(&pin) {
+            Ok(()) => 0,
+            Err(e) => {
+                let msg = anyhow_error_chain(&e);
+                set_last_error(&msg);
+                if msg.contains("wrong_pin") {
+                    1
+                } else if msg.contains("not_initialized") {
+                    3
+                } else {
+                    -1
+                }
+            }
+        }
+    })
+}
+
+/// Шаг 1 rekey: подготовить новые ключи. Vault остаётся unlocked со старыми.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_rekey_begin(new_pin: *const c_char) -> i32 {
+    ffi_catch_i32("vault_rekey_begin_error", || {
+        clear_last_error();
+        let pin = ffi_try!(cstr_arg(new_pin), invalid_argument_i32());
+        match crate::local_vault::rekey_begin(&pin) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Шаг 2 rekey: перешифровать один JSON-файл (decrypt активным, encrypt pending).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_rekey_file(path: *const c_char) -> i32 {
+    ffi_catch_i32("vault_rekey_file_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(path), invalid_argument_i32());
+        match crate::local_vault::rekey_file(std::path::Path::new(&path)) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Шаг 2 rekey (attachment): decrypt активным per-file key, encrypt pending.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_rekey_attachment(
+    salt_str: *const c_char,
+    path: *const c_char,
+) -> i32 {
+    ffi_catch_i32("vault_rekey_attachment_error", || {
+        clear_last_error();
+        let salt = ffi_try!(cstr_arg(salt_str), invalid_argument_i32());
+        let path = ffi_try!(cstr_arg(path), invalid_argument_i32());
+        match crate::local_vault::rekey_attachment(salt.as_bytes(), std::path::Path::new(&path)) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Шаг 2 rekey (БД): SQLCipher PRAGMA rekey со старого db_key на pending.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_rekey_db(db_path: *const c_char) -> i32 {
+    ffi_catch_i32("vault_rekey_db_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(db_path), invalid_argument_i32());
+        match crate::local_vault::rekey_db(std::path::Path::new(&path)) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Шаг 3 rekey: записать новый VaultState и свапнуть активные ключи на pending.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_rekey_commit() -> i32 {
+    ffi_catch_i32("vault_rekey_commit_error", || {
+        clear_last_error();
+        match crate::local_vault::rekey_commit() {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Откатить незавершённый rekey: освободить pending-ключи. Уже
+/// перешифрованные файлы/БД не откатываются.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_rekey_abort() -> i32 {
+    ffi_catch_i32("vault_rekey_abort_error", || {
+        clear_last_error();
+        crate::local_vault::rekey_abort();
+        0
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_lockout_seconds(out_secs: *mut u64) -> i32 {
+    ffi_catch_i32("vault_lockout_error", || {
+        clear_last_error();
+        if out_secs.is_null() {
+            return invalid_argument_i32();
+        }
+        match crate::local_vault::lockout_remaining_secs() {
+            Ok(secs) => {
+                unsafe { *out_secs = secs };
+                0
+            }
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Зашифровать `data` (len байт) json_key'ом и атомарно записать в `path`.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_encrypt_json(
+    path: *const c_char,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    ffi_catch_i32("vault_encrypt_json_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(path), invalid_argument_i32());
+        if data.is_null() && len != 0 {
+            return invalid_argument_i32();
+        }
+        let slice = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len) }
+        };
+        match crate::local_vault::encrypt_json_to_disk(std::path::Path::new(&path), slice) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Прочитать зашифрованный файл и вернуть расшифрованный JSON как C-string
+/// (UTF-8, без \0 в payload'е). Освободить через `paranoia_free_string`.
+/// NULL при ошибке.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_decrypt_json(path: *const c_char) -> *mut c_char {
+    ffi_catch_ptr("vault_decrypt_json_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(path), invalid_argument_ptr());
+        match crate::local_vault::decrypt_json_from_disk(std::path::Path::new(&path)) {
+            Ok(bytes) => match CString::new(bytes) {
+                Ok(c) => c.into_raw(),
+                Err(_) => {
+                    set_last_error("vault_decrypt_json: nul byte in payload");
+                    std::ptr::null_mut()
+                }
+            },
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Зашифровать файл-attachment на per-file ключе HKDF(files_key, salt_str, "attachment-v1").
+/// Читает `src_path`, пишет результат атомарно в `dst_path`.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_encrypt_attachment(
+    salt_str: *const c_char,
+    src_path: *const c_char,
+    dst_path: *const c_char,
+) -> i32 {
+    ffi_catch_i32("vault_attach_encrypt_error", || {
+        clear_last_error();
+        let salt = ffi_try!(cstr_arg(salt_str), invalid_argument_i32());
+        let src = ffi_try!(cstr_arg(src_path), invalid_argument_i32());
+        let dst = ffi_try!(cstr_arg(dst_path), invalid_argument_i32());
+        let plaintext = match std::fs::read(&src) {
+            Ok(b) => b,
+            Err(e) => {
+                set_last_error(&format!("read {src}: {e}"));
+                return -1;
+            }
+        };
+        match crate::local_vault::encrypt_attachment(salt.as_bytes(), &plaintext) {
+            Ok(sealed) => {
+                if let Err(e) = atomic_write_bytes(&dst, &sealed) {
+                    set_last_error(&anyhow_error_chain(&e));
+                    return -1;
+                }
+                0
+            }
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_decrypt_attachment(
+    salt_str: *const c_char,
+    src_path: *const c_char,
+    dst_path: *const c_char,
+) -> i32 {
+    ffi_catch_i32("vault_attach_decrypt_error", || {
+        clear_last_error();
+        let salt = ffi_try!(cstr_arg(salt_str), invalid_argument_i32());
+        let src = ffi_try!(cstr_arg(src_path), invalid_argument_i32());
+        let dst = ffi_try!(cstr_arg(dst_path), invalid_argument_i32());
+        let sealed = match std::fs::read(&src) {
+            Ok(b) => b,
+            Err(e) => {
+                set_last_error(&format!("read {src}: {e}"));
+                return -1;
+            }
+        };
+        match crate::local_vault::decrypt_attachment(salt.as_bytes(), &sealed) {
+            Ok(plaintext) => {
+                if let Err(e) = atomic_write_bytes(&dst, &plaintext) {
+                    set_last_error(&anyhow_error_chain(&e));
+                    return -1;
+                }
+                0
+            }
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+fn atomic_write_bytes(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = match p.file_name() {
+        Some(name) => p.with_file_name(format!("{}.tmp", name.to_string_lossy())),
+        None => anyhow::bail!("invalid path: {path}"),
+    };
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, p)?;
+    Ok(())
 }

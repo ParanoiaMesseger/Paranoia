@@ -4,14 +4,25 @@ import ParanoiaUiClient
 
 Rectangle {
     id: root
-    width: 420
-    height: 780
+    implicitWidth: 420
+    implicitHeight: 780
+    width: parent ? parent.width : implicitWidth
+    height: parent ? parent.height : implicitHeight
     color: Theme.bgPrimary
 
     property string pin: ""
     property bool showBack: false
+    /// Заголовок страницы — переопределяется, например, при reuse в ChangePin.
+    property string title: "Установите PIN-код"
+    /// Показывать панель с уровнем защищённости (комбинации/энтропия/время взлома).
+    /// При confirm-шаге или при вводе старого PIN'а — скрываем.
+    property bool showStrength: true
+    /// Опциональное предупреждение/ошибка над клавиатурой (например,
+    /// «PIN'ы не совпадают» в подтверждении ChangePin).
+    property string banner: ""
     readonly property int maxDigits: 20
     readonly property int minDigits: 4
+    readonly property int contentMargin: Math.min(24, Math.max(14, Math.round(width * 0.05)))
 
     readonly property double combinations: pin.length > 0 ? Math.pow(10, pin.length) : 0
     readonly property double entropy: pin.length * 3.32
@@ -118,7 +129,6 @@ Rectangle {
             return
 
         root.accepted(pin)
-        console.log("PIN confirmed, length:", pin.length)
     }
 
     function fmtTime(secs) {
@@ -150,7 +160,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Установите PIN-код"
+            title: root.title
             showBack: root.showBack
             onBackClicked: root.back()
         }
@@ -168,7 +178,7 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
-                anchors.margins: 24
+                anchors.margins: root.contentMargin
                 spacing: 18
 
                 ParaInput {
@@ -205,6 +215,7 @@ Rectangle {
 
                 Rectangle {
                     Layout.fillWidth: true
+                    visible: root.showStrength
                     color: Theme.bgCard
                     border.color: Theme.border
                     border.width: 1
@@ -393,7 +404,7 @@ Rectangle {
                     spacing: 10
 
                     Repeater {
-                        model: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "⌫"]
+                        model: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "backspace"]
 
                         Rectangle {
                             id: keypadButton
@@ -412,10 +423,21 @@ Rectangle {
                             Text {
                                 anchors.centerIn: parent
                                 text: keypadButton.modelData
-                                color: keypadButton.modelData === "⌫" ? Theme.textSecondary : Theme.textPrimary
+                                visible: keypadButton.modelData !== "backspace"
+                                color: Theme.textPrimary
                                 font.family: Theme.fontFamily
-                                font.pixelSize: keypadButton.modelData === "⌫" ? 18 : 22
+                                font.pixelSize: 22
                                 font.weight: Font.Medium
+                            }
+
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 22
+                                height: 22
+                                visible: keypadButton.modelData === "backspace"
+                                name: "backspace"
+                                iconColor: Theme.textSecondary
+                                strokeWidth: 1.8
                             }
 
                             MouseArea {
@@ -423,10 +445,22 @@ Rectangle {
                                 anchors.fill: parent
                                 enabled: keypadButton.modelData !== ""
                                 cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: keypadButton.modelData === "⌫" ? root.removeDigit() : root.appendDigit(keypadButton.modelData)
+                                onClicked: keypadButton.modelData === "backspace" ? root.removeDigit() : root.appendDigit(keypadButton.modelData)
                             }
                         }
                     }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.banner.length > 0
+                    text: root.banner
+                    color: Theme.error
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSm
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
                 }
 
                 ParaButton {

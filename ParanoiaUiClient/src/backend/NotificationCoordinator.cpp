@@ -24,6 +24,9 @@ NotificationCoordinator::NotificationCoordinator(QObject *parent) : QObject(pare
 {
     m_applicationActive.store(QGuiApplication::applicationState() == Qt::ApplicationActive, std::memory_order_relaxed);
     PlatformNotifications::setApplicationForeground(applicationIsActive());
+    // applicationStateChanged не выстреливает «впервые» — если стартовали уже
+    // в Active, обязательно скидываем накопленные за прошлые сессии карточки.
+    if (applicationIsActive()) PlatformNotifications::clearAccumulatedNotifications();
     m_pollTimer.setSingleShot(true);
     connect(&m_pollTimer, &QTimer::timeout, this, &NotificationCoordinator::onPollTimer);
     connect(qApp, &QGuiApplication::applicationStateChanged, this, &NotificationCoordinator::onApplicationStateChanged);
@@ -186,7 +189,18 @@ void NotificationCoordinator::onApplicationStateChanged(Qt::ApplicationState sta
     m_applicationActive.store(state == Qt::ApplicationActive, std::memory_order_relaxed);
     PlatformNotifications::setApplicationForeground(applicationIsActive());
     m_notifyRetryCount = 0;
-    if (state != Qt::ApplicationActive) {
+    if (state == Qt::ApplicationActive) {
+        // При любом выходе на передний план — даже если приложение открыто иконкой,
+        // а не тапом по уведомлению, — карточки в шторке теряют смысл и должны
+        // исчезнуть. Так же сбрасываем «локально‑полученные» счётчики, иначе
+        // следующий фоновый poll вернёт ту же сумму и баннер всплывёт снова.
+        PlatformNotifications::clearAccumulatedNotifications();
+        emit notificationsCleared();
+        const bool hadPending = !m_notifiedPendingByPeer.isEmpty() || !m_locallyReceivedPendingByPeer.isEmpty();
+        m_notifiedPendingByPeer.clear();
+        m_locallyReceivedPendingByPeer.clear();
+        if (setNotificationHint({}, {}) || hadPending) emit dialogsChanged();
+    } else {
         quint64 total = 0;
         for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it)
             total += it.value();

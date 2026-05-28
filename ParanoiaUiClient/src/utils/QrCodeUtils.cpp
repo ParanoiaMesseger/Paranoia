@@ -44,8 +44,7 @@ QString QrCodeUtils::pngDataUrl(const QString &payload, int size)
 
 QVariantMap QrCodeUtils::decodeFromImage(const QString &filePath)
 {
-    QString path = filePath.trimmed();
-    if (path.startsWith(QStringLiteral("file://"))) path = QUrl(path).toLocalFile();
+    const QString path = Utils::normalizeLocalFilePath(filePath);
     if (path.isEmpty()) return ParanoiaFFI::errorResult("Не указан файл изображения с QR-кодом.");
 
     const QImage image(path);

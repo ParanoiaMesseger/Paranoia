@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.6 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.8 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -172,7 +172,9 @@ set(PARANOIA_HAS_FFMPEG 0)
 set(PARANOIA_FFMPEG_TARGETS "")
 
 function(_paranoia_try_prebuilt_ffmpeg root_dir tag)
-    set(_libs avcodec avutil swscale)
+    # avfilter добавлен для нашего pipeline'а (transpose/scale/format/pad);
+    # порядок важен для линковки: avfilter зависит от swscale/avutil/avcodec.
+    set(_libs avfilter swscale avcodec avutil)
     set(_all_found TRUE)
 
     foreach(_lib ${_libs})
@@ -182,6 +184,9 @@ function(_paranoia_try_prebuilt_ffmpeg root_dir tag)
     endforeach()
 
     if(NOT EXISTS "${root_dir}/include/libavcodec/avcodec.h")
+        set(_all_found FALSE)
+    endif()
+    if(NOT EXISTS "${root_dir}/include/libavfilter/avfilter.h")
         set(_all_found FALSE)
     endif()
 
@@ -240,17 +245,18 @@ elseif(PARANOIA_IS_IOS)
         "${CMAKE_CURRENT_SOURCE_DIR}/deps/ffmpeg/${_paranoia_ios_arch}"
         "${_paranoia_ios_prefix}")
 else()
-    find_package(FFMPEG COMPONENTS avcodec avutil swscale QUIET)
+    find_package(FFMPEG COMPONENTS avcodec avutil avfilter swscale QUIET)
 
     # FFMPEG_FOUND ещё не гарантирует, что созданы imported targets — в Qt6.10
     # /Homebrew окружении на macOS FindFFMPEG.cmake часто рапортует FOUND по
     # найденным .dylib, но FFMPEG::avcodec/avutil/swscale не регистрирует.
     # Без явного TARGET-чека дальше уйдём в target_link_libraries с несуществующим
-    # таргетом и упадём (gitlab job 2951). Проверяем все три — иначе откатываемся
+    # таргетом и упадём (gitlab job 2951). Проверяем все четыре — иначе откатываемся
     # на pkg-config fallback ниже.
-    if(FFMPEG_FOUND AND TARGET FFMPEG::avcodec AND TARGET FFMPEG::avutil AND TARGET FFMPEG::swscale)
+    if(FFMPEG_FOUND AND TARGET FFMPEG::avcodec AND TARGET FFMPEG::avutil
+            AND TARGET FFMPEG::avfilter AND TARGET FFMPEG::swscale)
         set(PARANOIA_HAS_FFMPEG 1)
-        set(PARANOIA_FFMPEG_TARGETS FFMPEG::avcodec FFMPEG::avutil FFMPEG::swscale)
+        set(PARANOIA_FFMPEG_TARGETS FFMPEG::avfilter FFMPEG::swscale FFMPEG::avcodec FFMPEG::avutil)
     endif()
 
     find_package(PkgConfig QUIET)
@@ -259,11 +265,12 @@ else()
         pkg_check_modules(LIBAVCODEC QUIET IMPORTED_TARGET libavcodec)
         pkg_check_modules(LIBAVUTIL QUIET IMPORTED_TARGET libavutil)
         pkg_check_modules(LIBSWSCALE QUIET IMPORTED_TARGET libswscale)
+        pkg_check_modules(LIBAVFILTER QUIET IMPORTED_TARGET libavfilter)
 
-        if(LIBAVCODEC_FOUND AND LIBAVUTIL_FOUND AND LIBSWSCALE_FOUND)
+        if(LIBAVCODEC_FOUND AND LIBAVUTIL_FOUND AND LIBSWSCALE_FOUND AND LIBAVFILTER_FOUND)
             set(PARANOIA_HAS_FFMPEG 1)
             set(PARANOIA_FFMPEG_TARGETS
-                PkgConfig::LIBAVCODEC PkgConfig::LIBAVUTIL PkgConfig::LIBSWSCALE)
+                PkgConfig::LIBAVFILTER PkgConfig::LIBSWSCALE PkgConfig::LIBAVCODEC PkgConfig::LIBAVUTIL)
         endif()
     endif()
 endif()
@@ -323,6 +330,30 @@ if(PARANOIA_ENABLE_HUNSPELL)
                 set(PARANOIA_HUNSPELL_TARGET PkgConfig::HUNSPELL_PKG)
             endif()
         endif()
+
+        # Fallback на голые find_path/find_library: на dev-машинах без
+        # libhunspell-dev в системе бывает установлен только runtime пакет
+        # (libhunspell-1.7-0). Если hunspell.h+libhunspell-1.7.so находятся
+        # вручную — собираем спеллчекер без pkg-config метаданных.
+        if(NOT PARANOIA_HAS_HUNSPELL)
+            find_path(PARANOIA_HUNSPELL_INCLUDE_DIR
+                NAMES hunspell/hunspell.h
+                PATH_SUFFIXES include
+            )
+            find_library(PARANOIA_HUNSPELL_LIBRARY
+                NAMES hunspell-1.7 hunspell hunspell-1.6
+            )
+            if(PARANOIA_HUNSPELL_INCLUDE_DIR AND PARANOIA_HUNSPELL_LIBRARY)
+                add_library(paranoia_hunspell_fallback INTERFACE)
+                target_include_directories(paranoia_hunspell_fallback INTERFACE
+                    "${PARANOIA_HUNSPELL_INCLUDE_DIR}")
+                target_link_libraries(paranoia_hunspell_fallback INTERFACE
+                    "${PARANOIA_HUNSPELL_LIBRARY}")
+                set(PARANOIA_HAS_HUNSPELL 1)
+                set(PARANOIA_HUNSPELL_TARGET paranoia_hunspell_fallback)
+                message(STATUS "Paranoia spellcheck: found via find_library at ${PARANOIA_HUNSPELL_LIBRARY}")
+            endif()
+        endif()
     endif()
 endif()
 
@@ -376,6 +407,7 @@ qt_add_qml_module(Paranoia
     src/backend/VersionInfoBackend.cpp
     src/backend/ChatBackend.hpp
     src/backend/ChatBackend.cpp
+    src/backend/EncryptedImageProvider.hpp
     src/session/Dialog.hpp
     src/session/Dialog.cpp
     src/session/ServerSession.hpp
@@ -386,6 +418,10 @@ qt_add_qml_module(Paranoia
     src/platform/PlatformNotifications.cpp
     src/platform/DesktopTray.hpp
     src/platform/DesktopTray.cpp
+    src/platform/LinuxNotifier.hpp
+    src/platform/LinuxNotifier.cpp
+    src/platform/OrientationLock.hpp
+    src/platform/OrientationLock.cpp
     src/utils/adminStorage.hpp
     src/utils/adminStorage.cpp
     src/utils/ClientSSH.hpp
@@ -407,6 +443,8 @@ qt_add_qml_module(Paranoia
     QML_FILES
     ui/Main.qml
     ui/Theme.qml
+    ui/Components/AppIcon.qml
+    ui/Components/CallButton.qml
     ui/Components/ParaButton.qml
     ui/Components/RefreshIconButton.qml
     ui/Components/CheckMark.qml
@@ -414,6 +452,8 @@ qt_add_qml_module(Paranoia
     ui/Components/DeliveryStatusIcon.qml
     ui/Components/ParaHeader.qml
     ui/Components/ParaInput.qml
+    ui/Components/PhotoViewer.qml
+    ui/Components/ReplyPreview.qml
     ui/Components/Toggle.qml
     ${PARANOIA_OPTIONAL_QML_FILES}
     ui/Components/QrCodeBox.qml
@@ -429,10 +469,12 @@ qt_add_qml_module(Paranoia
     ui/Pages/QrScanPage.qml
     ui/Pages/AddDialogPage.qml
     ui/Pages/UpdateKeyPage.qml
-    ui/Pages/ClearHistoryPage.qml
     ui/Pages/RegisterUserPage.qml
     ui/Pages/AddReserveDomainPage.qml
     ui/Pages/VersionInfoPage.qml
+    ui/Pages/SetPin.qml
+    ui/Pages/UnlockPin.qml
+    ui/Pages/ChangePin.qml
 )
 
 target_compile_definitions(Paranoia
@@ -480,16 +522,20 @@ if(PARANOIA_HAS_VOIP)
     )
     target_link_libraries(Paranoia PRIVATE ${PARANOIA_OPUS_TARGET})
     qt_target_qml_sources(Paranoia
-        QML_FILES ui/Pages/CallPage.qml
+        QML_FILES
+            ui/Pages/CallPage.qml
+            ui/Components/CallPathIndicator.qml
     )
 
     if(PARANOIA_IS_IOS)
         target_sources(Paranoia PRIVATE
             src/voip/IosAudioSession.hpp
             src/voip/IosAudioSession.mm
+            src/platform/IosOrientationLock.mm
         )
         set_source_files_properties(src/voip/IosAudioSession.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-        target_link_libraries(Paranoia PRIVATE "-framework AVFAudio")
+        set_source_files_properties(src/platform/IosOrientationLock.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+        target_link_libraries(Paranoia PRIVATE "-framework AVFAudio" "-framework UIKit")
     endif()
 
     if(PARANOIA_HAS_VIDEO)
@@ -531,15 +577,65 @@ set_target_properties(Paranoia PROPERTIES
 )
 
 if(PARANOIA_IS_IOS)
-    target_sources(Paranoia PRIVATE src/platform/PlatformNotifications_ios.mm)
-    set_source_files_properties(src/platform/PlatformNotifications_ios.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    target_sources(Paranoia PRIVATE
+        src/platform/PlatformNotifications_ios.mm
+        src/platform/ShareTarget_ios.mm
+    )
+    set_source_files_properties(
+        src/platform/PlatformNotifications_ios.mm
+        src/platform/ShareTarget_ios.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     set_target_properties(Paranoia PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
+        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/Paranoia.entitlements"
     )
     target_link_libraries(Paranoia PRIVATE
         "-framework BackgroundTasks"
         "-framework UserNotifications"
         "-framework UIKit"
+    )
+
+    # ── Share Extension (app extension bundle) ────────────────────────────
+    # iOS требует отдельный bundle с CFBundlePackageType=XPC! для extension'ов.
+    # Главное приложение получит его как PlugIns/ParanoiaShare.appex внутри
+    # своего .app — это делает blockShareExtensionPostBuild ниже.
+    add_executable(ParanoiaShareExtension MACOSX_BUNDLE
+        ios/ShareExtension/ShareViewController.h
+        ios/ShareExtension/ShareViewController.mm
+    )
+    set_source_files_properties(ios/ShareExtension/ShareViewController.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    set_target_properties(ParanoiaShareExtension PROPERTIES
+        BUNDLE TRUE
+        BUNDLE_EXTENSION "appex"
+        OUTPUT_NAME "ParanoiaShare"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/ShareExtension/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+        MACOSX_BUNDLE_GUI_IDENTIFIER "app.paranoia.client.share"
+        XCODE_PRODUCT_TYPE "com.apple.product-type.app-extension"
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "app.paranoia.client.share"
+        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/ShareExtension/Paranoia.entitlements"
+        XCODE_ATTRIBUTE_SKIP_INSTALL "YES"
+    )
+    target_link_libraries(ParanoiaShareExtension PRIVATE
+        "-framework UIKit"
+        "-framework Foundation"
+        "-framework MobileCoreServices"
+        "-framework UniformTypeIdentifiers"
+    )
+    add_dependencies(Paranoia ParanoiaShareExtension)
+
+    # Встроить .appex внутрь Paranoia.app/PlugIns/. Это требование iOS:
+    # app extension'ы доставляются только как plug-in'ы главного app bundle'а.
+    #
+    # NB: ручной POST_BUILD copy через $<TARGET_BUNDLE_DIR:...> + VERBATIM
+    # на Xcode-генераторе ломается: путь содержит $(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME),
+    # VERBATIM эскейпит $, и shell получает литерал «Release${EFFECTIVE_PLATFORM_NAME}/...»
+    # → «No such file or directory». XCODE_EMBED_APP_EXTENSIONS — штатный путь
+    # (CMake ≥ 3.21), Xcode сам кладёт .appex в PlugIns/ и подписывает.
+    set_target_properties(Paranoia PROPERTIES
+        XCODE_EMBED_APP_EXTENSIONS "ParanoiaShareExtension"
     )
 endif()
 
@@ -565,6 +661,15 @@ if(PARANOIA_IS_ANDROID)
 endif()
 
 if(PARANOIA_IS_LINUX)
+    # QtDBus — необязательная, но если есть, через неё гасятся карточки
+    # уведомлений в шторке при выходе приложения на передний план
+    # (см. LinuxNotifier).
+    find_package(Qt6 QUIET COMPONENTS DBus)
+    if(TARGET Qt6::DBus)
+        target_link_libraries(Paranoia PRIVATE Qt6::DBus)
+        target_compile_definitions(Paranoia PRIVATE PARANOIA_HAS_QT_DBUS=1)
+    endif()
+
     set_target_properties(Paranoia PROPERTIES
         INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
     )
@@ -656,6 +761,7 @@ if(TARGET Qt6::VirtualKeyboard)
         PREFIX "/qt-project.org/imports/QtQuick/VirtualKeyboard/Styles"
         BASE "ui/keyboard"
         FILES
+        ui/keyboard/Paranoia/KeyboardIcon.qml
         ui/keyboard/Paranoia/style.qml
     )
 endif()

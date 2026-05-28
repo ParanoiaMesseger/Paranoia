@@ -66,11 +66,11 @@ KeyboardStyle {
                 width: 1
             }
 
-            Text {
+            KeyboardIcon {
                 anchors.centerIn: parent
-                text: "⇧"
-                color: control.uppercased ? "#C91122" : clrText
-                font.pixelSize: 24
+                name: "shift"
+                iconColor: control.uppercased ? "#C91122" : clrText
+                strokeWidth: 1.9
             }
         }
     }
@@ -83,11 +83,11 @@ KeyboardStyle {
             color: control.pressed ? clrPressed : clrKeyFn
             border { color: clrBorder; width: 1 }
 
-            Text {
+            KeyboardIcon {
                 anchors.centerIn: parent
-                text: "←"
-                color: clrText
-                font.pixelSize: 22
+                name: "backspace"
+                iconColor: clrText
+                strokeWidth: 1.8
             }
         }
     }
@@ -110,12 +110,11 @@ KeyboardStyle {
             color: control.pressed ? clrEnterPrs : clrEnter
             border { color: clrEnterPrs; width: 1 }
 
-            Text {
+            KeyboardIcon {
                 anchors.centerIn: parent
-                text: "⏎"
-                color: clrText
-                font.pixelSize: 22
-                font.weight: Font.Medium
+                name: "enter"
+                iconColor: clrText
+                strokeWidth: 2
             }
         }
     }
@@ -196,11 +195,11 @@ KeyboardStyle {
             color: control.pressed ? clrPressed : clrKeyFn
             border { color: clrBorder; width: 1 }
 
-            Text {
+            KeyboardIcon {
                 anchors.centerIn: parent
-                text: "▼"
-                color: clrHint
-                font.pixelSize: 18
+                name: "keyboardHide"
+                iconColor: clrHint
+                strokeWidth: 1.7
             }
         }
     }

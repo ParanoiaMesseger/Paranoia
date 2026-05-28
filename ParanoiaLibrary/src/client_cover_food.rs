@@ -1,8 +1,8 @@
 use crate::client_cover::ClientCover;
 use crate::crypto::{decode_b64, encode_b64};
 use crate::transport::{
-    CallEnvelopeIn, CoreCallPoll, CoreCallSignal, CoreDeterminate, CoreNotify, CorePull, CorePush,
-    RawPacket,
+    CallEnvelopeIn, CoreCallPoll, CoreCallSignal, CoreDeterminate, CoreMap, CoreNotify, CorePull,
+    CorePush, MapResponse, RawPacket,
 };
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -70,11 +70,21 @@ impl ClientCover for FoodDeliveryClientCover {
         }))
     }
 
+    fn wrap_map(&self, core: &CoreMap) -> Result<Value> {
+        Ok(json!({
+            "operation": "scanInventory",
+            "clientId": core.sender, "partnerId": core.recver,
+            "cursor": core.after_seq, "toSeq": core.to_seq,
+            "auth": encode_b64(&core.sig),
+        }))
+    }
+
     fn wrap_determinate(&self, core: &CoreDeterminate) -> Result<Value> {
         Ok(json!({
             "operation": "cleanupHistory",
             "clientId": core.sender, "partnerId": core.recver,
-            "cutoff": core.cut_seq, "auth": encode_b64(&core.sig),
+            "fromSeq": core.from_seq, "toSeq": core.to_seq,
+            "auth": encode_b64(&core.sig),
         }))
     }
 
@@ -95,6 +105,36 @@ impl ClientCover for FoodDeliveryClientCover {
                 })
             })
             .collect()
+    }
+
+    fn unwrap_map_response(&self, body: &Value) -> Result<MapResponse> {
+        check_ok(body, "Map")?;
+        let shelves = body["shelves"]
+            .as_array()
+            .ok_or_else(|| anyhow!("Map: expected 'shelves' array"))?;
+        let mut runs = Vec::with_capacity(shelves.len());
+        for shelf in shelves {
+            let arr = shelf
+                .as_array()
+                .ok_or_else(|| anyhow!("Map: shelf is not an array"))?;
+            if arr.len() != 2 {
+                return Err(anyhow!("Map: shelf must be [begin, end]"));
+            }
+            let begin = arr[0]
+                .as_u64()
+                .ok_or_else(|| anyhow!("Map: bad shelf begin"))?;
+            let end = arr[1]
+                .as_u64()
+                .ok_or_else(|| anyhow!("Map: bad shelf end"))?;
+            runs.push((begin, end));
+        }
+        Ok(MapResponse {
+            runs,
+            last_seq: body["topShelf"]
+                .as_u64()
+                .ok_or_else(|| anyhow!("Map: missing topShelf"))?,
+            truncated: body["more"].as_bool().unwrap_or(false),
+        })
     }
 
     fn unwrap_notify_response(&self, body: &Value) -> Result<u64> {

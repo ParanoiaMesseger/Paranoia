@@ -20,13 +20,6 @@ Rectangle {
             registrationQrImageDialog.open()
     }
 
-    function localFilePath(fileUrl) {
-        let value = decodeURIComponent(String(fileUrl))
-        if (value.startsWith("file://"))
-            value = value.substring(7)
-        return value
-    }
-
     Connections {
         target: Backend
         function onUserRegistered()       { regFeedback.text = "Пользователь зарегистрирован ✓"; root.back() }
@@ -39,7 +32,7 @@ Rectangle {
         fileMode: FileDialog.OpenFile
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
         onAccepted: {
-            const decoded = QrCodeUtils.decodeFromImage(root.localFilePath(selectedFile))
+            const decoded = QrCodeUtils.decodeFromImage(Backend.urlToLocalPath(selectedFile))
             if (!decoded.ok) {
                 regFeedback.text = decoded.error || "QR-код не прочитан."
                 return

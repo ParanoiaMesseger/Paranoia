@@ -16,6 +16,15 @@ namespace Utils
 
     QByteArray readAll(const QString &path);
 
+    /// Если декрипт vault-protected файла когда-либо упал, выставляется
+    /// read-only флаг на всю сессию: writeFile в защищённые пути откажет.
+    /// Это предотвращает «silent overwrite» повреждённого файла свежей
+    /// зашифрованной пустотой. Сбрасывается только перезапуском процесса
+    /// или вручную через resetVaultIoFailure().
+    bool vaultIoFailureDetected();
+    QString vaultIoFailureReason();
+    void resetVaultIoFailure();
+
     QString compactJson(const QJsonValue &value);
 
     bool isSupportedExportProfile(const QString &profileType);
@@ -48,4 +57,12 @@ namespace Utils
     quint64 readSeq(const QJsonValue &value, bool *ok);
 
     void setOwnerOnlyPermissions(const QString &path);
+
+    /// Если raw — это file://-URL (как FileDialog.selectedFile в QML), вернёт
+    /// нормальный путь файловой системы через QUrl::toLocalFile(). На Windows
+    /// "file:///C:/x" → "C:/x", на POSIX "file:///x" → "/x". Уже-локальный
+    /// путь возвращается как есть (trimmed). Использовать на C++-границах,
+    /// принимающих путь от QML, чтобы не зависеть от того, нормализован ли
+    /// он на стороне QML.
+    QString normalizeLocalFilePath(const QString &raw);
 }

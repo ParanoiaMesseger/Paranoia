@@ -15,6 +15,7 @@ FFMPEG_IOS_ARCHS="${FFMPEG_IOS_ARCHS:-arm64}"
 FFMPEG_IOS_SDK="${FFMPEG_IOS_SDK:-iphoneos}"
 IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
+FFMPEG_IOS_CONFIG_ID="${FFMPEG_IOS_CONFIG_ID:-ffmpeg-${FFMPEG_VERSION}-ios-h264-videotoolbox-avfilter-20260526}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARANOIA_ROOT="${PARANOIA_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -73,12 +74,17 @@ build_one_arch() {
         min_flag="-mios-simulator-version-min=$IPHONEOS_DEPLOYMENT_TARGET"
     fi
     local prefix="$OUT_DIR/$out_subdir"
+    local config_stamp="$prefix/.paranoia-ffmpeg-ios-config"
 
     if [ "$FORCE_REBUILD" != "1" ] \
        && [ -f "$prefix/lib/libavcodec.a" ] \
        && [ -f "$prefix/lib/libavutil.a" ] \
        && [ -f "$prefix/lib/libswscale.a" ] \
-       && [ -f "$prefix/include/libavcodec/avcodec.h" ]; then
+       && [ -f "$prefix/lib/libavfilter.a" ] \
+       && [ -f "$prefix/include/libavcodec/avcodec.h" ] \
+       && [ -f "$prefix/include/libavfilter/avfilter.h" ] \
+       && [ -f "$config_stamp" ] \
+       && grep -Fxq "$FFMPEG_IOS_CONFIG_ID|sdk=$FFMPEG_IOS_SDK|arch=$arch|deployment=$IPHONEOS_DEPLOYMENT_TARGET" "$config_stamp"; then
         echo "==> [$out_subdir] FFmpeg already built — skip"
         return
     fi
@@ -111,7 +117,6 @@ build_one_arch() {
             --disable-autodetect \
             --disable-avdevice \
             --disable-avformat \
-            --disable-avfilter \
             --disable-swresample \
             --disable-postproc \
             --disable-network \
@@ -119,6 +124,16 @@ build_one_arch() {
             --enable-avcodec \
             --enable-avutil \
             --enable-swscale \
+            --enable-avfilter \
+            --enable-filter=buffer \
+            --enable-filter=buffersink \
+            --enable-filter=transpose \
+            --enable-filter=vflip \
+            --enable-filter=hflip \
+            --enable-filter=scale \
+            --enable-filter=format \
+            --enable-filter=pad \
+            --enable-filter=null \
             --enable-decoder=h264 \
             --enable-parser=h264 \
             "${videotoolbox_args[@]}" \
@@ -133,10 +148,14 @@ build_one_arch() {
     if [ ! -f "$prefix/lib/libavcodec.a" ] \
        || [ ! -f "$prefix/lib/libavutil.a" ] \
        || [ ! -f "$prefix/lib/libswscale.a" ] \
-       || [ ! -f "$prefix/include/libavcodec/avcodec.h" ]; then
+       || [ ! -f "$prefix/lib/libavfilter.a" ] \
+       || [ ! -f "$prefix/include/libavcodec/avcodec.h" ] \
+       || [ ! -f "$prefix/include/libavfilter/avfilter.h" ]; then
         echo "ERROR: FFmpeg install for $out_subdir did not produce expected files" >&2
         exit 1
     fi
+    printf '%s|sdk=%s|arch=%s|deployment=%s\n' \
+        "$FFMPEG_IOS_CONFIG_ID" "$FFMPEG_IOS_SDK" "$arch" "$IPHONEOS_DEPLOYMENT_TARGET" > "$config_stamp"
     echo "==> [$out_subdir] OK: $prefix"
 }
 

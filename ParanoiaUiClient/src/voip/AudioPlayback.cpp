@@ -16,6 +16,19 @@ namespace paranoia::voip
     public:
         explicit PlaybackDevice(QObject *parent = nullptr) : QIODevice(parent) {}
 
+        // Pull-режим QAudioSink проверяет atEnd()/bytesAvailable() устройства:
+        // у не-sequential QIODevice по умолчанию size()=0, и atEnd() возвращает
+        // true после первого читания — sink уходит в IdleState и больше не
+        // тянет данные, звук исчезает. Отмечаем устройство как потоковое и
+        // отдаём фактический размер буфера, чтобы sink держал ActiveState.
+        bool isSequential() const override { return true; }
+
+        qint64 bytesAvailable() const override
+        {
+            QMutexLocker lock(&mutex_);
+            return static_cast<qint64>(buffer_.size()) + QIODevice::bytesAvailable();
+        }
+
         void push(const QByteArray &pcm)
         {
             QMutexLocker lock(&mutex_);
@@ -46,7 +59,7 @@ namespace paranoia::voip
         qint64 writeData(const char *, qint64) override { return -1; }
 
     private:
-        QMutex mutex_;
+        mutable QMutex mutex_;
         QByteArray buffer_;
     };
 
@@ -63,20 +76,14 @@ namespace paranoia::voip
     {
         if (sink_) return true;
         // Дефолтный output в OS часто оказывается HDMI-монитором без динамиков
-        // (на десктопе подключили монитор и забыли переключить выход) или
-        // отключённым Bluetooth-устройством. Печатаем все доступные устройства
-        // в лог и при необходимости подменяем default на что-то «звонящее».
+        // (на десктопе подключили монитор и забыли переключить выход) — при
+        // необходимости подменяем default на что-то «звонящее».
         const auto outputs = QMediaDevices::audioOutputs();
         if (outputs.isEmpty()) {
             emit error(QStringLiteral("no audio output devices available"));
             return false;
         }
-        QAudioDevice device = QMediaDevices::defaultAudioOutput();
-        {
-            QStringList descriptions;
-            for (const auto &d : outputs) descriptions.append(d.description());
-            qInfo().noquote() << "AudioPlayback: available outputs:" << descriptions.join(QStringLiteral(" | "));
-        }
+        QAudioDevice device       = QMediaDevices::defaultAudioOutput();
         const QString defaultDesc = device.description();
         const bool defaultIsHdmi  = defaultDesc.contains(QStringLiteral("HDMI"), Qt::CaseInsensitive) ||
                                    defaultDesc.contains(QStringLiteral("DisplayPort"), Qt::CaseInsensitive) ||
@@ -88,7 +95,6 @@ namespace paranoia::voip
                     desc.contains(QStringLiteral("Headphone"), Qt::CaseInsensitive) ||
                     desc.contains(QStringLiteral("Speaker"), Qt::CaseInsensitive) ||
                     desc.contains(QStringLiteral("Built-in"), Qt::CaseInsensitive)) {
-                    qInfo().noquote() << "AudioPlayback: overriding HDMI default with" << desc;
                     device = candidate;
                     break;
                 }
@@ -102,8 +108,6 @@ namespace paranoia::voip
             emit error(QStringLiteral("output device does not support 48 kHz s16 mono"));
             return false;
         }
-        qInfo().noquote() << "AudioPlayback: starting output" << device.description() << "format"
-                          << format_.sampleRate() << "Hz" << format_.channelCount() << "channel(s)";
         sink_ = std::make_unique<QAudioSink>(device, format_, this);
         connect(sink_.get(), &QAudioSink::stateChanged, this, [this](QAudio::State state) {
             if (!sink_) return;

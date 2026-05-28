@@ -21,6 +21,13 @@ pub struct Config {
     /// TURN-сервера.
     #[serde(default)]
     pub turn_public_ip: Option<String>,
+    /// Диапазон UDP-портов для TURN relay-аллокаций, формат `"start-end"`
+    /// (включительно). По умолчанию `null` — сервер берёт случайный
+    /// эфемерный порт ОС. Нужно задать узкий диапазон, если сервер за NAT и
+    /// надо вручную пробросить эти порты (DMZ/range port forwarding).
+    /// Пример: `"41000-41099"`.
+    #[serde(default)]
+    pub turn_relay_port_range: Option<String>,
 }
 
 fn default_stun_bind() -> Option<String> {
@@ -80,6 +87,7 @@ impl Default for Config {
             users: HashMap::new(),
             stun_bind: default_stun_bind(),
             turn_public_ip: None,
+            turn_relay_port_range: None,
         }
     }
 }

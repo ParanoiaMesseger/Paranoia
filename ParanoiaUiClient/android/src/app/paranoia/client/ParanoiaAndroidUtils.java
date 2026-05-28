@@ -4,12 +4,16 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Log;
 
@@ -25,8 +29,107 @@ public final class ParanoiaAndroidUtils {
     private static final int FILE_PERMISSION_REQUEST = 2027;
     private static final int MICROPHONE_PERMISSION_REQUEST = 2028;
     private static final int CAMERA_PERMISSION_REQUEST = 2029;
+    private static final String SHARE_PREFS = "paranoia_share_target";
+    private static final String SHARE_PREF_TEXT = "share_text";
+    private static final String SHARE_PREF_URIS = "share_uris";
+
+    private static final String PICKER_PREFS = "paranoia_attachment_picker";
+    private static final String PICKER_PREF_URI = "picked_uri";
+    public static final int REQUEST_PICK_IMAGE = 2030;
+    public static final int REQUEST_PICK_VIDEO = 2031;
 
     private ParanoiaAndroidUtils() {}
+
+    // Запускает системный photo picker (галерею) для выбора одного фото или
+    // видео. Результат прилетает в ParanoiaActivity.onActivityResult, который
+    // кладёт URI в picker shared prefs (см. takePickedAttachment).
+    public static void pickMediaFromGallery(Context context, boolean wantImage) {
+        if (!(context instanceof Activity)) return;
+        Activity activity = (Activity) context;
+        Intent intent;
+        if (Build.VERSION.SDK_INT >= 33 && wantImage) {
+            // Android 13+ photo picker: показывает встроенный «безопасный»
+            // выбор фото без необходимости READ_MEDIA_IMAGES permission.
+            intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            intent.setType("image/*");
+        } else {
+            // Универсальный путь: ACTION_PICK с MediaStore CONTENT_URI — у всех
+            // OEM открывается «Галерея» / Photos, а не файловый менеджер.
+            Uri base = wantImage
+                    ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                    : MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+            intent = new Intent(Intent.ACTION_PICK, base);
+            intent.setType(wantImage ? "image/*" : "video/*");
+        }
+        try {
+            activity.startActivityForResult(intent,
+                wantImage ? REQUEST_PICK_IMAGE : REQUEST_PICK_VIDEO);
+        } catch (Exception e) {
+            Log.w(TAG, "Cannot launch media picker", e);
+            // Fallback: универсальный GET_CONTENT
+            try {
+                Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
+                fallback.setType(wantImage ? "image/*" : "video/*");
+                fallback.addCategory(Intent.CATEGORY_OPENABLE);
+                activity.startActivityForResult(fallback,
+                    wantImage ? REQUEST_PICK_IMAGE : REQUEST_PICK_VIDEO);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    public static synchronized void storePickedAttachment(Context context, String uri) {
+        if (context == null) return;
+        SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(PICKER_PREFS, Context.MODE_PRIVATE);
+        prefs.edit().putString(PICKER_PREF_URI, uri == null ? "" : uri).apply();
+    }
+
+    public static synchronized String takePickedAttachment(Context context) {
+        if (context == null) return "";
+        SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(PICKER_PREFS, Context.MODE_PRIVATE);
+        String uri = prefs.getString(PICKER_PREF_URI, "");
+        prefs.edit().remove(PICKER_PREF_URI).apply();
+        return uri == null ? "" : uri;
+    }
+
+    // Записывает входящий share-intent (текст + список content://-uri) в
+    // shared prefs. Читается C++-сторонами через takeShareTarget; пара
+    // методов разнесена, потому что Activity и QML-движок инициализируются
+    // в разные моменты — данные могут «висеть» в prefs пока движок не подхватит.
+    public static synchronized void storeShareTarget(Context context, String text, ArrayList<String> uris) {
+        if (context == null) return;
+        SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(SHARE_PREFS, Context.MODE_PRIVATE);
+        SharedPreferences.Editor editor = prefs.edit();
+        editor.putString(SHARE_PREF_TEXT, text == null ? "" : text);
+        StringBuilder joined = new StringBuilder();
+        if (uris != null) {
+            for (int i = 0; i < uris.size(); ++i) {
+                if (i > 0) joined.append('\n');
+                joined.append(uris.get(i) == null ? "" : uris.get(i));
+            }
+        }
+        editor.putString(SHARE_PREF_URIS, joined.toString());
+        editor.apply();
+    }
+
+    // Возвращает «texturi1\nuri2\n...». Разделитель текст/uri'ы — ,
+    // потому что в URL'ах встречается \n. После чтения prefs очищаются.
+    public static synchronized String takeShareTarget(Context context) {
+        if (context == null) return "";
+        SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(SHARE_PREFS, Context.MODE_PRIVATE);
+        String text = prefs.getString(SHARE_PREF_TEXT, "");
+        String uris = prefs.getString(SHARE_PREF_URIS, "");
+        prefs.edit().remove(SHARE_PREF_TEXT).remove(SHARE_PREF_URIS).apply();
+        if ((text == null || text.isEmpty()) && (uris == null || uris.isEmpty())) return "";
+        StringBuilder out = new StringBuilder();
+        out.append(text == null ? "" : text);
+        out.append('\u0001');
+        out.append(uris == null ? "" : uris);
+        return out.toString();
+    }
 
     /// Перевести audio-стек в режим VoIP-звонка. Без MODE_IN_COMMUNICATION
     /// AudioManager на Android считает наше приложение медиа-плеером, и при
@@ -55,6 +158,23 @@ public final class ParanoiaAndroidUtils {
             }
         } catch (Exception e) {
             Log.w(TAG, "setVoiceCallMode failed: " + e.getMessage());
+        }
+    }
+
+    /// Заблокировать ориентацию Activity на portrait (или вернуть UNSPECIFIED).
+    /// Используется на время звонка, чтобы интерфейс не «прыгал» при повороте
+    /// устройства. Если context — не Activity, no-op.
+    public static void lockOrientationPortrait(Context context, boolean lock) {
+        if (!(context instanceof Activity)) return;
+        try {
+            Activity activity = (Activity) context;
+            int orientation = lock
+                    ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                    : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+            activity.runOnUiThread(() -> activity.setRequestedOrientation(orientation));
+            Log.i(TAG, "orientation lock=" + lock);
+        } catch (Exception e) {
+            Log.w(TAG, "lockOrientationPortrait failed: " + e.getMessage());
         }
     }
 

@@ -17,6 +17,12 @@ Rectangle {
     property string feedbackText: ""
     property bool feedbackError: false
 
+    // TURN-список доступен только для клиентских профилей (admin не звонит).
+    property var turnServers: []
+    property var turnStatus: ({})
+    property string turnFeedbackText: ""
+    property bool turnFeedbackError: false
+
     signal back()
 
     function setStatus(domain, status) {
@@ -53,7 +59,39 @@ Rectangle {
             root.checkDomain(root.reserveDomains[i])
     }
 
-    Component.onCompleted: root.refreshReserveDomains()
+    function setTurnStatus(url, status) {
+        const next = Object.assign({}, root.turnStatus)
+        next[url] = status
+        root.turnStatus = next
+    }
+    function pruneTurnStatus() {
+        const present = {}
+        for (var i = 0; i < root.turnServers.length; ++i) present[root.turnServers[i]] = true
+        const next = {}
+        for (var d in root.turnStatus) if (present[d]) next[d] = root.turnStatus[d]
+        root.turnStatus = next
+    }
+    function checkTurn(url) {
+        const u = url.trim()
+        if (u === "") return
+        root.setTurnStatus(u, { state: "checking", pingMs: -1, message: "" })
+        Backend.checkTurnServer(root.targetId, u)
+    }
+    function refreshTurnServers() {
+        if (root.targetType !== "client") {
+            root.turnServers = []
+            return
+        }
+        root.turnServers = Backend.getTurnServers(root.targetId)
+        root.pruneTurnStatus()
+        for (var i = 0; i < root.turnServers.length; ++i)
+            root.checkTurn(root.turnServers[i])
+    }
+
+    Component.onCompleted: {
+        root.refreshReserveDomains()
+        root.refreshTurnServers()
+    }
 
     Connections {
         target: Backend
@@ -81,6 +119,27 @@ Rectangle {
         function onReserveDomainError(msg) {
             root.feedbackError = true
             root.feedbackText = msg
+        }
+        function onTurnServerAdded(profileId, url) {
+            if (profileId !== root.targetId) return
+            turnInput.text = ""
+            root.turnFeedbackError = false
+            root.turnFeedbackText = "TURN-сервер добавлен: " + url
+            root.refreshTurnServers()
+        }
+        function onTurnServerRemoved(profileId, url) {
+            if (profileId !== root.targetId) return
+            root.turnFeedbackError = false
+            root.turnFeedbackText = "TURN-сервер удалён: " + url
+            root.refreshTurnServers()
+        }
+        function onTurnServerCheckFinished(profileId, url, ok, msg, pingMs) {
+            if (profileId !== root.targetId) return
+            root.setTurnStatus(url, { state: ok ? "ok" : "error", pingMs: pingMs, message: msg })
+        }
+        function onTurnServerError(msg) {
+            root.turnFeedbackError = true
+            root.turnFeedbackText = msg
         }
     }
 
@@ -221,29 +280,13 @@ Rectangle {
                                     border.width: 1
                                     border.color: Theme.error
 
-                                    Canvas {
+                                    AppIcon {
                                         anchors.centerIn: parent
                                         width: 14
                                         height: 14
-                                        antialiasing: true
-
-                                        property color iconColor: Theme.error
-                                        onIconColorChanged: requestPaint()
-
-                                        onPaint: {
-                                            const ctx = getContext("2d")
-                                            ctx.clearRect(0, 0, width, height)
-                                            ctx.strokeStyle = iconColor
-                                            ctx.lineWidth = 2
-                                            ctx.lineCap = "round"
-
-                                            ctx.beginPath()
-                                            ctx.moveTo(width * 0.27, height * 0.27)
-                                            ctx.lineTo(width * 0.73, height * 0.73)
-                                            ctx.moveTo(width * 0.73, height * 0.27)
-                                            ctx.lineTo(width * 0.27, height * 0.73)
-                                            ctx.stroke()
-                                        }
+                                        name: "close"
+                                        iconColor: Theme.error
+                                        strokeWidth: 3
                                     }
 
                                     MouseArea {
@@ -308,6 +351,189 @@ Rectangle {
                             Backend.addClientReserveDomain(root.targetId, reserveDomain)
                         else
                             Backend.addAdminReserveDomain(root.primaryDomain, reserveDomain)
+                    }
+                }
+
+                // ── Резервные TURN-серверы (только для клиентских профилей) ──
+                Item { Layout.preferredHeight: 16; visible: root.targetType === "client" }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: Theme.border
+                    visible: root.targetType === "client"
+                }
+
+                Item { Layout.preferredHeight: 8; visible: root.targetType === "client" }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.targetType === "client"
+                    text: "Резервные TURN-серверы используются для звонков, когда P2P между собеседниками не пробивается (NAT, разные сети). Первичный TURN берётся из адреса основного сервера. Формат: host:port (порт по умолчанию 3478)."
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    wrapMode: Text.WordWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    visible: root.targetType === "client"
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Текущие TURN-серверы"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontMd
+                        font.family: Theme.fontFamily
+                        font.weight: Font.DemiBold
+                    }
+
+                    RefreshIconButton {
+                        Layout.preferredWidth: 40
+                        Layout.preferredHeight: 40
+                        visible: root.turnServers.length > 0
+                        onClicked: root.refreshTurnServers()
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.targetType === "client" && root.turnServers.length === 0
+                    text: "Резервные TURN-серверы не добавлены."
+                    color: Theme.textHint
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    wrapMode: Text.WordWrap
+                }
+
+                Repeater {
+                    model: root.targetType === "client" ? root.turnServers : []
+                    delegate: Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: turnItemContent.implicitHeight + 20
+                        radius: Theme.radiusMd
+                        color: Theme.bgSecondary
+                        border.width: 1
+                        border.color: Theme.border
+
+                        readonly property string turnUrl: modelData
+                        readonly property var turnEntry: root.turnStatus[turnUrl]
+                        readonly property string turnState: turnEntry ? turnEntry.state : ""
+                        readonly property string turnMsg: turnEntry ? turnEntry.message : ""
+
+                        ColumnLayout {
+                            id: turnItemContent
+                            anchors.fill: parent
+                            anchors.margins: 10
+                            spacing: 6
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    text: turnUrl
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSm
+                                    font.family: Theme.fontFamily
+                                    elide: Text.ElideRight
+                                }
+
+                                Text {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    text: {
+                                        if (turnState === "checking") return "проверка…"
+                                        if (turnState === "ok")       return "ok"
+                                        if (turnState === "error")    return "ошибка"
+                                        return "—"
+                                    }
+                                    color: {
+                                        if (turnState === "ok")    return Theme.success
+                                        if (turnState === "error") return Theme.error
+                                        return Theme.textSecondary
+                                    }
+                                    font.pixelSize: Theme.fontSm
+                                    font.family: Theme.fontFamily
+                                    font.weight: Font.DemiBold
+                                }
+
+                                Rectangle {
+                                    Layout.preferredWidth: 32
+                                    Layout.preferredHeight: 32
+                                    radius: Theme.radiusMd
+                                    color: turnRemoveArea.containsMouse ? Theme.error : Theme.errorBg
+                                    border.width: 1
+                                    border.color: Theme.error
+
+                                    AppIcon {
+                                        anchors.centerIn: parent
+                                        width: 14
+                                        height: 14
+                                        name: "close"
+                                        iconColor: Theme.error
+                                        strokeWidth: 3
+                                    }
+
+                                    MouseArea {
+                                        id: turnRemoveArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: Backend.removeTurnServer(root.targetId, turnUrl)
+                                    }
+                                }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                visible: turnState === "error" && turnMsg.length > 0
+                                text: turnMsg
+                                color: Theme.error
+                                font.pixelSize: Theme.fontSm
+                                font.family: Theme.fontFamily
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+                }
+
+                ParaInput {
+                    id: turnInput
+                    Layout.fillWidth: true
+                    visible: root.targetType === "client"
+                    label: "Новый TURN-сервер"
+                    placeholder: "turn.example.com:3478"
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.targetType === "client" && root.turnFeedbackText.length > 0
+                    text: root.turnFeedbackText
+                    color: root.turnFeedbackError ? Theme.error : Theme.success
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    visible: root.targetType === "client"
+                    text: "Добавить TURN-сервер"
+                    onClicked: {
+                        const t = turnInput.text.trim()
+                        if (t === "") {
+                            root.turnFeedbackError = true
+                            root.turnFeedbackText = "Укажите адрес TURN-сервера."
+                            return
+                        }
+                        root.turnFeedbackError = false
+                        root.turnFeedbackText = ""
+                        Backend.addTurnServer(root.targetId, t)
                     }
                 }
 

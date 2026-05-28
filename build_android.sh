@@ -25,6 +25,7 @@ source "$KEYS_FILE"
 # ─── Окружение ────────────────────────────────────────────────────────────────
 export PATH="$CARGO_HOME/bin:$PATH"
 export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+export GRADLE_OPTS="-Dorg.gradle.java.home=$JAVA_HOME ${GRADLE_OPTS:-}"
 
 echo "==> Проверка инструментов..."
 rustc --version && cargo --version

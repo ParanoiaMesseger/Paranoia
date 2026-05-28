@@ -109,13 +109,36 @@ enum TurnPending {
     CreatePermission {
         deadline: tokio::time::Instant,
     },
+    Refresh {
+        deadline: tokio::time::Instant,
+    },
 }
+
+/// RFC 8656 §7.2: default allocation lifetime — 600 секунд. Сервер может
+/// вернуть другое значение в Allocate/Refresh Success — мы используем то, что
+/// получили, для расчёта следующего refresh.
+const TURN_DEFAULT_LIFETIME: Duration = Duration::from_secs(600);
+/// RFC 8656 §9: permission lifetime — 300 секунд (5 минут), не настраивается.
+const TURN_PERMISSION_LIFETIME: Duration = Duration::from_secs(300);
+/// Сколько секунд оставляем в запасе: refresh шлём за `MARGIN` до экспирации.
+/// Это покрывает RTT туда-обратно + jitter и предотвращает race с серверным GC.
+const TURN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
+const TURN_PERMISSION_MARGIN: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct TurnRoute {
     server: Option<SocketAddr>,
     relayed: Option<SocketAddr>,
     peer_relay: Option<SocketAddr>,
+    /// Срок жизни текущей allocation (получен из Allocate/Refresh Success).
+    /// None пока allocation не выделена. После этого срока сервер дропнет
+    /// allocation — нужно переаллоцировать или продлить.
+    allocation_lifetime: Duration,
+    /// Когда нужно послать следующий Refresh. None если route неактивна.
+    next_refresh_at: Option<tokio::time::Instant>,
+    /// Когда нужно повторно создать permission для peer_relay. None если
+    /// permission ещё не выдан или route неактивна.
+    next_permission_at: Option<tokio::time::Instant>,
 }
 
 /// Ручка для остановки сессии и слежения за её завершением.
@@ -127,9 +150,14 @@ pub struct SessionHandle {
     /// `voip::nal::Fragmenter`). Включается только когда есть видео-поток —
     /// для голосовых звонков канал просто не используется.
     video_outbound_tx: mpsc::Sender<VideoOutboundPacket>,
-    /// Канал из сессии: расшифрованные входящие фреймы (voice + video).
-    /// `Option`, чтобы можно было «забрать» receiver наружу (для FFI/Qt).
-    inbound_rx: Option<mpsc::Receiver<InboundFrame>>,
+    /// Канал из сессии: расшифрованные входящие voice-фреймы. Раздельный с
+    /// video-каналом, чтобы заторы в обработке видео не блокировали голос
+    /// (голос приоритетнее: ~50 пакетов/с, video — ~30+ фрагментов/с с
+    /// burst'ами при keyframe). `Option`, чтобы можно было «забрать» receiver
+    /// наружу (для FFI/Qt).
+    voice_inbound_rx: Option<mpsc::Receiver<InboundFrame>>,
+    /// Канал из сессии: video-фрагменты.
+    video_inbound_rx: Option<mpsc::Receiver<InboundFrame>>,
     /// Канал в сессию: запрос STUN-discover через тот же UDP-сокет.
     stun_tx: mpsc::Sender<StunRequest>,
     /// Канал в сессию: TURN Allocate/route команды через тот же UDP-сокет.
@@ -162,17 +190,44 @@ impl SessionHandle {
     }
 
     pub async fn recv_frame(&mut self) -> Option<InboundFrame> {
-        match self.inbound_rx.as_mut() {
-            Some(rx) => rx.recv().await,
-            None => None,
+        // Для backward-compat (тесты, EasyCli) сначала пробуем voice, потом video.
+        if let Some(rx) = self.voice_inbound_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(f) => return Some(f),
+                Err(mpsc::error::TryRecvError::Disconnected) => self.voice_inbound_rx = None,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(rx) = self.video_inbound_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(f) => return Some(f),
+                Err(mpsc::error::TryRecvError::Disconnected) => self.video_inbound_rx = None,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+        }
+        // Если оба пусты — ждём первое появление через select.
+        match (self.voice_inbound_rx.as_mut(), self.video_inbound_rx.as_mut()) {
+            (Some(v), Some(vi)) => tokio::select! {
+                biased;
+                f = v.recv() => f,
+                f = vi.recv() => f,
+            },
+            (Some(v), None) => v.recv().await,
+            (None, Some(vi)) => vi.recv().await,
+            (None, None) => None,
         }
     }
 
-    /// Забрать receiver наружу — например, чтобы крутить его в отдельной
-    /// фоновой задаче, дёргающей C-callback. После `take_inbound` метод
-    /// `recv_frame` будет всегда возвращать `None`.
-    pub fn take_inbound(&mut self) -> Option<mpsc::Receiver<InboundFrame>> {
-        self.inbound_rx.take()
+    /// Забрать voice receiver наружу — например, чтобы крутить его в отдельной
+    /// фоновой задаче, дёргающей C-callback.
+    pub fn take_voice_inbound(&mut self) -> Option<mpsc::Receiver<InboundFrame>> {
+        self.voice_inbound_rx.take()
+    }
+
+    /// Забрать video receiver наружу. Может вернуть None если уже забран или
+    /// сборка без video.
+    pub fn take_video_inbound(&mut self) -> Option<mpsc::Receiver<InboundFrame>> {
+        self.video_inbound_rx.take()
     }
 
     /// Клонировать sender голосового канала — пригодно для передачи в другие задачи.
@@ -183,6 +238,83 @@ impl SessionHandle {
     /// Клонировать sender видео-канала.
     pub fn video_outbound_sender(&self) -> mpsc::Sender<VideoOutboundPacket> {
         self.video_outbound_tx.clone()
+    }
+
+    /// Построить owned-future для STUN discover'а, не привязанный к лайфтайму
+    /// `&self`. Это позволяет FFI-слою клонировать нужные senders под локом и
+    /// сразу освободить mutex сессии, а `block_on(future)` запустить уже без
+    /// удержания лока. Без этого probe (до 2с) блокирует все другие FFI-вызовы
+    /// (push_opus каждые 20мс, set_peer и т.п.) → периодические подвисания
+    /// аудио при periodic re-probe'е из CallController.
+    pub fn stun_discover_owned(
+        &self,
+        server: SocketAddr,
+        timeout: Duration,
+    ) -> impl std::future::Future<Output = Result<SocketAddr>> + Send + 'static {
+        let stun_tx = self.stun_tx.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            let req = StunRequest {
+                server,
+                reply: tx,
+                timeout,
+            };
+            if stun_tx.send(req).await.is_err() {
+                bail!("session stun channel closed");
+            }
+            match rx.await {
+                Ok(result) => result,
+                Err(_) => bail!("session stun reply dropped"),
+            }
+        }
+    }
+
+    /// Owned-future для TURN allocate. См. `stun_discover_owned`.
+    pub fn turn_allocate_owned(
+        &self,
+        server: SocketAddr,
+        timeout: Duration,
+    ) -> impl std::future::Future<Output = Result<SocketAddr>> + Send + 'static {
+        let turn_tx = self.turn_tx.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            let req = TurnRequest::Allocate {
+                server,
+                reply: tx,
+                timeout,
+            };
+            if turn_tx.send(req).await.is_err() {
+                bail!("session turn channel closed");
+            }
+            match rx.await {
+                Ok(result) => result,
+                Err(_) => bail!("session turn reply dropped"),
+            }
+        }
+    }
+
+    /// Owned-future для setTurnPeer. См. `stun_discover_owned`.
+    pub fn set_turn_peer_owned(
+        &self,
+        server: SocketAddr,
+        peer_relay: SocketAddr,
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'static {
+        let turn_tx = self.turn_tx.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+            let req = TurnRequest::SetPeer {
+                server,
+                peer: peer_relay,
+                reply: tx,
+            };
+            if turn_tx.send(req).await.is_err() {
+                bail!("session turn channel closed");
+            }
+            match rx.await {
+                Ok(result) => result,
+                Err(_) => bail!("session turn set-peer reply dropped"),
+            }
+        }
     }
 
     pub fn shutdown_notify(&self) -> Arc<Notify> {
@@ -295,7 +427,11 @@ pub fn spawn_session(
     let shutdown = Arc::new(Notify::new());
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(outbound_buffer);
     let (video_outbound_tx, video_outbound_rx) = mpsc::channel::<VideoOutboundPacket>(128);
-    let (inbound_tx, inbound_rx) = mpsc::channel::<InboundFrame>(inbound_buffer);
+    let (voice_inbound_tx, voice_inbound_rx) = mpsc::channel::<InboundFrame>(inbound_buffer);
+    // Видео-канал шире: один кадр может дать до ~50 фрагментов (1MB@1168=857)
+    // при I-frame. Голосовой буфер не должен зависеть от этой нагрузки.
+    let (video_inbound_tx, video_inbound_rx) =
+        mpsc::channel::<InboundFrame>(inbound_buffer.max(256));
     let (stun_tx, stun_rx) = mpsc::channel::<StunRequest>(16);
     let (turn_tx, turn_rx) = mpsc::channel::<TurnRequest>(16);
     let local_addr = socket
@@ -314,7 +450,8 @@ pub fn spawn_session(
             keys,
             outbound_rx,
             video_outbound_rx,
-            inbound_tx,
+            voice_inbound_tx,
+            video_inbound_tx,
             stun_rx,
             turn_rx,
             shutdown_clone,
@@ -326,7 +463,8 @@ pub fn spawn_session(
         shutdown,
         outbound_tx,
         video_outbound_tx,
-        inbound_rx: Some(inbound_rx),
+        voice_inbound_rx: Some(voice_inbound_rx),
+        video_inbound_rx: Some(video_inbound_rx),
         stun_tx,
         turn_tx,
         peer,
@@ -343,7 +481,8 @@ async fn process_media_datagram(
     rx_dir: super::crypto::Direction,
     voice_rx_window: &mut ReplayWindow,
     video_rx_window: &mut ReplayWindow,
-    inbound_tx: &mpsc::Sender<InboundFrame>,
+    voice_inbound_tx: &mpsc::Sender<InboundFrame>,
+    video_inbound_tx: &mpsc::Sender<InboundFrame>,
 ) -> bool {
     let read_peer = |p: &Arc<Mutex<Option<SocketAddr>>>| -> Option<SocketAddr> {
         p.lock().ok().and_then(|g| *g)
@@ -411,7 +550,22 @@ async fn process_media_datagram(
                 flags: header.flags,
                 opus: payload,
             };
-            inbound_tx.send(frame).await.is_ok()
+            // Раздельные каналы: voice не блокируется при заторе video. Если
+            // video-канал полон (медленный декодер на приёмнике), теряем
+            // фрагмент — голос продолжает идти. Если voice-канал полон —
+            // тоже теряем, но это редко.
+            let tx = match frame.stream {
+                StreamId::Voice => voice_inbound_tx,
+                StreamId::Video => video_inbound_tx,
+            };
+            match tx.try_send(frame) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::debug!("voip inbound channel full ({:?}) — dropping", header.stream_id);
+                    true
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            }
         }
         Err(e) => {
             tracing::debug!("voip decrypt failed (stream={:?}): {e}", peeked_stream);
@@ -444,7 +598,8 @@ async fn run_session(
     mut keys: StreamKeys,
     mut outbound_rx: mpsc::Receiver<Vec<u8>>,
     mut video_outbound_rx: mpsc::Receiver<VideoOutboundPacket>,
-    inbound_tx: mpsc::Sender<InboundFrame>,
+    voice_inbound_tx: mpsc::Sender<InboundFrame>,
+    video_inbound_tx: mpsc::Sender<InboundFrame>,
     mut stun_rx: mpsc::Receiver<StunRequest>,
     mut turn_rx: mpsc::Receiver<TurnRequest>,
     shutdown: Arc<Notify>,
@@ -491,9 +646,19 @@ async fn run_session(
     // Периодический GC просроченных STUN-запросов.
     let mut stun_gc = tokio::time::interval(Duration::from_millis(250));
     stun_gc.tick().await; // съесть первый
+    // Периодическая проверка нужно ли отрефрешить TURN allocation и/или
+    // permission. Шаг 5 секунд достаточен с учётом 60-секундного margin'а до
+    // экспирации (см. TURN_REFRESH_MARGIN/TURN_PERMISSION_MARGIN).
+    let mut turn_refresh_tick = tokio::time::interval(Duration::from_secs(5));
+    turn_refresh_tick.tick().await; // съесть первый
 
     loop {
         tokio::select! {
+            // biased: при готовности нескольких future проверяем источники в
+            // объявленном порядке. Сначала входящие пакеты (приоритет приёма),
+            // потом voice-исходящий, потом video-исходящий — это гарантирует,
+            // что при burst'е video-фрагментов голос не отстаёт.
+            biased;
             // Входящий пакет.
             recv = socket.recv_from(&mut buf) => {
                 match recv {
@@ -529,14 +694,31 @@ async fn run_session(
                                     }
                                     (turn::method::ALLOCATE, Class::SuccessResponse) => {
                                         if let Some(TurnPending::Allocate { server, reply, .. }) = turn_pending.remove(&tid) {
-                                            if from != server {
-                                                let _ = reply.send(Err(anyhow::anyhow!(
-                                                    "turn allocate response from unexpected server {from}"
-                                                )));
-                                            } else if let Some(relayed) = msg.find_xor_address(turn::attr::XOR_RELAYED_ADDRESS) {
-                                                tracing::info!("turn allocated relay {relayed} via {server}");
+                                            // Не сверяем `from` ни с сокетом, ни с IP сервера:
+                                            // (1) реальные сервера (наш Paranoia TURN) шлют ответ с
+                                            //     отдельного binding'а — порт != 3478;
+                                            // (2) при NAT64 (LTE IPv6-only) исходящий запрос идёт на
+                                            //     v4-mapped 64:ff9b::/96, а ответ возвращается
+                                            //     IPv6-маппингом, который не совпадёт с IPv4 server.
+                                            // От подмены защищает transaction_id.
+                                            if let Some(relayed) = msg.find_xor_address(turn::attr::XOR_RELAYED_ADDRESS) {
+                                                // Берём LIFETIME из ответа сервера если есть, иначе RFC default.
+                                                let lifetime = msg
+                                                    .find_lifetime()
+                                                    .map(|s| Duration::from_secs(s as u64))
+                                                    .unwrap_or(TURN_DEFAULT_LIFETIME);
+                                                let now = tokio::time::Instant::now();
+                                                tracing::info!(
+                                                    "turn allocated relay {relayed} via {server} lifetime={}s",
+                                                    lifetime.as_secs()
+                                                );
                                                 turn_route.server = Some(server);
                                                 turn_route.relayed = Some(relayed);
+                                                turn_route.allocation_lifetime = lifetime;
+                                                // Refresh шлём за TURN_REFRESH_MARGIN до экспирации.
+                                                turn_route.next_refresh_at = Some(
+                                                    now + lifetime.saturating_sub(TURN_REFRESH_MARGIN),
+                                                );
                                                 let _ = reply.send(Ok(relayed));
                                             } else {
                                                 let _ = reply.send(Err(anyhow::anyhow!(
@@ -544,6 +726,38 @@ async fn run_session(
                                                 )));
                                             }
                                         }
+                                    }
+                                    (turn::method::REFRESH, Class::SuccessResponse) => {
+                                        turn_pending.remove(&tid);
+                                        if let Some(server) = turn_route.server {
+                                            let lifetime = msg
+                                                .find_lifetime()
+                                                .map(|s| Duration::from_secs(s as u64))
+                                                .unwrap_or(turn_route.allocation_lifetime);
+                                            tracing::debug!(
+                                                "turn refresh ok via {server} lifetime={}s",
+                                                lifetime.as_secs()
+                                            );
+                                            // Lifetime=0 в ответе означает что сервер закрыл allocation
+                                            // (мы попросили close). Не реагируем — это close-path.
+                                            if lifetime.as_secs() > 0 {
+                                                turn_route.allocation_lifetime = lifetime;
+                                                let now = tokio::time::Instant::now();
+                                                turn_route.next_refresh_at = Some(
+                                                    now + lifetime.saturating_sub(TURN_REFRESH_MARGIN),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    (turn::method::REFRESH, Class::ErrorResponse) => {
+                                        turn_pending.remove(&tid);
+                                        tracing::warn!(
+                                            "turn refresh rejected by {from} — allocation may be lost"
+                                        );
+                                        // Не очищаем turn_route целиком: следующий send всё равно
+                                        // пойдёт через Send Indication, а GC сервера может ещё не
+                                        // успеть; в худшем случае peer перестанет получать media
+                                        // и сработает ICE-fallback на CallController.
                                     }
                                     (turn::method::ALLOCATE, Class::ErrorResponse) => {
                                         if let Some(TurnPending::Allocate { reply, .. }) = turn_pending.remove(&tid) {
@@ -568,7 +782,8 @@ async fn run_session(
                                                     rx_dir,
                                                     &mut voice_rx_window,
                                                     &mut video_rx_window,
-                                                    &inbound_tx,
+                                                    &voice_inbound_tx,
+                                                    &video_inbound_tx,
                                                 ).await {
                                                     break;
                                                 }
@@ -595,7 +810,8 @@ async fn run_session(
                             rx_dir,
                             &mut voice_rx_window,
                             &mut video_rx_window,
-                            &inbound_tx,
+                            &voice_inbound_tx,
+                            &video_inbound_tx,
                         ).await {
                             break;
                         }
@@ -760,14 +976,19 @@ async fn run_session(
                         turn_route.peer_relay = Some(peer_relay);
                         set_peer(&peer, peer_relay);
 
-                        // Permission не обязателен для встроенного relay, но дешёвый
-                        // запрос делает клиент ближе к RFC TURN и оставляет путь к
-                        // будущему enforcement на сервере.
+                        // CreatePermission: на нашем сервере noop, но для совместимости
+                        // с RFC TURN (coturn, etc.) обязательно. Permission живёт
+                        // 5 минут (RFC 8656 §9), мы рефрешим за TURN_PERMISSION_MARGIN
+                        // до экспирации через таймер permission_refresh_at.
                         let tid = stun::fresh_transaction_id();
                         let perm = turn::build_create_permission_no_auth(tid, &[peer_relay]);
                         if socket.send_to(&perm, server).await.is_ok() {
-                            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                            let now = tokio::time::Instant::now();
+                            let deadline = now + Duration::from_secs(3);
                             turn_pending.insert(tid, TurnPending::CreatePermission { deadline });
+                            turn_route.next_permission_at = Some(
+                                now + TURN_PERMISSION_LIFETIME.saturating_sub(TURN_PERMISSION_MARGIN),
+                            );
                         }
                         let _ = reply.send(Ok(()));
                     }
@@ -797,14 +1018,77 @@ async fn run_session(
                         let deadline = match pending {
                             TurnPending::Allocate { deadline, .. } => deadline,
                             TurnPending::CreatePermission { deadline } => deadline,
+                            TurnPending::Refresh { deadline } => deadline,
                         };
                         (now >= *deadline).then_some(*tid)
                     })
                     .collect();
                 for tid in expired_turn {
                     if let Some(pending) = turn_pending.remove(&tid) {
-                        if let TurnPending::Allocate { reply, .. } = pending {
-                            let _ = reply.send(Err(anyhow::anyhow!("turn allocate timeout")));
+                        match pending {
+                            TurnPending::Allocate { reply, .. } => {
+                                let _ = reply.send(Err(anyhow::anyhow!("turn allocate timeout")));
+                            }
+                            TurnPending::Refresh { .. } => {
+                                tracing::warn!("turn refresh timeout — allocation may expire soon");
+                            }
+                            TurnPending::CreatePermission { .. } => {
+                                tracing::debug!("turn create-permission timeout");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Периодический Refresh TURN allocation и Permission. RFC 8656:
+            // allocation lifetime 600s (рефрешим за 60s до), permission 300s
+            // (рефрешим за 60s до). На нашем сервере permissions noop, но
+            // оставляем для совместимости с RFC TURN (coturn, etc.).
+            _ = turn_refresh_tick.tick() => {
+                let now = tokio::time::Instant::now();
+                if let (Some(server), Some(refresh_at)) = (turn_route.server, turn_route.next_refresh_at) {
+                    if now >= refresh_at {
+                        let tid = stun::fresh_transaction_id();
+                        let pkt = turn::build_refresh_no_auth(
+                            tid,
+                            turn_route.allocation_lifetime.as_secs() as u32,
+                        );
+                        match socket.send_to(&pkt, server).await {
+                            Ok(_) => {
+                                let deadline = now + Duration::from_secs(3);
+                                turn_pending.insert(tid, TurnPending::Refresh { deadline });
+                                // Откладываем next_refresh_at чтобы не флудить если
+                                // ответ задержится — он будет обновлён в REFRESH Success.
+                                turn_route.next_refresh_at = Some(
+                                    now + turn_route.allocation_lifetime
+                                        .saturating_sub(TURN_REFRESH_MARGIN),
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("turn refresh send_to {server} failed: {e}");
+                            }
+                        }
+                    }
+                }
+                if let (Some(server), Some(peer_relay), Some(perm_at)) = (
+                    turn_route.server,
+                    turn_route.peer_relay,
+                    turn_route.next_permission_at,
+                ) {
+                    if now >= perm_at {
+                        let tid = stun::fresh_transaction_id();
+                        let perm = turn::build_create_permission_no_auth(tid, &[peer_relay]);
+                        if socket.send_to(&perm, server).await.is_ok() {
+                            turn_pending.insert(
+                                tid,
+                                TurnPending::CreatePermission {
+                                    deadline: now + Duration::from_secs(3),
+                                },
+                            );
+                            turn_route.next_permission_at = Some(
+                                now + TURN_PERMISSION_LIFETIME
+                                    .saturating_sub(TURN_PERMISSION_MARGIN),
+                            );
                         }
                     }
                 }
@@ -814,6 +1098,16 @@ async fn run_session(
                 break;
             }
         }
+    }
+
+    // Если у нас есть активная TURN-аллокация — попросить сервер её закрыть
+    // (Refresh с LIFETIME=0). Server-side GC и так подберёт её через 600с,
+    // но fire-and-forget этот пакет — освободит relay-порт сразу. Не ждём
+    // ответа — мы уже на пути к выходу из task'а.
+    if let Some(server) = turn_route.server {
+        let tid = stun::fresh_transaction_id();
+        let pkt = turn::build_refresh_no_auth(tid, 0);
+        let _ = socket.send_to(&pkt, server).await;
     }
 
     // Явное зануление ключей (Drop тоже сделает, но фиксируем намерение).

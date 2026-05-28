@@ -4,6 +4,7 @@ use crate::routes::{
     call_poll::{ApiResponse as PollResp, CallEnvelopeOut, CallPollRequest},
     call_signal::{ApiResponse as CallSignalResp, CallSignalRequest},
     determinate::{ApiResponse as DetResp, DeterminateRequest},
+    map::{ApiResponse as MapResp, MapRequest},
     notify::{ApiResponse as NotifyResp, NotifyRequest},
     pull::{ApiResponse as PullResp, PullRequest},
     push::{ApiResponse as PushResp, PushRequest},
@@ -180,6 +181,73 @@ impl Cover for FoodDeliveryCover {
         })
     }
 
+    // ====================== MAP ======================
+
+    /// Внешний формат /map:
+    /// {
+    ///   "operation": "scanInventory",
+    ///   "clientId": "alice",
+    ///   "partnerId": "bob",
+    ///   "cursor": 0,
+    ///   "toSeq": 0,
+    ///   "auth": "<sig base64>"
+    /// }
+    fn unwrap_map(&self, body: &Value) -> Result<MapRequest> {
+        let op = body["operation"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no operation"))?;
+        if op != "scanInventory" {
+            return Err(anyhow!("unsupported operation"));
+        }
+
+        Ok(MapRequest {
+            sender: body["clientId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no clientId"))?
+                .to_string(),
+            recver: body["partnerId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no partnerId"))?
+                .to_string(),
+            after_seq: body["cursor"]
+                .as_u64()
+                .ok_or_else(|| anyhow!("no cursor"))?,
+            to_seq: body["toSeq"].as_u64().ok_or_else(|| anyhow!("no toSeq"))?,
+            sig: body["auth"]
+                .as_str()
+                .ok_or_else(|| anyhow!("no auth"))?
+                .to_string(),
+        })
+    }
+
+    /// Внешний формат ответа /map:
+    /// {
+    ///   "ok": true,
+    ///   "shelves": [[5, 1247], [1300, 1342]],
+    ///   "topShelf": 1500,
+    ///   "more": false
+    /// }
+    fn wrap_map_response(&self, resp: &MapResp) -> Value {
+        if !resp.success {
+            return json!({
+                "ok": false,
+                "status": "error",
+                "message": resp.message,
+            });
+        }
+        let shelves: Vec<Value> = resp
+            .runs
+            .iter()
+            .map(|(begin, end)| json!([begin, end]))
+            .collect();
+        json!({
+            "ok": true,
+            "shelves": shelves,
+            "topShelf": resp.last_seq,
+            "more": resp.truncated,
+        })
+    }
+
     // ===================== NOTIFY =====================
 
     /// Внешний формат /notify:
@@ -249,7 +317,8 @@ impl Cover for FoodDeliveryCover {
     ///   "operation": "cleanupHistory",
     ///   "clientId": "alice",
     ///   "partnerId": "bob",
-    ///   "cutoff": 123,
+    ///   "fromSeq": 0,
+    ///   "toSeq": 123,
     ///   "auth": "<sig base64>"
     /// }
     fn unwrap_determinate(&self, body: &Value) -> Result<DeterminateRequest> {
@@ -268,9 +337,12 @@ impl Cover for FoodDeliveryCover {
             .as_str()
             .ok_or_else(|| anyhow!("no partnerId"))?
             .to_string();
-        let cut_seq = body["cutoff"]
+        let from_seq = body["fromSeq"]
             .as_u64()
-            .ok_or_else(|| anyhow!("no cutoff"))?;
+            .ok_or_else(|| anyhow!("no fromSeq"))?;
+        let to_seq = body["toSeq"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("no toSeq"))?;
         let sig = body["auth"]
             .as_str()
             .ok_or_else(|| anyhow!("no auth"))?
@@ -279,7 +351,8 @@ impl Cover for FoodDeliveryCover {
         Ok(DeterminateRequest {
             sender,
             recver,
-            cut_seq,
+            from_seq,
+            to_seq,
             sig,
         })
     }

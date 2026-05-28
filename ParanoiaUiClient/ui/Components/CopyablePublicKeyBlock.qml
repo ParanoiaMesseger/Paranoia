@@ -82,16 +82,19 @@ Rectangle {
                 property bool copied: false
                 property bool showCheck: false
 
-                Canvas {
+                AppIcon {
                     id: copyCanvas
                     anchors.centerIn: parent
                     width: 20
                     height: 20
-                    antialiasing: true
+                    name: "copy"
+                    iconColor: Theme.accentHover
+                    fillColor: hovered ? Theme.bgButton : "transparent"
+                    secondaryColor: Theme.bgPrimary
+                    strokeWidth: 1.5
 
                     property bool hovered: copyArea.containsMouse
 
-                    onHoveredChanged: requestPaint()
                     visible: !copyBtn.showCheck
 
                     transform: Rotation {
@@ -100,51 +103,6 @@ Rectangle {
                         origin.y: copyCanvas.height / 2
                         axis { x: 0; y: 1; z: 0 }
                         angle: 0
-                    }
-
-                    onPaint: {
-                        const ctx = getContext("2d");
-                        ctx.clearRect(0, 0, width, height);
-
-                        ctx.lineWidth = 1.5;
-                        ctx.lineJoin = "round";
-                        ctx.lineCap = "round";
-
-                        ctx.strokeStyle = Theme.accentHover;
-                        ctx.fillStyle = hovered ? Theme.bgButton : "transparent";
-
-                        // Задний лист
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.36, height * 0.28);
-                        ctx.lineTo(width * 0.72, height * 0.28);
-                        ctx.lineTo(width * 0.86, height * 0.44);
-                        ctx.lineTo(width * 0.86, height * 0.92);
-                        ctx.lineTo(width * 0.36, height * 0.92);
-                        ctx.closePath();
-                        ctx.fill();
-                        ctx.stroke();
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.72, height * 0.28);
-                        ctx.lineTo(width * 0.72, height * 0.44);
-                        ctx.lineTo(width * 0.86, height * 0.44);
-                        ctx.stroke();
-
-                        // Передний лист
-                        ctx.fillStyle = Theme.bgBase;
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.14, height * 0.08);
-                        ctx.lineTo(width * 0.58, height * 0.08);
-                        ctx.lineTo(width * 0.72, height * 0.24);
-                        ctx.lineTo(width * 0.72, height * 0.72);
-                        ctx.lineTo(width * 0.14, height * 0.72);
-                        ctx.closePath();
-                        ctx.fill();
-                        ctx.stroke();
-                        ctx.beginPath();
-                        ctx.moveTo(width * 0.58, height * 0.08);
-                        ctx.lineTo(width * 0.58, height * 0.24);
-                        ctx.lineTo(width * 0.72, height * 0.24);
-                        ctx.stroke();
                     }
                 }
 

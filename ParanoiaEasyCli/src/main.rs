@@ -781,9 +781,38 @@ enum DialogueCmd {
     },
 }
 
+/// CLI — это dev-инструмент: гонять «промышленную» policy с интерактивным
+/// PIN'ом тут оверкилл. Инициализируем vault в текущей папке (см. `.paranoia-cli-data/`)
+/// и заводим/анлокаем фиксированным PIN'ом из переменной окружения
+/// `PARANOIA_CLI_PIN` (по умолчанию — заведомо нестойкий "paranoia-cli-dev",
+/// который НЕ предназначен для прод-данных).
+fn init_vault_for_cli() -> Result<()> {
+    use paranoia_lib::local_vault;
+    let root = std::env::current_dir()
+        .context("cwd")?
+        .join(".paranoia-cli-data");
+    std::fs::create_dir_all(&root).with_context(|| format!("mkdir {}", root.display()))?;
+    local_vault::vault::set_app_data_root(root.clone());
+    if let Err(e) = local_vault::recover_pending_rekey() {
+        eprintln!("warn: recover_pending_rekey: {e}");
+    }
+    let pin = std::env::var("PARANOIA_CLI_PIN").unwrap_or_else(|_| "paranoia-cli-dev".to_string());
+    match local_vault::status().context("vault status")? {
+        local_vault::VaultStatus::NotInitialized => {
+            local_vault::set_pin(&pin).context("vault set_pin")?;
+        }
+        local_vault::VaultStatus::Locked => {
+            local_vault::unlock(&pin).context("vault unlock — wrong PARANOIA_CLI_PIN?")?;
+        }
+        local_vault::VaultStatus::Unlocked => {}
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    init_vault_for_cli()?;
 
     match cli.command {
         Commands::Admin { cmd } => match cmd {

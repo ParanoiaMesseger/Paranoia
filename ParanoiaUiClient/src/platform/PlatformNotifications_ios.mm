@@ -296,6 +296,16 @@ extern "C" void paranoia_ios_show_message_count(unsigned long long count, const 
     [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
 }
 
+extern "C" void paranoia_ios_clear_delivered_notifications()
+{
+    UNUserNotificationCenter *center = UNUserNotificationCenter.currentNotificationCenter;
+    [center removeAllDeliveredNotifications];
+    [center removeAllPendingNotificationRequests];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIApplication.sharedApplication.applicationIconBadgeNumber = 0;
+    });
+}
+
 extern "C" bool paranoia_ios_take_open_target(char **out_profile_id, char **out_peer)
 {
     if (out_profile_id == nullptr || out_peer == nullptr) return false;

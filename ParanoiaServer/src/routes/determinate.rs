@@ -9,8 +9,9 @@ use tracing::warn;
 pub struct DeterminateRequest {
     pub sender: String,
     pub recver: String,
-    pub cut_seq: u64,
-    pub sig: String, // подпись от sender+recver+cut_seq
+    pub from_seq: u64, // 0 = с начала диалога
+    pub to_seq: u64,
+    pub sig: String, // подпись от sender+recver+from_seq+to_seq
 }
 
 #[derive(Serialize)]
@@ -20,7 +21,6 @@ pub struct ApiResponse {
 }
 
 pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
-    // Cover → Core
     let req = match state.cover.unwrap_determinate(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -41,10 +41,15 @@ pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>)
 async fn do_determinate(state: &Arc<AppState>, req: DeterminateRequest) -> ApiResponse {
     let sig = match crypto::decode_b64(&req.sig) {
         Ok(v) => v,
-        Err(_) => {
-            return fail("Bad sig encoding".into());
-        }
+        Err(_) => return fail("Bad sig encoding".into()),
     };
+
+    if req.to_seq == 0 {
+        return fail("to_seq must be > 0".into());
+    }
+    if req.from_seq != 0 && req.from_seq > req.to_seq {
+        return fail("Invalid range".into());
+    }
 
     // Удалить может любой участник диалога — проверяем обоих
     let (sender_pub, recver_pub) = {
@@ -53,36 +58,30 @@ async fn do_determinate(state: &Arc<AppState>, req: DeterminateRequest) -> ApiRe
         let r = cfg.user_pubkey_bytes(&req.recver);
         match (s, r) {
             (Some(s), Some(r)) => (s, r),
-            _ => {
-                return fail("One user in pair not registered".into());
-            }
+            _ => return fail("One user in pair not registered".into()),
         }
     };
 
-    let signed_msg = format!("{}{}{}", req.sender, req.recver, req.cut_seq);
+    let signed_msg = format!(
+        "{}{}{}{}",
+        req.sender, req.recver, req.from_seq, req.to_seq
+    );
     let valid = crypto::verify_signature(&sender_pub, signed_msg.as_bytes(), &sig).is_ok()
         || crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok();
-
     if !valid {
-        dbg!(
+        warn!(
             "Invalid determinate signature for dialogue {}<->{}",
-            req.sender,
-            req.recver
+            req.sender, req.recver
         );
         return fail("Invalid signature".into());
     }
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
-    match state.store.remove_until(&dialogue_id, req.cut_seq) {
-        Ok(_) => {
-            dbg!(
-                "Dialogue {}<->{}: removed up to seq {}",
-                req.sender,
-                req.recver,
-                req.cut_seq
-            );
-            ok("OK".into())
-        }
+    match state
+        .store
+        .remove_range(&dialogue_id, req.from_seq, req.to_seq)
+    {
+        Ok(_) => ok("OK".into()),
         Err(e) => fail(format!("{e}")),
     }
 }

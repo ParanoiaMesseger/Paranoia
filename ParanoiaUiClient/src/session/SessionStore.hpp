@@ -19,7 +19,8 @@ public:
     std::shared_ptr<ServerSession> addSession(std::shared_ptr<ParanoiaFFI> ffi, const QString &server,
                                               const QString &username, const QString &serverId,
                                               const QString &privateKey, const QString &profileId,
-                                              const QStringList &reserveServerUrls = {});
+                                              const QStringList &reserveServerUrls = {},
+                                              const QStringList &turnServerUrls    = {});
     void setActiveSession(const std::shared_ptr<ServerSession> &session);
     void removeSession(const std::shared_ptr<ServerSession> &session);
 

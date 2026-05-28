@@ -17,6 +17,10 @@ namespace PlatformNotifications
     void startBackgroundPollingService();
     void stopBackgroundPollingService();
     void showMessageCount(quint64 count, const QString &profileId, const QString &peer = {});
+    // Очистка всех ранее показанных уведомлений о новых сообщениях. Вызывается,
+    // когда приложение выходит в foreground — даже если открыто не по тапу
+    // уведомления, накопленные карточки в шторке должны исчезнуть.
+    void clearAccumulatedNotifications();
     NotificationTarget takeOpenTargetFromNotification();
     QString takeOpenPeerFromNotification();
     void triggerBackgroundPoll();

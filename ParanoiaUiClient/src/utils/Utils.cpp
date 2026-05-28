@@ -5,9 +5,51 @@
 #include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QMutex>
+#include <QUrl>
+
+#include <ParanoiaFFI>
 
 namespace Utils
 {
+    namespace {
+        QMutex g_vaultIoMutex;
+        bool g_vaultIoFailed = false;
+        QString g_vaultIoReason;
+
+        void markVaultIoFailure(const QString &reason)
+        {
+            QMutexLocker lock(&g_vaultIoMutex);
+            if (!g_vaultIoFailed) {
+                g_vaultIoFailed = true;
+                g_vaultIoReason = reason;
+                qCritical().noquote()
+                    << "vault IO failure detected — entering read-only mode for"
+                       " vault-protected paths until restart:"
+                    << reason;
+            }
+        }
+    }
+
+    bool vaultIoFailureDetected()
+    {
+        QMutexLocker lock(&g_vaultIoMutex);
+        return g_vaultIoFailed;
+    }
+
+    QString vaultIoFailureReason()
+    {
+        QMutexLocker lock(&g_vaultIoMutex);
+        return g_vaultIoReason;
+    }
+
+    void resetVaultIoFailure()
+    {
+        QMutexLocker lock(&g_vaultIoMutex);
+        g_vaultIoFailed = false;
+        g_vaultIoReason.clear();
+    }
+
     void setOwnerOnlyPermissions(const QString &path)
     { QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner); }
 
@@ -129,14 +171,26 @@ namespace Utils
 
     quint64 readSeq(const QJsonValue &value, bool *ok)
     {
-        bool parsed       = {};
-        const quint64 seq = (value.isString() ? value.toString() : value.toVariant()).toULongLong(&parsed);
+        bool parsed       = false;
+        const quint64 seq = value.toVariant().toULongLong(&parsed);
         if (ok) *ok = parsed && seq > 0;
         return seq;
     }
 
     bool writeFile(const QString &path, const QByteArray &data)
     {
+        if (Paths::isVaultProtected(path)) {
+            // Read-only mode после детекции corruption: писать в защищённые
+            // пути нельзя — иначе перезапишем недешифруемые данные новыми
+            // зашифрованными байтами и навсегда потеряем содержимое.
+            if (vaultIoFailureDetected()) {
+                qCritical().noquote()
+                    << "writeFile refused (vault read-only mode):" << path
+                    << "reason:" << vaultIoFailureReason();
+                return false;
+            }
+            return ParanoiaFFI::vault_encrypt_json(path, data) == 0;
+        }
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
         return file.write(data) == data.size();
@@ -144,9 +198,34 @@ namespace Utils
 
     QByteArray readAll(const QString &path)
     {
+        if (Paths::isVaultProtected(path)) {
+            if (!QFile::exists(path)) return {};
+            QByteArray decrypted = ParanoiaFFI::vault_decrypt_json(path);
+            if (decrypted.isEmpty()) {
+                const QString err = ParanoiaFFI::last_error();
+                // "vault_locked" — нормальный случай до ввода PIN'а. Это не
+                // corruption: тот же файл успешно прочитается после unlock'а.
+                // Не помечаем как failure, чтобы не блокировать запись потом.
+                if (!err.contains(QStringLiteral("vault_locked"))) {
+                    markVaultIoFailure(
+                        QStringLiteral("decrypt failed for %1: %2").arg(path, err));
+                }
+            }
+            return decrypted;
+        }
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly)) return {};
         return file.readAll();
+    }
+
+    QString normalizeLocalFilePath(const QString &raw)
+    {
+        const QString trimmed = raw.trimmed();
+        if (trimmed.startsWith(QStringLiteral("file:"))) {
+            const QString local = QUrl(trimmed).toLocalFile();
+            if (!local.isEmpty()) return local;
+        }
+        return trimmed;
     }
 
 }

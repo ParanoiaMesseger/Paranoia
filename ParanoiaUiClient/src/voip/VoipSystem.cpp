@@ -127,6 +127,7 @@ namespace paranoia::voip
             callSignaling_.setPeerKeyring({});
             callController_.setStunServer(deriveStunForServer(QString()));
             callController_.setTurnServer(deriveTurnForServer(QString()));
+            callController_.setBackupTurnServers({});
             return;
         }
 
@@ -140,6 +141,12 @@ namespace paranoia::voip
         const QString turnForActive = deriveTurnForServer(active->server);
         callController_.setTurnServer(turnForActive);
         if (!turnForActive.isEmpty()) { qInfo().noquote() << "VoIP: TURN server for active session" << turnForActive; }
+        // Резервные TURN-сервера из профиля. Порядок сохраняем как у пользователя.
+        callController_.setBackupTurnServers(active->turnServerUrls);
+        if (!active->turnServerUrls.isEmpty()) {
+            qInfo().noquote() << "VoIP: backup TURN servers for active session"
+                              << active->turnServerUrls.join(QStringLiteral(", "));
+        }
 
         callSignaling_.setHandle(active->ffi);
         callSignaling_.setUser(selfUserId);

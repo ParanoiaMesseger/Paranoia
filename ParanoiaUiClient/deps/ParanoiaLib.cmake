@@ -73,5 +73,10 @@ function(setup_paranoia_lib TARGET)
         )
     elseif(WIN32)
         target_link_libraries(${TARGET} PRIVATE ws2_32 userenv bcrypt ntdll)
+        # rusqlite/bundled-sqlcipher линкуется к OpenSSL только под Windows
+        # (на Android используется vendored-openssl, см. ParanoiaLibrary/Cargo.toml).
+        # CMake находит установку через OPENSSL_ROOT_DIR (vcpkg x64-windows-static-md на CI).
+        find_package(OpenSSL REQUIRED)
+        target_link_libraries(${TARGET} PRIVATE OpenSSL::SSL OpenSSL::Crypto crypt32 secur32)
     endif()
 endfunction()

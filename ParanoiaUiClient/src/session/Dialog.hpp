@@ -20,5 +20,8 @@ public:
     QString peerServerId;
     QList<DialogKeyEntry> keyring;
     QString lastMsg;
+    // Локальный черновик ввода (не синхронизируется с сервером). Хранится
+    // здесь же, чтобы не плодить лишних файлов и чтобы профиль самосогласован.
+    QString draft;
     bool receiptsEnabled = true;
 };

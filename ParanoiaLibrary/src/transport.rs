@@ -39,11 +39,29 @@ pub struct CoreNotify {
     pub sig: Vec<u8>,
 }
 
-/// Внутренний запрос determinate.
+/// Внутренний запрос /map: получить карту живых seq в диалоге.
+pub struct CoreMap {
+    pub sender: String,
+    pub recver: String,
+    pub after_seq: u64,
+    pub to_seq: u64,
+    pub sig: Vec<u8>,
+}
+
+/// Ответ /map.
+#[derive(Debug, Clone)]
+pub struct MapResponse {
+    pub runs: Vec<(u64, u64)>,
+    pub last_seq: u64,
+    pub truncated: bool,
+}
+
+/// Внутренний запрос determinate (ranged-delete `[from_seq, to_seq]`).
 pub struct CoreDeterminate {
     pub sender: String,
     pub recver: String,
-    pub cut_seq: u64,
+    pub from_seq: u64,
+    pub to_seq: u64,
     pub sig: Vec<u8>,
 }
 
@@ -183,6 +201,12 @@ impl Transport {
         let body = self.cover.wrap_pull(core)?;
         let resp = self.put_json("/pull", &body).await?;
         self.cover.unwrap_pull_response(&resp)
+    }
+
+    pub async fn map(&self, core: &CoreMap) -> Result<MapResponse> {
+        let body = self.cover.wrap_map(core)?;
+        let resp = self.put_json("/map", &body).await?;
+        self.cover.unwrap_map_response(&resp)
     }
 
     pub async fn notify(&self, core: &CoreNotify) -> Result<u64> {
@@ -495,7 +519,9 @@ fn percent_encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{CoreDeterminate, CoreNotify, CorePull, CorePush, RawPacket};
+    use crate::transport::{
+        CoreDeterminate, CoreMap, CoreNotify, CorePull, CorePush, MapResponse, RawPacket,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -511,6 +537,10 @@ mod tests {
             unreachable!()
         }
 
+        fn wrap_map(&self, _core: &CoreMap) -> Result<Value> {
+            unreachable!()
+        }
+
         fn wrap_notify(&self, _core: &CoreNotify) -> Result<Value> {
             unreachable!()
         }
@@ -520,6 +550,10 @@ mod tests {
         }
 
         fn unwrap_pull_response(&self, _body: &Value) -> Result<Vec<RawPacket>> {
+            unreachable!()
+        }
+
+        fn unwrap_map_response(&self, _body: &Value) -> Result<MapResponse> {
             unreachable!()
         }
 

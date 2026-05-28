@@ -1,5 +1,6 @@
 #include "adminStorage.hpp"
 
+#include "Paths.hpp"
 #include "Utils.hpp"
 
 #include <QJsonArray>
@@ -25,7 +26,8 @@ QFuture<bool> admin::Admin::regUser(const QString &username, const QString &pubk
 void admin::Admin::initAdmins()
 {
     admins.clear();
-    const QByteArray raw = Utils::readAll("admins.crypt");
+    const QString path = Paths::admins();
+    const QByteArray raw = Utils::readAll(path);
     const auto doc       = QJsonDocument::fromJson(raw);
     if (doc.isArray()) {
         for (const auto &value : doc.array()) {
@@ -57,6 +59,7 @@ void admin::Admin::saveAdmins()
             Utils::stringListToJsonArray(Utils::normalizedServerUrls(admin.reserveServerUrls, admin.domain));
         arr.append(obj);
     }
-    if (Utils::writeFile("admins.crypt", QJsonDocument(arr).toJson(QJsonDocument::Compact)))
-        Utils::setOwnerOnlyPermissions("admins.crypt");
+    const QString path = Paths::admins();
+    if (Utils::writeFile(path, QJsonDocument(arr).toJson(QJsonDocument::Compact)))
+        Utils::setOwnerOnlyPermissions(path);
 }

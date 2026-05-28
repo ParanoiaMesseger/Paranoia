@@ -13,6 +13,13 @@ Rectangle {
     property string highlightProfileId: ""
     property string highlightPeer: ""
     property var sessionsData: []
+    // Share-target: если приложение открыли через системный share-sheet,
+    // показываем баннер «выберите чат» и передаём содержимое в выбранный
+    // ChatPage через signal openChat (Main.qml собирает props).
+    property string shareTargetText: ""
+    property var shareTargetFiles: []
+    readonly property bool hasShareTarget: shareTargetText.length > 0 || (shareTargetFiles && shareTargetFiles.length > 0)
+    signal cancelShareTarget()
 
     function refreshSessions() { sessionsData = Backend.getSessionList() }
     function currentProfileId() {
@@ -32,10 +39,10 @@ Rectangle {
     signal openImport()
     signal openAddDialog()
     signal openUpdateKey(string peer)
-    signal openClearHistory(string peer)
     signal openRegisterUser(string domain)
     signal openAddReserveDomain(string targetType, string targetId, string primaryDomain)
     signal openVersionInfo()
+    signal openChangePin()
 
     function reserveDomainsText(domains) {
         if (!domains || domains.length === 0)
@@ -52,7 +59,7 @@ Rectangle {
     // Закрывает верхний открытый попап. Возвращает true, если что-то закрыл.
     function handleBackButton(): bool {
         var popups = [
-            deleteLocalPopup,
+            clearDialogPopup,
             deleteDialogPopup,
             noKeyWarning
         ]
@@ -93,6 +100,76 @@ Rectangle {
     ColumnLayout {
         anchors.fill: parent
         spacing:      0
+
+        // ── Share-target banner ───────────────────────────
+        Rectangle {
+            id: shareBanner
+            Layout.fillWidth: true
+            Layout.preferredHeight: root.hasShareTarget ? 56 : 0
+            visible: root.hasShareTarget
+            color: Theme.accentDim
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 8
+                spacing: 8
+
+                Column {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 2
+                    Text {
+                        text: "Поделиться в чат — выберите получателя"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSm
+                        font.family: Theme.fontFamily
+                        font.weight: Font.Medium
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        width: parent.width
+                        text: {
+                            if (root.shareTargetText.length > 0)
+                                return root.shareTargetText.length > 70
+                                       ? root.shareTargetText.substring(0, 70) + "…"
+                                       : root.shareTargetText
+                            if (root.shareTargetFiles && root.shareTargetFiles.length > 0)
+                                return "Файлов: " + root.shareTargetFiles.length
+                            return ""
+                        }
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontXs
+                        font.family: Theme.fontFamily
+                        elide: Text.ElideRight
+                    }
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 36
+                    Layout.preferredHeight: 36
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: Theme.radiusSm
+                    color: shareCancelArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: 1
+                    border.color: Theme.border
+                    AppIcon {
+                        anchors.centerIn: parent
+                        width: 16; height: 16
+                        name: "close"
+                        iconColor: Theme.accentHover
+                        strokeWidth: 2
+                    }
+                    MouseArea {
+                        id: shareCancelArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.cancelShareTarget()
+                    }
+                }
+            }
+        }
 
         // ── Заголовок ─────────────────────────────────────
         Rectangle {
@@ -157,13 +234,13 @@ Rectangle {
                 border.width: exportArea.containsMouse ? 1 : 0
                 border.color: Theme.border
 
-                Text {
+                AppIcon {
                     anchors.centerIn: parent
-                    text:  "IO"
-                    color: Theme.accentHover
-                    font.pixelSize: 12
-                    font.family: Theme.monoFamily
-                    font.weight: Font.DemiBold
+                    width: 20
+                    height: 20
+                    name: "importExport"
+                    iconColor: Theme.accentHover
+                    strokeWidth: 2
                 }
                 MouseArea {
                     id: exportArea
@@ -442,12 +519,15 @@ Rectangle {
                                     Text {
                                         text: {
                                             if (!modelData.hasKey) return "KEY MISSING // SIGNAL BLOCKED"
-                                            return modelData.lastMsg || "Нет сообщений"
+                                            return modelData.lastMsg ? String(modelData.lastMsg).replace(/\s+/g, " ") : "Нет сообщений"
                                         }
                                         color: !modelData.hasKey ? Theme.error : Theme.textSecondary
                                         font.pixelSize: Theme.fontSm
                                         font.family:    Theme.fontFamily
                                         elide:          Text.ElideRight
+                                        wrapMode:       Text.NoWrap
+                                        maximumLineCount: 1
+                                        clip:           true
                                         width:          dialogsView.width - 110
                                     }
                                 }
@@ -495,11 +575,12 @@ Rectangle {
                                 radius: 16
                                 color:  Theme.bgDark
 
-                                Text {
+                                AppIcon {
                                     anchors.centerIn: parent
-                                    text:  "⋮"
-                                    color: Theme.textSecondary
-                                    font.pixelSize: 18
+                                    width: 20
+                                    height: 20
+                                    name: "moreVertical"
+                                    iconColor: Theme.textSecondary
                                 }
 
                                 MouseArea {
@@ -566,11 +647,13 @@ Rectangle {
                             anchors.leftMargin: 16
                             spacing:            10
 
-                            Text {
+                            AppIcon {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text:  "+"
-                                color: Theme.accent
-                                font.pixelSize: Theme.fontLg
+                                width: 20
+                                height: 20
+                                name: "plus"
+                                iconColor: Theme.accent
+                                strokeWidth: 2.2
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
@@ -720,6 +803,13 @@ Rectangle {
 
                     ParaButton {
                         Layout.fillWidth: true
+                        text:             "Сменить PIN-код"
+                        secondary:        true
+                        onClicked:        root.openChangePin()
+                    }
+
+                    ParaButton {
+                        Layout.fillWidth: true
                         text:             "Версия приложения"
                         secondary:        true
                         onClicked:        root.openVersionInfo()
@@ -783,7 +873,7 @@ Rectangle {
                 }
             }
 
-            // ── Очистить историю на сервере ────────────────────────────────
+            // ── Очистить диалог ────────────────────────────────────────────
             Rectangle {
                 width: contextMenuColumn.width
                 height: 34
@@ -795,7 +885,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Очистить историю на сервере"
+                    text: "Очистить диалог"
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -807,7 +897,8 @@ Rectangle {
                     hoverEnabled: true
                     onClicked: {
                         dlgContextMenu.close()
-                        root.openClearHistory(dlgContextMenu.selectedPeer)
+                        clearDialogTarget.text = dlgContextMenu.selectedPeer
+                        clearDialogPopup.open()
                     }
                 }
             }
@@ -817,36 +908,6 @@ Rectangle {
                 width: contextMenuColumn.width
                 height: 1
                 color: Theme.separator
-            }
-
-            // ── Удалить локальную историю ──────────────────────────────────
-            Rectangle {
-                width: contextMenuColumn.width
-                height: 34
-                radius: Theme.radiusSm
-                color: deleteLocalArea.containsMouse ? Theme.bgButton : "transparent"
-                Text {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.leftMargin: 10
-                    anchors.rightMargin: 10
-                    text: "Удалить локальную историю"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSm
-                    font.family: Theme.fontFamily
-                    elide: Text.ElideRight
-                }
-                MouseArea {
-                    id: deleteLocalArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: {
-                        dlgContextMenu.close()
-                        deleteLocalTarget.text = dlgContextMenu.selectedPeer
-                        deleteLocalPopup.open()
-                    }
-                }
             }
 
             // ── Удалить диалог (деструктивный) ────────────────────────────
@@ -921,9 +982,9 @@ Rectangle {
         }
     }
 
-    // ── Попап: удалить локальную историю ─────────────────
+    // ── Попап: очистить диалог (сервер + локально, ключи сохраняются) ───
     Popup {
-        id: deleteLocalPopup
+        id: clearDialogPopup
         anchors.centerIn: Overlay.overlay
         width: 320; padding: 24
         modal: true
@@ -940,7 +1001,7 @@ Rectangle {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text:  "Удалить локальную историю"
+                text:  "Очистить диалог"
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontLg
                 font.family:    Theme.fontFamily
@@ -948,7 +1009,7 @@ Rectangle {
             }
 
             Text {
-                id: deleteLocalTarget
+                id: clearDialogTarget
                 Layout.fillWidth: true
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
@@ -957,7 +1018,7 @@ Rectangle {
 
             Text {
                 Layout.fillWidth: true
-                text: "Локальная история диалога будет удалена из SQLite на этом устройстве. На сервере сообщения останутся зашифрованными."
+                text: "Вся история (тексты и файлы) удалится и с сервера, и на этом устройстве. На втором устройстве/у собеседника история исчезнет при следующей синхронизации. Ключ диалога сохраняется — можно продолжить переписку."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family:    Theme.fontFamily
@@ -970,10 +1031,10 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Удалить"
+                    text: "Очистить"
                     onClicked: {
-                        Backend.deleteDialogLocal(deleteLocalTarget.text)
-                        deleteLocalPopup.close()
+                        Backend.clearDialogHistory(clearDialogTarget.text)
+                        clearDialogPopup.close()
                     }
                 }
 
@@ -981,7 +1042,7 @@ Rectangle {
                     Layout.fillWidth: true
                     text: "Отмена"
                     secondary: true
-                    onClicked: deleteLocalPopup.close()
+                    onClicked: clearDialogPopup.close()
                 }
             }
         }

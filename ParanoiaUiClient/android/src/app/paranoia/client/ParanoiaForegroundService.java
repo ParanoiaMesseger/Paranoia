@@ -811,6 +811,14 @@ public final class ParanoiaForegroundService extends Service {
         }
     }
 
+    // Публичная точка входа для C++ (см. PlatformNotifications::clearAccumulatedNotifications).
+    // Чистит все message-карточки при ручном открытии приложения, даже если событие
+    // PREF_APP_FOREGROUND ещё не прошло через сервисный Intent.
+    public static void clearMessageNotifications(Context context) {
+        if (context == null) return;
+        cancelMessageNotification(context);
+    }
+
     private static SharedPreferences prefs(Context context) {
         return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
