@@ -4,5 +4,6 @@ store
 .idea
 Plan.md
 ExportKeyring.md
-build_android
+/build_*
+*cache
 installer/packages/app.paranoia.client/data/

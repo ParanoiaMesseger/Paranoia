@@ -65,4 +65,18 @@ namespace Utils
     /// принимающих путь от QML, чтобы не зависеть от того, нормализован ли
     /// он на стороне QML.
     QString normalizeLocalFilePath(const QString &raw);
+
+    /// То же, что normalizeLocalFilePath, плюс на Android поддерживает SAF
+    /// `content://` URI: копирует контент во временный файл в CacheLocation
+    /// и возвращает локальный путь. На non-Android платформах для content://
+    /// вернёт пустую строку — caller должен показать понятную ошибку.
+    /// Использовать там, где входной путь приходит из QML FileDialog
+    /// (QtQuick.Dialogs возвращает content:// на Android Q+).
+    QString resolveImportPath(const QString &urlOrUri);
+
+    /// Записывает данные в локальный файл ИЛИ в Android content:// URI (SAF).
+    /// Для content:// пишет во временный файл и копирует его через
+    /// ContentResolver (ParanoiaAndroidUtils.copyFileToUri). Симметрично
+    /// resolveImportPath на стороне импорта. Возвращает true при успехе.
+    bool writeBytesToTarget(const QString &target, const QByteArray &data);
 }

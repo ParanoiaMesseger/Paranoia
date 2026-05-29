@@ -1053,9 +1053,75 @@ void ChatBackend::fetchMessages()
             if (!appActive && !messages.isEmpty()) {
                 emit self->backgroundMessagesReceived(profileId, peer, static_cast<quint64>(messages.size()));
             }
+            if (!messages.isEmpty()) {
+                // last_pulled_seq в SQLCipher сдвинулся: пора обновить snapshot
+                // в notifications-сервисе, чтобы он не нотифицировал нас
+                // про уже прочитанные.
+                emit self->pulledNewMessages();
+            }
             if (self->m_receiveAgainAfterCurrent) {
                 self->m_receiveAgainAfterCurrent = false;
                 self->fetchMessages();
+            }
+        });
+    });
+}
+
+void ChatBackend::prefetchAllDialogs()
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const QString serverId = session->serverId;
+    if (serverId.isEmpty()) return;
+
+    // Снапшот списка диалогов под mutex; receive_keyring дёргаем уже без
+    // удержания основного списка (ffiMutex держим только во время самого
+    // вызова к ParanoiaFFI). Это та же конструкция, что в fetchMessages —
+    // но прокручиваем по ВСЕМ peer'ам, а не только активному. Цель: после
+    // unlock'а пользователь видит свежие сообщения в UI сразу, без ожидания
+    // следующего alarm-цикла сервиса.
+    struct PeerTask {
+        QString peer;
+        QString peerId;
+        QString keyringJson;
+    };
+    QList<PeerTask> tasks;
+    for (const Dialog &d : session->dialogs) {
+        if (d.peer.isEmpty() || d.peerServerId.isEmpty()) continue;
+        tasks.append({d.peer, d.peerServerId, d.keyringJson()});
+    }
+    if (tasks.isEmpty()) return;
+
+    const QString profileId = session->profileId;
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, session, serverId, profileId, tasks]() {
+        if (!self) return;
+        bool anyAdvanced = false;
+        QList<QPair<QString, QVariantList>> appended;
+        for (const PeerTask &t : tasks) {
+            QString json;
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                if (!session->ffi) break;
+                json = session->ffi->receive_keyring(serverId, t.peerId, t.keyringJson);
+            }
+            if (json.isEmpty()) continue;
+            if (!self) return;
+            const QVariantList messages = self->parseMessages(json);
+            if (messages.isEmpty()) continue;
+            anyAdvanced = true;
+            appended.append({t.peer, messages});
+        }
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, appended, anyAdvanced]() {
+            if (!self) return;
+            for (const auto &pair : appended) {
+                self->appendMessages(pair.first, pair.second);
+            }
+            if (anyAdvanced) {
+                // Snapshot для сервиса перезаписать новым seq, чтобы он
+                // не нотифицировал про уже подтянутые сообщения.
+                emit self->pulledNewMessages();
             }
         });
     });

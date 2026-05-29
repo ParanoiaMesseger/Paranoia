@@ -79,22 +79,43 @@ Rectangle {
 
     Component.onCompleted: root.refreshSessions()
 
+    // Список всех диалогов (источник); отображается отфильтрованным/отсортированным.
+    property var allDialogs: Backend.getDialogs()
+    // Строка поиска по имени собеседника.
+    property string dialogQuery: ""
+
+    // Фильтр по имени + сортировка: непрочитанные сверху, затем по убыванию
+    // количества непрочитанных, затем по алфавиту.
+    function filteredDialogs() {
+        const q = root.dialogQuery.trim().toLowerCase()
+        const src = (root.allDialogs || []).filter(function(d) {
+            return q === "" || (d.peer || "").toLowerCase().indexOf(q) !== -1
+        })
+        return src.slice().sort(function(a, b) {
+            const ua = a.unreadCount || 0
+            const ub = b.unreadCount || 0
+            if ((ua > 0) !== (ub > 0)) return ua > 0 ? -1 : 1
+            if (ua !== ub) return ub - ua
+            return (a.peer || "").localeCompare(b.peer || "")
+        })
+    }
+
     Connections {
         target: Backend
-        function onDialogsChanged()    { dialogsView.model = Backend.getDialogs(); root.refreshSessions() }
+        function onDialogsChanged()    { root.allDialogs = Backend.getDialogs(); root.refreshSessions() }
         function onAdminStateChanged() { adminServersView.model = Backend.getAdminServers() }
-        function onDialogDeleted(peer) { dialogsView.model = Backend.getDialogs() }
+        function onDialogDeleted(peer) { root.allDialogs = Backend.getDialogs() }
         function onSessionsChanged()   { root.refreshSessions() }
     }
 
     Connections {
         target: Chat
-        function onDialogsChanged() { dialogsView.model = Backend.getDialogs() }
+        function onDialogsChanged() { root.allDialogs = Backend.getDialogs() }
     }
 
     Connections {
         target: Notifications
-        function onDialogsChanged() { dialogsView.model = Backend.getDialogs(); root.refreshSessions() }
+        function onDialogsChanged() { root.allDialogs = Backend.getDialogs(); root.refreshSessions() }
     }
 
     ColumnLayout {
@@ -348,7 +369,7 @@ Rectangle {
 
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text:  "NODE // " + Backend.server
+                                text:  Backend.server
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSm
                                 font.family:    Theme.fontFamily
@@ -430,12 +451,96 @@ Rectangle {
                         }
                     }
 
+                    // Поиск по диалогам
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 6
+                        height: 36
+                        radius: Theme.radiusMd
+                        color: Theme.bgInput
+                        border.width: 1
+                        border.color: dialogSearchField.activeFocus ? Theme.accent : Theme.border
+                        Behavior on border.color { ColorAnimation { duration: 100 } }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 8
+                            spacing: 6
+
+                            // Иконка поиска — AppIcon (SVG), а не юникод-глиф:
+                            // на Android шрифт может не иметь «⌕» и он не рендерится.
+                            AppIcon {
+                                Layout.preferredWidth: 16
+                                Layout.preferredHeight: 16
+                                Layout.alignment: Qt.AlignVCenter
+                                name: "search"
+                                iconColor: Theme.textHint
+                                strokeWidth: 2
+                            }
+                            TextField {
+                                id: dialogSearchField
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSm
+                                font.family: Theme.fontFamily
+                                background: null
+                                verticalAlignment: TextInput.AlignVCenter
+                                // Обнуляем паддинги, чтобы вводимый текст
+                                // начинался ровно там же, где placeholder.
+                                topPadding: 0
+                                bottomPadding: 0
+                                leftPadding: 0
+                                rightPadding: 0
+                                inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
+                                onTextChanged: root.dialogQuery = text
+
+                                // Собственный placeholder вместо встроенного: в
+                                // Material-стиле (Android) встроенный «всплывает»
+                                // вверх и наезжает на границу поля.
+                                Text {
+                                    anchors.fill: parent
+                                    verticalAlignment: Text.AlignVCenter
+                                    visible: dialogSearchField.text.length === 0
+                                    text: "Поиск по имени…"
+                                    color: Theme.textHint
+                                    font: dialogSearchField.font
+                                    elide: Text.ElideRight
+                                }
+                            }
+                            Rectangle {
+                                Layout.preferredWidth: 24
+                                Layout.preferredHeight: 24
+                                Layout.alignment: Qt.AlignVCenter
+                                visible: dialogSearchField.text !== ""
+                                radius: Theme.radiusSm
+                                color: "transparent"
+                                AppIcon {
+                                    anchors.centerIn: parent
+                                    width: 14; height: 14
+                                    name: "close"
+                                    iconColor: Theme.textHint
+                                    strokeWidth: 2
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -4
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: { dialogSearchField.text = ""; root.dialogQuery = "" }
+                                }
+                            }
+                        }
+                    }
+
                     // Dialogs list
                     ListView {
                         id:               dialogsView
                         Layout.fillWidth: true
                         Layout.fillHeight:true
-                        model:            Backend.getDialogs()
+                        model:            root.filteredDialogs()
                         clip:             true
 
                         ScrollBar.vertical: ScrollBar {}
@@ -799,6 +904,19 @@ Rectangle {
                         text:             "Установить свой сервер"
                         secondary:        true
                         onClicked:        root.installNewServer()
+                    }
+
+                    ParaButton {
+                        Layout.fillWidth: true
+                        text:             "Корпоративная связка"
+                        secondary:        true
+                        onClicked: {
+                            const cfg = Backend.corporateConfig()
+                            corpUrlField.text = cfg.url || ""
+                            corpPskField.text = cfg.psk || ""
+                            corpStatus.text = ""
+                            corpPopup.open()
+                        }
                     }
 
                     ParaButton {
@@ -1217,6 +1335,65 @@ Rectangle {
                     text: "Отмена"
                     secondary: true
                     onClicked: deleteDialogPopup.close()
+                }
+            }
+        }
+    }
+
+    // ── Корпоративная связка (Корп-API) ───────────────────────────────────
+    Connections {
+        target: Backend
+        function onCorporateSyncFinished(ok, updated, message) {
+            corpStatus.text = ok ? ("✓ " + message + " (диалогов: " + updated + ")") : ("✗ " + message)
+            corpStatus.color = ok ? Theme.success : Theme.error
+        }
+    }
+
+    Popup {
+        id: corpPopup
+        anchors.centerIn: Overlay.overlay
+        modal: true
+        width: 460
+        padding: 0
+        background: Rectangle { color: Theme.bgCard; radius: Theme.radiusMd; border.color: Theme.accent; border.width: 1 }
+        contentItem: ColumnLayout {
+            spacing: 12
+            anchors.margins: 18
+
+            Text { text: "Корпоративная связка"; color: Theme.textPrimary
+                   font.pixelSize: Theme.fontLg; font.family: Theme.fontFamily; font.weight: Font.DemiBold }
+            Text {
+                Layout.fillWidth: true; Layout.preferredWidth: 420
+                wrapMode: Text.Wrap
+                text: "Адрес ноды дистрибуции и ваш PSK выдаёт администратор организации. Клиент по ним подтянет ключи диалогов с коллегами (связка шифруется вашим PSK; нода хранит только шифртекст)."
+                color: Theme.textSecondary; font.pixelSize: Theme.fontXs; font.family: Theme.fontFamily
+            }
+
+            ParaInput { id: corpUrlField; Layout.fillWidth: true; label: "URL ноды дистрибуции"
+                        placeholder: "https://api.example.com" }
+            ParaInput { id: corpPskField; Layout.fillWidth: true; label: "PSK (ключ доступа)"
+                        placeholder: "preshared key" }
+
+            Text { id: corpStatus; Layout.fillWidth: true; Layout.preferredWidth: 420
+                   text: ""; visible: text !== ""; wrapMode: Text.Wrap
+                   font.pixelSize: Theme.fontXs; font.family: Theme.fontFamily }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Сохранить и обновить"
+                    onClicked: {
+                        Backend.setCorporateApi(corpUrlField.text, corpPskField.text)
+                        corpStatus.text = "Синхронизация…"; corpStatus.color = Theme.textSecondary
+                        Backend.syncCorporateKeyring()
+                    }
+                }
+                ParaButton {
+                    text: "Закрыть"
+                    secondary: true
+                    onClicked: corpPopup.close()
                 }
             }
         }

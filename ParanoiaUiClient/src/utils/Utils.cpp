@@ -10,6 +10,15 @@
 
 #include <ParanoiaFFI>
 
+#if defined(Q_OS_ANDROID)
+#include <QJniEnvironment>
+#include <QJniObject>
+#include <QCoreApplication>
+#include <QStandardPaths>
+#include <QDir>
+#include <QDateTime>
+#endif
+
 namespace Utils
 {
     namespace {
@@ -226,6 +235,99 @@ namespace Utils
             if (!local.isEmpty()) return local;
         }
         return trimmed;
+    }
+
+    QString resolveImportPath(const QString &urlOrUri)
+    {
+        const QString trimmed = urlOrUri.trimmed();
+        if (trimmed.isEmpty()) return {};
+
+        // content:// — Android Storage Access Framework. QFile его не откроет
+        // напрямую; копируем в CacheLocation через ContentResolver (Java helper
+        // ParanoiaAndroidUtils.copyUriToCache, тот же что использует ChatBackend
+        // для sendFile). Полученный путь — обычный локальный файл, который
+        // caller обязан удалить после чтения.
+        if (trimmed.startsWith(QStringLiteral("content://"), Qt::CaseInsensitive)) {
+#if defined(Q_OS_ANDROID)
+            QJniObject context = QNativeInterface::QAndroidApplication::context();
+            if (!context.isValid()) return {};
+            const QJniObject javaUri = QJniObject::fromString(trimmed);
+            const QJniObject result  = QJniObject::callStaticObjectMethod(
+                "app/paranoia/client/ParanoiaAndroidUtils", "copyUriToCache",
+                "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                context.object<jobject>(), javaUri.object<jstring>());
+            QJniEnvironment env;
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
+            return result.isValid() ? result.toString() : QString();
+#else
+            return {};
+#endif
+        }
+
+        return normalizeLocalFilePath(trimmed);
+    }
+
+    bool writeBytesToTarget(const QString &target, const QByteArray &data)
+    {
+        const QString trimmed = target.trimmed();
+        if (trimmed.isEmpty()) return false;
+
+        // content:// — Android SAF. QFile его не откроет на запись напрямую:
+        // пишем во временный файл в CacheLocation и копируем в URI через
+        // ContentResolver (тот же Java-хелпер, что и ChatBackend::saveAttachment).
+        if (trimmed.startsWith(QStringLiteral("content://"), Qt::CaseInsensitive)) {
+#if defined(Q_OS_ANDROID)
+            const QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            if (cacheDir.isEmpty() || !QDir().mkpath(cacheDir)) return false;
+            const QString tmpPath =
+                cacheDir + QStringLiteral("/export-")
+                + QString::number(QDateTime::currentMSecsSinceEpoch()) + QStringLiteral(".tmp");
+            {
+                QFile tmp(tmpPath);
+                if (!tmp.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+                if (tmp.write(data) != data.size()) {
+                    tmp.close();
+                    QFile::remove(tmpPath);
+                    return false;
+                }
+            }
+            QJniObject context = QNativeInterface::QAndroidApplication::context();
+            bool ok = false;
+            if (context.isValid()) {
+                const QJniObject javaPath = QJniObject::fromString(tmpPath);
+                const QJniObject javaUri  = QJniObject::fromString(trimmed);
+                ok = QJniObject::callStaticMethod<jboolean>(
+                    "app/paranoia/client/ParanoiaAndroidUtils", "copyFileToUri",
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z",
+                    context.object<jobject>(), javaPath.object<jstring>(), javaUri.object<jstring>());
+                QJniEnvironment env;
+                if (env->ExceptionCheck()) {
+                    env->ExceptionDescribe();
+                    env->ExceptionClear();
+                    ok = false;
+                }
+            }
+            QFile::remove(tmpPath);
+            return ok;
+#else
+            return false;
+#endif
+        }
+
+        const QString local = normalizeLocalFilePath(trimmed);
+        if (local.isEmpty()) return false;
+        QFile file(local);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        if (file.write(data) != data.size()) {
+            file.close();
+            return false;
+        }
+        file.close();
+        setOwnerOnlyPermissions(local);
+        return true;
     }
 
 }

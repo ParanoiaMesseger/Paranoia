@@ -43,6 +43,45 @@ void paranoia_generate_keypair(char **out_secret, char **out_pubkey);
 int paranoia_register_user(CSTR server_url, CSTR reserve_server_urls_json, CSTR username, CSTR user_pubkey_b64,
                            CSTR secret_b64);
 
+// ── Admin-API (управление сервером по подписи администратора)
+// Все функции возвращают JSON-строку тела ответа сервера, либо NULL при сетевой
+// ошибке (см. paranoia_last_error). Освобождать через paranoia_free_string.
+// admin_secret_b64 — приватный Ed25519-ключ администратора (base64, 32 байта).
+//
+// list_users     → {"success":true,"count":N,"users":{username:pubkey,...}}
+// delete_user    → {"success":true,"message":"OK"} | {"success":false,"message":"..."}
+// list_dialogues → {"success":true,"count":N,"dialogues":[{"dialogue_id":...,"last_seq":N},...]}
+// prune          → {"success":true,"pruned":N,"pruned_ids":[...]}
+// get_config     → {"success":true,"config":{port,stun_bind,turn_*,users_count,...}}
+// set_config     → {"success":true,"message":"OK"}; patch_json — объект с полями
+//                  port/stun_bind/turn_public_ip/turn_relay_port_range.
+char *paranoia_admin_list_users(CSTR server_url, CSTR reserve_server_urls_json, CSTR admin_secret_b64);
+char *paranoia_admin_delete_user(CSTR server_url, CSTR reserve_server_urls_json, CSTR admin_secret_b64,
+                                 CSTR username);
+char *paranoia_admin_list_dialogues(CSTR server_url, CSTR reserve_server_urls_json, CSTR admin_secret_b64);
+char *paranoia_admin_prune_dialogues(CSTR server_url, CSTR reserve_server_urls_json, CSTR admin_secret_b64);
+char *paranoia_admin_get_config(CSTR server_url, CSTR reserve_server_urls_json, CSTR admin_secret_b64);
+char *paranoia_admin_set_config(CSTR server_url, CSTR reserve_server_urls_json, CSTR admin_secret_b64,
+                                CSTR patch_json);
+// Регистрация пользователя через admin put_json-путь. {"success":..,"message":..}
+char *paranoia_admin_register_user(CSTR server_url, CSTR reserve_server_urls_json, CSTR admin_secret_b64,
+                                   CSTR username, CSTR user_pubkey_b64);
+// Вывести admin-pubkey (base64) из приватного ключа. NULL при ошибке.
+char *paranoia_admin_pubkey_from_secret(CSTR admin_secret_b64);
+
+// ── Corporate/commercial distribution-нода
+// Зашифровать связку сотрудника PSK и запушить блоб (подпись админ-ключом).
+// plaintext — keyring JSON, version монотонно (unix-ms). JSON-ответ или NULL.
+char *paranoia_corp_publish(CSTR dist_url, CSTR admin_secret_b64, CSTR server_id, CSTR psk_b64,
+                            unsigned long long version, CSTR plaintext);
+// Удалить блоб сотрудника (подпись админ-ключом).
+char *paranoia_corp_delete(CSTR dist_url, CSTR admin_secret_b64, CSTR server_id);
+// Запушить коммерческий датасет (несекретный JSON, подпись админ-ключом).
+char *paranoia_commercial_publish(CSTR dist_url, CSTR admin_secret_b64, CSTR data_json);
+// Забрать+расшифровать связку (owner-proof подписью signing-ключом). plaintext
+// keyring JSON, "" если блоба нет, NULL при ошибке.
+char *paranoia_corp_sync(CSTR dist_url, CSTR server_id, CSTR signing_key_b64, CSTR psk_b64);
+
 // ── Сообщения
 // Keyring API
 // использует JSON: [{"start_seq":1,"key":"base64-32-bytes"}, ...]
@@ -77,6 +116,19 @@ char *paranoia_receive_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR
 // Проверить количество новых сообщений без загрузки payload.
 // Возвращает 0 при успехе и пишет результат в out_count.
 int paranoia_notify_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, uint64_t *out_count);
+
+// Полностью stateless проверка notify_count для notifications-сервиса. Не
+// открывает SQLCipher и не трогает vault. Все нужные параметры передаются
+// явно (см. ParanoiaLibrary/src/ffi.rs::paranoia_service_notify_count).
+//   signing_key_b64    — Ed25519 signing key, base64 32-байтовый seed.
+//   sender_server_id   — собственный server-side ID.
+//   partner_server_id  — server-side ID собеседника.
+//   seq                — последний известный last_pulled_seq (snapshot из UI).
+// 0=ok, иначе см. paranoia_last_error.
+int paranoia_service_notify_count(CSTR server_url, CSTR reserve_server_urls_json,
+                                  CSTR signing_key_b64, CSTR sender_server_id,
+                                  CSTR partner_server_id, uint64_t seq,
+                                  uint64_t *out_count);
 
 // Обновить локальные статусы прочтения через GET /arrived.
 // Возвращает 0 при успехе и пишет количество изменённых сообщений в out_changed.

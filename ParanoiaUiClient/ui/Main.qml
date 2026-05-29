@@ -106,6 +106,12 @@ ApplicationWindow {
                 if (current.handleBackButton()) return true;
             }
         }
+        // Открытая виртуальная клавиатура скрывается жестом «назад» — без
+        // выхода со страницы. Кнопки скрытия на самой клавиатуре больше нет.
+        if (appWindow.virtualKeyboardEnabled && Qt.inputMethod.visible) {
+            Qt.inputMethod.hide();
+            return true;
+        }
         if (stackView.depth > 1) {
             stackView.pop();
             return true;

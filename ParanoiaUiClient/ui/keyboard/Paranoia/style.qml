@@ -1,19 +1,24 @@
 import QtQuick
+import QtQuick.VirtualKeyboard
 import QtQuick.VirtualKeyboard.Styles
+import ParanoiaUiClient
 
 KeyboardStyle {
 
     // ── Palette ──────────────────────────────────────────
-    readonly property color clrBg:       "#08070a"
-    readonly property color clrKey:      "#12080C"
-    readonly property color clrKeyFn:    "#1B0A10"
-    readonly property color clrPressed:  "#C91122"
-    readonly property color clrEnter:    "#C91122"
-    readonly property color clrEnterPrs: "#FF2738"
-    readonly property color clrBorder:   "#3A1118"
-    readonly property color clrText:     "#F7E8EA"
-    readonly property color clrHint:     "#56323A"
-    readonly property color clrSpace:    "#0E0609"
+    // Привязано к Theme: клавиатура автоматически меняет цвета вместе с темой
+    // приложения (светлая/тёмная), см. ui/Theme.qml.
+    readonly property color clrBg:       Theme.bgPrimary
+    readonly property color clrKey:      Theme.bgCard
+    readonly property color clrKeyFn:    Theme.bgInput
+    readonly property color clrPressed:  Theme.accent
+    readonly property color clrEnter:    Theme.accent
+    readonly property color clrEnterPrs: Theme.accentHover
+    readonly property color clrBorder:   Theme.border
+    readonly property color clrText:     Theme.textPrimary
+    readonly property color clrHint:     Theme.textHint
+    readonly property color clrSpace:    Theme.bgDark
+    readonly property color clrShiftOn:  Theme.accentDim
     readonly property bool landscapeMode: Screen.width > Screen.height
 
     // ── Design geometry ───────────────────────────────────
@@ -39,7 +44,7 @@ KeyboardStyle {
                 anchors.centerIn: parent
                 text: control.displayText
                 color: clrText
-                font.pixelSize: 40
+                font.pixelSize: 30
                 font.weight: Font.Light
             }
 
@@ -48,7 +53,7 @@ KeyboardStyle {
                 anchors { top: parent.top; right: parent.right; margins: 1 }
                 text: control.smallText
                 color: clrHint
-                font.pixelSize: 14
+                font.pixelSize: 12
             }
         }
     }
@@ -59,17 +64,17 @@ KeyboardStyle {
             anchors { fill: parent; margins: 3 }
             radius: 5
             color: control.pressed ? clrPressed
-                 : control.uppercased ? "#4A060C"
+                 : control.uppercased ? clrShiftOn
                  : clrKeyFn
             border {
-                color: control.uppercased ? "#C91122" : clrBorder
+                color: control.uppercased ? clrEnter : clrBorder
                 width: 1
             }
 
             KeyboardIcon {
                 anchors.centerIn: parent
                 name: "shift"
-                iconColor: control.uppercased ? "#C91122" : clrText
+                iconColor: control.uppercased ? clrEnter : clrText
                 strokeWidth: 1.9
             }
         }
@@ -131,7 +136,7 @@ KeyboardStyle {
                 anchors.centerIn: parent
                 text: control.displayText
                 color: clrText
-                font.pixelSize: 22
+                font.pixelSize: 18
             }
         }
     }
@@ -148,7 +153,7 @@ KeyboardStyle {
                 anchors.centerIn: parent
                 text: control.displayText
                 color: clrText
-                font.pixelSize: 22
+                font.pixelSize: 18
             }
         }
     }
@@ -165,7 +170,7 @@ KeyboardStyle {
                 anchors.centerIn: parent
                 text: control.displayText
                 color: clrText
-                font.pixelSize: 22
+                font.pixelSize: 18
             }
         }
     }
@@ -182,7 +187,7 @@ KeyboardStyle {
                 anchors.centerIn: parent
                 text: control.displayText
                 color: clrText
-                font.pixelSize: 22
+                font.pixelSize: 18
             }
         }
     }
@@ -218,7 +223,7 @@ KeyboardStyle {
                 anchors.centerIn: parent
                 text: previewRoot.text
                 color: clrText
-                font.pixelSize: 52
+                font.pixelSize: 38
             }
         }
     }
@@ -233,7 +238,7 @@ KeyboardStyle {
             anchors.fill: parent
             anchors.margins: 3
             radius: 6
-            color: candidateItem.ListView.isCurrentItem ? "#351018" : "transparent"
+            color: candidateItem.ListView.isCurrentItem ? clrShiftOn : "transparent"
             border.width: candidateItem.ListView.isCurrentItem ? 1 : 0
             border.color: clrBorder
         }
@@ -258,7 +263,7 @@ KeyboardStyle {
     }
     selectionListHighlight: Rectangle {
         radius: 6
-        color: "#351018"
+        color: clrShiftOn
         border.width: 1
         border.color: clrBorder
     }
@@ -275,8 +280,8 @@ KeyboardStyle {
     }
 
     // ── Alternate keys popup (long-press) ─────────────────
-    alternateKeysListItemWidth:    80
-    alternateKeysListItemHeight:   80
+    alternateKeysListItemWidth:    50
+    alternateKeysListItemHeight:   50
     alternateKeysListTopMargin:     6
     alternateKeysListBottomMargin:  6
     alternateKeysListLeftMargin:    6
@@ -287,17 +292,24 @@ KeyboardStyle {
         border { color: clrBorder; width: 1 }
         radius: 5
     }
-    alternateKeysListDelegate: KeyPanel {
+    // ВАЖНО: это делегат ListView'а (модель с ролями text/data, ListView.isCurrentItem),
+    // а НЕ key-панель. Использовать здесь KeyPanel/control нельзя — control в этом
+    // контексте не существует, и без явных размеров элементы получаются нулевыми,
+    // из-за чего popup длинного нажатия визуально «не появляется» и выбор не работает.
+    alternateKeysListDelegate: Item {
+        id: altKeyItem
+        width: alternateKeysListItemWidth
+        height: alternateKeysListItemHeight
         Rectangle {
-            anchors { fill: parent; margins: 3 }
+            anchors { fill: parent; margins: 4 }
             radius: 5
-            color: control.pressed ? clrPressed : clrKey
+            color: altKeyItem.ListView.isCurrentItem ? clrPressed : clrKey
             border { color: clrBorder; width: 1 }
             Text {
                 anchors.centerIn: parent
-                text: control.displayText
+                text: model.text
                 color: clrText
-                font.pixelSize: 28
+                font.pixelSize: 26
             }
         }
     }
@@ -314,11 +326,24 @@ KeyboardStyle {
         radius: 5
     }
     functionPopupListDelegate: Item {
+        id: funcItem
+        width: funcLabel.implicitWidth + 28
+        height: 48
+        // Роль модели функционального popup'а — keyboardFunction (enum), не modelData.
+        readonly property string label: {
+            switch (keyboardFunction) {
+            case QtVirtualKeyboard.KeyboardFunction.HideInputPanel:       return "Скрыть"
+            case QtVirtualKeyboard.KeyboardFunction.ChangeLanguage:       return "Язык"
+            case QtVirtualKeyboard.KeyboardFunction.ToggleHandwritingMode: return "Рукопись"
+            default: return ""
+            }
+        }
         Text {
+            id: funcLabel
             anchors.centerIn: parent
-            text: modelData !== undefined ? modelData : ""
+            text: funcItem.label
             color: clrText
-            font.pixelSize: 24
+            font.pixelSize: 18
         }
     }
     functionPopupListHighlight: Rectangle {
@@ -334,11 +359,14 @@ KeyboardStyle {
         radius: 5
     }
     popupListDelegate: Item {
+        width: popupLabel.implicitWidth + 24
+        height: 40
         Text {
+            id: popupLabel
             anchors.centerIn: parent
-            text: modelData !== undefined ? modelData : ""
+            text: model.display !== undefined ? model.display : ""
             color: clrText
-            font.pixelSize: 24
+            font.pixelSize: 18
         }
     }
     popupListHighlight: Rectangle {

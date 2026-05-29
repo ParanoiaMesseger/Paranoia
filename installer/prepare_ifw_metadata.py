@@ -56,7 +56,9 @@ def main() -> None:
     args = parser.parse_args()
 
     version = project_version(args.project)
-    release_date = dt.datetime.now(dt.UTC).date().isoformat()
+    # dt.timezone.utc вместо dt.UTC — последний появился только в Python 3.11,
+    # а на Ubuntu 22.04 системный Python 3.10 (CI-образ под 22.04).
+    release_date = dt.datetime.now(dt.timezone.utc).date().isoformat()
     copy_installer_tree(args.source, args.output)
 
     for config in (args.output / "config").glob("config*.xml"):

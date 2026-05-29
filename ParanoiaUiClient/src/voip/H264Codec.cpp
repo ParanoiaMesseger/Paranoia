@@ -11,6 +11,13 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+// FFmpeg <6.1 (напр. libavcodec 58 на Ubuntu 22.04) использует префикс
+// FF_PROFILE_*; в 6.1+ его переименовали в AV_PROFILE_*. Чтобы код собирался
+// и со старым системным FFmpeg, и с новым — подставляем старое имя.
+#ifndef AV_PROFILE_H264_BASELINE
+#define AV_PROFILE_H264_BASELINE FF_PROFILE_H264_BASELINE
+#endif
+
 namespace paranoia::voip
 {
 

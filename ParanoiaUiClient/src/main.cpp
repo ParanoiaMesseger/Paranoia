@@ -59,6 +59,10 @@ int main(int argc, char *argv[])
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     qputenv("QT_IM_MODULE", QByteArrayLiteral("qtvirtualkeyboard"));
     qputenv("QT_VIRTUALKEYBOARD_STYLE", QByteArrayLiteral("Paranoia"));
+    // Кастомные раскладки (см. CMakeLists "keyboard_layouts"): гарантируют
+    // alternativeKeys (е→ё, ь→ъ, .→!?) в APK и убирают кнопку скрытия клавиатуры.
+    if (qEnvironmentVariableIsEmpty("QT_VIRTUALKEYBOARD_LAYOUT_PATH"))
+        qputenv("QT_VIRTUALKEYBOARD_LAYOUT_PATH", QByteArrayLiteral("qrc:/paranoia/keyboard_layouts"));
     QGuiApplication::styleHints()->setMousePressAndHoldInterval(300);
 #endif
 #if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
@@ -116,6 +120,12 @@ int main(int argc, char *argv[])
                      &NotificationCoordinator::onPeerMessagesRead);
     QObject::connect(&chatBackend, &ChatBackend::backgroundMessagesReceived, &notifications,
                      &NotificationCoordinator::onBackgroundMessagesReceived);
+    QObject::connect(&chatBackend, &ChatBackend::pulledNewMessages, &backend,
+                     &MainBackend::publishServiceSnapshot);
+    // На unlock'е разогреваем все диалоги: пользователь видит свежие сообщения
+    // в UI сразу, без ожидания alarm-цикла notifications-сервиса.
+    QObject::connect(&backend, &MainBackend::vaultUnlocked, &chatBackend,
+                     &ChatBackend::prefetchAllDialogs);
     QObject::connect(&notifications, &NotificationCoordinator::networkRestored, &chatBackend,
                      &ChatBackend::onNetworkRestored);
     QObject::connect(&notifications, &NotificationCoordinator::sessionReset, &chatBackend,

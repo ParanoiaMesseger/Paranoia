@@ -90,12 +90,21 @@ signals:
     void activePeerChanged(const QString &peer);
     void peerMessagesRead(const QString &peer);
     void backgroundMessagesReceived(const QString &profileId, const QString &peer, quint64 count);
+    /// Эмитится после успешного receive_keyring, который реально подтянул
+    /// новые сообщения (последний known seq в SQLCipher сдвинулся).
+    /// MainBackend подхватывает и пушит свежий snapshot в notifications-сервис.
+    void pulledNewMessages();
 
 public slots:
     void onDialogRemoved(const QString &peer);
     void onSessionReset();
     void onNetworkRestored();
     void onApplicationStateChanged(Qt::ApplicationState state);
+    /// «Прогреть» SQLCipher: пройтись по всем диалогам активной сессии и
+    /// дёрнуть receive_keyring. Используется при unlock'е — пользователь
+    /// получает свежие сообщения в UI сразу, без ожидания alarm'а сервиса.
+    /// Если активного peer'а нет, ничего не emit'ится в QML.
+    void prefetchAllDialogs();
 
 private slots:
     void onActivePollTimer();

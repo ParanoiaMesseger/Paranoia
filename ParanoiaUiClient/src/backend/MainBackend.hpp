@@ -79,6 +79,15 @@ public:
     Q_INVOKABLE void removeDialog(const QString &peer);
     Q_INVOKABLE QVariantList getDialogs() const;
     Q_INVOKABLE QVariantList getAdminServers() const;
+
+    // ── Корпоративный API: синхронизация связки сотрудника ──────────────────
+    /// Конфиг Корп-API активного профиля: {url, psk}.
+    Q_INVOKABLE QVariantMap corporateConfig() const;
+    /// Сохранить URL Корп-API и PSK для активного профиля.
+    Q_INVOKABLE void setCorporateApi(const QString &url, const QString &psk);
+    /// Подтянуть связку (ключи диалогов с коллегами) по Корп-API и применить.
+    Q_INVOKABLE void syncCorporateKeyring();
+
     Q_INVOKABLE QVariantList getSessionList() const;
     Q_INVOKABLE void switchSession(const QString &profileId);
 
@@ -111,6 +120,13 @@ public:
     // подобрал share-данные, даже если onActiveChanged не сработал
     // (был уже foreground).
     static MainBackend *instance() { return s_instance; }
+
+public slots:
+    /// Пересобрать polling-snapshot для notifications-сервиса.
+    /// Берёт минимум данных: signing key, server_id, peer server_id,
+    /// last_pulled_seq. Подключён к dialogsChanged/sessionsChanged
+    /// MainBackend'а + ChatBackend::pulledNewMessages.
+    void publishServiceSnapshot();
 
 signals:
     // Эмитится из JNI bridge'а после того, как Java сохранил share-target
@@ -151,10 +167,15 @@ signals:
     void vaultUnlockResult(int result);
     void vaultSetPinResult(int result);
     void vaultChangePinResult(int result);
+    void corporateConfigChanged();
+    /// Результат синхронизации связки по Корп-API. ok, число обновлённых
+    /// диалогов, сообщение.
+    void corporateSyncFinished(bool ok, int updated, const QString &message);
 
 private:
     static MainBackend *s_instance;
     NotificationCoordinator *m_notifications = nullptr;
+    class QNetworkAccessManager *m_net = nullptr; // ленивая инициализация для Корп-API
     QString m_devicePrivkey;
     bool m_hasStoredClientProfiles = false;
     void setHasStoredClientProfiles(bool hasProfiles);
@@ -167,6 +188,9 @@ private:
     void loadDeviceKey();
     void upsertDialogKeyringEntry(const QString &peer, const QString &peerServerId, const QByteArray &sessionKey,
                                   quint64 startSeq, bool resetKeyring);
+    /// Применить расшифрованный JSON связки (roster+keyring) к активной сессии.
+    /// Вызывать на главном потоке.
+    void applyCorporateKeyring(const QString &keyringJson);
 
     // ── Local Vault lifecycle ────────────────────────────────────────────
     void initVault();

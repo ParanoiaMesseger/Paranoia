@@ -125,14 +125,16 @@ namespace PlatformNotifications
     void showMessageCount(quint64 count, const QString &profileId, const QString &peer)
     {
 #if defined(OS_ANDROID)
+        // Android-сервис теперь обезличен: peer/profileId в notification text не
+        // показываются. Передаём только count; profileId/peer игнорируем (важно
+        // для UI / iOS, где они всё ещё нужны для deep-link при тапе).
+        Q_UNUSED(profileId)
+        Q_UNUSED(peer)
         const QJniObject context = androidContext();
         if (!context.isValid()) return;
-        const QJniObject javaProfileId = QJniObject::fromString(profileId);
-        const QJniObject javaPeer      = QJniObject::fromString(peer);
         QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaForegroundService", "showNewMessages",
-                                           "(Landroid/content/Context;JLjava/lang/String;Ljava/lang/String;)V",
-                                           context.object<jobject>(), static_cast<jlong>(count),
-                                           javaProfileId.object<jstring>(), javaPeer.object<jstring>());
+                                           "(Landroid/content/Context;J)V",
+                                           context.object<jobject>(), static_cast<jlong>(count));
 #elif defined(OS_IOS)
         const QByteArray profileIdUtf8 = profileId.toUtf8();
         const QByteArray peerUtf8      = peer.toUtf8();
@@ -201,6 +203,28 @@ namespace PlatformNotifications
     }
 
     QString takeOpenPeerFromNotification() { return takeOpenTargetFromNotification().peer; }
+
+    void publishServiceSnapshot(const QString &snapshotJson)
+    {
+#if defined(OS_ANDROID)
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return;
+        const QJniObject javaJson = QJniObject::fromString(snapshotJson);
+        QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaForegroundService",
+                                           "publishSnapshot",
+                                           "(Landroid/content/Context;Ljava/lang/String;)V",
+                                           context.object<jobject>(), javaJson.object<jstring>());
+#else
+        Q_UNUSED(snapshotJson)
+#endif
+    }
+
+    void clearServiceSnapshot()
+    {
+#if defined(OS_ANDROID)
+        callAndroidService("clearSnapshot");
+#endif
+    }
 }
 
 extern "C" void paranoia_platform_trigger_background_poll() { PlatformNotifications::triggerBackgroundPoll(); }

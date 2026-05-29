@@ -24,21 +24,16 @@ import android.os.PowerManager;
 import android.util.Log;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
-import org.json.JSONTokener;
 
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class ParanoiaForegroundService extends Service {
     private static final String CHANNEL_ID = "paranoia_polling";
@@ -48,10 +43,12 @@ public final class ParanoiaForegroundService extends Service {
     private static final String ACTION_START = "app.paranoia.client.START_NOTIFICATION_SERVICE";
     private static final String ACTION_SET_APP_FOREGROUND = "app.paranoia.client.SET_APP_FOREGROUND";
     private static final String ACTION_POLL_NOW = "app.paranoia.client.POLL_NOW";
+    private static final String ACTION_SET_SNAPSHOT = "app.paranoia.client.SET_SNAPSHOT";
+    private static final String ACTION_CLEAR_SNAPSHOT = "app.paranoia.client.CLEAR_SNAPSHOT";
     private static final String EXTRA_APP_FOREGROUND = "app.paranoia.client.APP_FOREGROUND";
+    private static final String EXTRA_SNAPSHOT_JSON = "app.paranoia.client.SNAPSHOT_JSON";
     private static final int POLL_ALARM_REQUEST = 2027;
     private static final String PREFS = "paranoia_notifications";
-    private static final String PREF_APP_DATA_ROOT = "app_data_root";
     private static final String PREF_APP_FOREGROUND = "app_foreground";
     private static final String PREF_SERVICE_REQUESTED = "service_requested";
     private static final String PREF_OPEN_PROFILE_ID = "open_profile_id";
@@ -78,22 +75,108 @@ public final class ParanoiaForegroundService extends Service {
 
     // ── JNI (libParanoiaService_<abi>.so) ─────────────────────────────────
     // Тонкая обёртка над paranoia_lib без Qt — см. android/jni/paranoia_service_jni.c.
+    // Сервис принципиально не открывает SQLCipher и не работает с vault'ом;
+    // всё, что нужно для запроса /notify к серверу — приходит из snapshot'а,
+    // который UI присылает после unlock'а (см. handleSnapshotIntent).
     private static native boolean paranoiaInit(Context context);
-    private static native long paranoiaClientNew(String serverUrl, String reserveUrlsJson, String serverId,
-                                                 String privateKeyB64, String dbPath);
-    private static native void paranoiaClientFree(long handle);
-    private static native long paranoiaNotifyCount(long handle, String userA, String userB, String keyringJson);
+    private static native long paranoiaServiceNotifyCount(String serverUrl, String reserveUrlsJson,
+                                                          String signingKeyB64, String senderServerId,
+                                                          String partnerServerId, long seq);
     private static native String paranoiaLastError();
+
+    // ── Snapshot модель ────────────────────────────────────────────────────
+    // Живёт ТОЛЬКО в RAM сервиса. На диск не пишется. После reboot / kill
+    // процесса исчезает; UI запушит свежий снимок при следующем unlock'е.
+    //
+    // Содержит минимум для подписи /notify-запроса и трэкинга «уже виденного»
+    // last_pulled_seq. Никаких сессионных ключей диалога, master_key, db_key.
+    private static final AtomicReference<Snapshot> SNAPSHOT = new AtomicReference<>(Snapshot.empty());
+
+    private static final class Snapshot {
+        final List<ProfileHint> profiles;
+        Snapshot(List<ProfileHint> profiles) {
+            this.profiles = Collections.unmodifiableList(profiles);
+        }
+        static Snapshot empty() {
+            return new Snapshot(new ArrayList<ProfileHint>());
+        }
+        boolean isEmpty() {
+            for (ProfileHint p : profiles) {
+                if (!p.dialogs.isEmpty()) return false;
+            }
+            return true;
+        }
+    }
+
+    private static final class ProfileHint {
+        final String serverUrl;
+        final String reserveUrlsJson;
+        final String signingKeyB64;
+        final String senderServerId;
+        final List<DialogHint> dialogs;
+        ProfileHint(String serverUrl, String reserveUrlsJson, String signingKeyB64,
+                    String senderServerId, List<DialogHint> dialogs) {
+            this.serverUrl = serverUrl;
+            this.reserveUrlsJson = reserveUrlsJson;
+            this.signingKeyB64 = signingKeyB64;
+            this.senderServerId = senderServerId;
+            this.dialogs = Collections.unmodifiableList(dialogs);
+        }
+    }
+
+    private static final class DialogHint {
+        final String partnerServerId;
+        final long seq;
+        DialogHint(String partnerServerId, long seq) {
+            this.partnerServerId = partnerServerId;
+            this.seq = seq;
+        }
+    }
 
     public static void initialize(Context context) {
         initialize(context, "");
     }
 
+    /// Второй аргумент сохранён ради бинарной совместимости со старым
+    /// PlatformNotifications::registerBackgroundTasks (тот шлёт сюда путь к
+    /// appDataRoot). Сейчас сервис работает строго по snapshot'у и не
+    /// читает с диска — поэтому путь игнорируется.
     public static void initialize(Context context, String appDataRoot) {
         ensureChannels(context);
         requestPostNotificationsIfNeeded(context);
-        if (appDataRoot != null && !appDataRoot.isEmpty()) {
-            prefs(context).edit().putString(PREF_APP_DATA_ROOT, appDataRoot).commit();
+    }
+
+    /// Передать сервису свежий snapshot. JSON формат:
+    /// {"profiles":[{"server":"...", "reserveUrls":["..."], "signingKeyB64":"...",
+    ///               "senderServerId":"...",
+    ///               "dialogs":[{"partnerServerId":"...", "seq":123}, ...]}, ...]}
+    /// Вызывать из UI-процесса:
+    ///  - сразу после unlock'а;
+    ///  - после pull'а, при котором last_pulled_seq реально сдвинулся;
+    ///  - при добавлении/удалении диалога;
+    ///  - при rotation signing key.
+    public static void publishSnapshot(Context context, String snapshotJson) {
+        if (context == null || snapshotJson == null) return;
+        Intent intent = new Intent(context, ParanoiaForegroundService.class);
+        intent.setAction(ACTION_SET_SNAPSHOT);
+        intent.putExtra(EXTRA_SNAPSHOT_JSON, snapshotJson);
+        try {
+            startServiceCompat(context, intent);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot publish snapshot", e);
+        }
+    }
+
+    /// Очистить snapshot (logout / явная отписка). После этого сервис
+    /// останавливается на следующем poll'е («нет целей»).
+    public static void clearSnapshot(Context context) {
+        if (context == null) return;
+        Intent intent = new Intent(context, ParanoiaForegroundService.class);
+        intent.setAction(ACTION_CLEAR_SNAPSHOT);
+        try {
+            startServiceCompat(context, intent);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot clear snapshot", e);
         }
     }
 
@@ -139,7 +222,11 @@ public final class ParanoiaForegroundService extends Service {
         context.stopService(new Intent(context, ParanoiaForegroundService.class));
     }
 
-    public static void showNewMessages(Context context, long count, String profileId, String peer) {
+    /// Уведомление полностью обезличено: ни имени контакта, ни peer-ID.
+    /// Это сознательная архитектурная мера — сервис не знает о peer'ах
+    /// human-readable, а notification text не должен раскрывать опаковые
+    /// серверные ID. По тапу открывается само приложение (без deep-link).
+    public static void showNewMessages(Context context, long count) {
         Log.i(TAG, "showNewMessages requested: count=" + count);
         if (count <= 0) {
             cancelMessageNotification(context);
@@ -161,9 +248,9 @@ public final class ParanoiaForegroundService extends Service {
         }
         Notification.Builder builder = notificationBuilder(context, MESSAGE_CHANNEL_ID)
                 .setContentTitle("Paranoia")
-                .setContentText("Новых сообщений: " + count)
+                .setContentText("Новые сообщения (" + count + ")")
                 .setSmallIcon(context.getApplicationInfo().icon)
-                .setContentIntent(openAppIntent(context, MESSAGE_NOTIFICATION_ID, profileId, peer))
+                .setContentIntent(openAppIntent(context, MESSAGE_NOTIFICATION_ID, null, null))
                 .setAutoCancel(true)
                 .setShowWhen(true);
         try {
@@ -178,6 +265,12 @@ public final class ParanoiaForegroundService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         final String action = intent != null ? intent.getAction() : null;
         Log.i(TAG, "onStartCommand action=" + action);
+        if (ACTION_SET_SNAPSHOT.equals(action)) {
+            handleSnapshotIntent(intent);
+        } else if (ACTION_CLEAR_SNAPSHOT.equals(action)) {
+            SNAPSHOT.set(Snapshot.empty());
+            Log.i(TAG, "snapshot cleared by UI");
+        }
         if (intent != null && intent.hasExtra(EXTRA_APP_FOREGROUND)) {
             appForeground = intent.getBooleanExtra(EXTRA_APP_FOREGROUND, appForeground);
             prefs(this).edit().putBoolean(PREF_APP_FOREGROUND, appForeground).commit();
@@ -392,17 +485,16 @@ public final class ParanoiaForegroundService extends Service {
             return;
         }
         if (result.total > 0) {
-            showNewMessages(context, result.total, result.profileId, result.peer);
+            showNewMessages(context, result.total);
         } else if (result.anySuccess) {
             cancelMessageNotification(context);
         }
     }
 
-    // ── Опрос notify_count ──────────────────────────────────────────────
-    // Идём по всем профилям, для каждого открываем ParanoiaHandle и спрашиваем
-    // у сервера notify_count по каждому диалогу с usable keyring'ом. На
-    // отсутствие сети/profile'ов отвечаем "целей нет" — runAutonomousPoll
-    // тогда остановит сервис.
+    // ── Опрос notify_count по snapshot'у ────────────────────────────────
+    // Источник данных — только in-memory snapshot. Никаких файлов с диска,
+    // никакого SQLCipher. Пустой snapshot ⇒ нет целей ⇒ сервис остановится
+    // (UI запушит свежий после следующего unlock'а).
     private static PollResult pollNotifications(Context context) {
         if (isApplicationForeground(context)) {
             Log.i(TAG, "poll skipped: application is foreground");
@@ -419,68 +511,83 @@ public final class ParanoiaForegroundService extends Service {
             return PollResult.withTargets(false);
         }
 
-        File root = appDataRoot(context);
-        File profilesDir = new File(root, "profiles");
+        Snapshot snapshot = SNAPSHOT.get();
+        if (snapshot == null || snapshot.isEmpty()) {
+            Log.i(TAG, "poll skipped: snapshot is empty");
+            return new PollResult();  // hasTargets=false → service stops
+        }
+
         PollResult result = new PollResult();
-
-        for (String profileId : profileIdsForRoot(root)) {
-            File profileDir = new File(profilesDir, profileId);
-            JSONObject client = readJsonObject(new File(profileDir, "client.json"));
-            String server = normalizeServerUrl(client.optString("server"));
-            String serverId = client.optString("server_id").trim();
-            String privateKey = client.optString("private_key").trim();
-            if (server.isEmpty() || serverId.isEmpty() || privateKey.isEmpty()) continue;
-
-            JSONArray dialogs = readJsonArray(new File(profileDir, "dialogs.json"));
-            if (dialogs.length() == 0) continue;
-
-            String reserveUrlsJson = buildReserveUrlsJson(client.optJSONArray("reserve_server_urls"), server);
-            String dbPath = new File(profileDir, "paranoia.db").getAbsolutePath();
-
-            long handle = paranoiaClientNew(server, reserveUrlsJson, serverId, privateKey, dbPath);
-            if (handle == 0) {
-                Log.w(TAG, "paranoia_client_new failed for profile=" + profileId + ": " + paranoiaLastError());
-                result.hasTargets = true;
-                continue;
-            }
-
-            try {
-                for (int i = 0; i < dialogs.length(); i++) {
-                    JSONObject dialog = dialogs.optJSONObject(i);
-                    if (dialog == null) continue;
-                    String peer = dialog.optString("peer");
-                    String peerServerId = dialog.optString("peerServerId").trim();
-                    JSONArray keyring = dialog.optJSONArray("keyring");
-                    if (peer.isEmpty() || peerServerId.isEmpty() || !hasUsableKeyring(keyring)) continue;
-
-                    result.hasTargets = true;
-                    long count = paranoiaNotifyCount(handle, serverId, peerServerId, keyring.toString());
-                    if (count < 0) {
-                        Log.w(TAG, "notify_count failed for profile=" + profileId + " peer=" + peer + ": "
-                                + paranoiaLastError());
-                        continue;
-                    }
-
-                    result.anySuccess = true;
-                    if (count == 0) continue;
-
-                    result.total += count;
-                    result.pendingPeers++;
-                    if (result.pendingPeers == 1) {
-                        result.profileId = profileId;
-                        result.peer = peer;
-                    } else {
-                        result.profileId = "";
-                        result.peer = "";
-                    }
+        result.hasTargets = true;
+        int dialogIndex = 0;
+        for (ProfileHint profile : snapshot.profiles) {
+            for (DialogHint dialog : profile.dialogs) {
+                long count = paranoiaServiceNotifyCount(
+                    profile.serverUrl, profile.reserveUrlsJson, profile.signingKeyB64,
+                    profile.senderServerId, dialog.partnerServerId, dialog.seq);
+                if (count < 0) {
+                    Log.w(TAG, "service notify_count failed [dialog #" + dialogIndex + "]: "
+                            + paranoiaLastError());
+                    dialogIndex++;
+                    continue;
                 }
-            } finally {
-                paranoiaClientFree(handle);
+                result.anySuccess = true;
+                result.total += count;
+                if (count > 0) result.pendingPeers++;
+                dialogIndex++;
             }
         }
-        Log.i(TAG, "native notify poll finished: hasTargets=" + result.hasTargets
-                + " total=" + result.total + " pendingPeers=" + result.pendingPeers);
+        Log.i(TAG, "snapshot poll finished: total=" + result.total
+                + " pendingPeers=" + result.pendingPeers + " dialogs=" + dialogIndex);
         return result;
+    }
+
+    private static void handleSnapshotIntent(Intent intent) {
+        if (intent == null) return;
+        String json = intent.getStringExtra(EXTRA_SNAPSHOT_JSON);
+        if (json == null || json.isEmpty()) {
+            SNAPSHOT.set(Snapshot.empty());
+            Log.i(TAG, "snapshot cleared (empty JSON)");
+            return;
+        }
+        try {
+            JSONObject root = new JSONObject(json);
+            JSONArray rawProfiles = root.optJSONArray("profiles");
+            if (rawProfiles == null) rawProfiles = new JSONArray();
+            List<ProfileHint> profiles = new ArrayList<>();
+            for (int i = 0; i < rawProfiles.length(); i++) {
+                JSONObject p = rawProfiles.optJSONObject(i);
+                if (p == null) continue;
+                String server = p.optString("server").trim();
+                String signingKey = p.optString("signingKeyB64").trim();
+                String sender = p.optString("senderServerId").trim();
+                if (server.isEmpty() || signingKey.isEmpty() || sender.isEmpty()) continue;
+
+                JSONArray reserves = p.optJSONArray("reserveUrls");
+                String reservesJson = reserves != null ? reserves.toString() : "[]";
+
+                JSONArray rawDialogs = p.optJSONArray("dialogs");
+                if (rawDialogs == null) rawDialogs = new JSONArray();
+                List<DialogHint> dialogs = new ArrayList<>();
+                for (int j = 0; j < rawDialogs.length(); j++) {
+                    JSONObject d = rawDialogs.optJSONObject(j);
+                    if (d == null) continue;
+                    String partner = d.optString("partnerServerId").trim();
+                    if (partner.isEmpty()) continue;
+                    long seq = d.optLong("seq", 0L);
+                    dialogs.add(new DialogHint(partner, seq < 0 ? 0 : seq));
+                }
+                if (dialogs.isEmpty()) continue;
+
+                profiles.add(new ProfileHint(server, reservesJson, signingKey, sender, dialogs));
+            }
+            SNAPSHOT.set(new Snapshot(profiles));
+            int total = 0;
+            for (ProfileHint p : profiles) total += p.dialogs.size();
+            Log.i(TAG, "snapshot updated: profiles=" + profiles.size() + " dialogs=" + total);
+        } catch (JSONException e) {
+            Log.w(TAG, "Cannot parse snapshot JSON", e);
+        }
     }
 
     private static boolean ensureParanoiaInitialized(Context context) {
@@ -530,132 +637,6 @@ public final class ParanoiaForegroundService extends Service {
             }
             Log.w(TAG, "ParanoiaService native library is not available for background polling");
             return false;
-        }
-    }
-
-    private static File appDataRoot(Context context) {
-        String configured = prefs(context).getString(PREF_APP_DATA_ROOT, "");
-        if (configured != null && !configured.isEmpty()) {
-            return new File(configured);
-        }
-        File filesDir = context.getFilesDir();
-        File[] candidates = new File[] {
-                filesDir,
-                new File(filesDir, "ParanoiaUiClient"),
-                new File(filesDir, "Paranoia/ParanoiaUiClient"),
-                new File(filesDir, ".local/share/Paranoia/ParanoiaUiClient")
-        };
-        for (File candidate : candidates) {
-            if (new File(candidate, "profiles.json").isFile() || new File(candidate, "profiles").isDirectory()) {
-                return candidate;
-            }
-        }
-        return filesDir;
-    }
-
-    // ── JSON / профили ──────────────────────────────────────────────────
-    private static List<String> profileIdsForRoot(File root) {
-        LinkedHashSet<String> ids = new LinkedHashSet<>();
-        JSONObject manifest = readJsonObject(new File(root, "profiles.json"));
-        JSONArray profiles = manifest.optJSONArray("profiles");
-        if (profiles != null) {
-            for (int i = 0; i < profiles.length(); i++) {
-                JSONObject entry = profiles.optJSONObject(i);
-                if (entry == null) continue;
-                addProfileId(ids, entry.optString("id"));
-            }
-        }
-        addProfileId(ids, manifest.optString("last_profile_id"));
-
-        File profilesDir = new File(root, "profiles");
-        File[] children = profilesDir.listFiles();
-        if (children != null) {
-            for (File child : children) {
-                if (child.isDirectory()) addProfileId(ids, child.getName());
-            }
-        }
-        return new ArrayList<>(ids);
-    }
-
-    private static void addProfileId(LinkedHashSet<String> ids, String id) {
-        if (id == null) return;
-        String trimmed = id.trim();
-        if (!trimmed.isEmpty()) ids.add(trimmed);
-    }
-
-    private static boolean hasUsableKeyring(JSONArray keyring) {
-        if (keyring == null) return false;
-        for (int i = 0; i < keyring.length(); i++) {
-            JSONObject entry = keyring.optJSONObject(i);
-            if (entry == null) continue;
-            long startSeq = readSeq(entry.opt("start_seq"));
-            String key = entry.optString("key");
-            if (startSeq > 0 && key != null && !key.isEmpty()) return true;
-        }
-        return false;
-    }
-
-    private static long readSeq(Object value) {
-        if (value == null) return 0;
-        try {
-            if (value instanceof Number) return ((Number) value).longValue();
-            String s = value.toString().trim();
-            if (s.isEmpty()) return 0;
-            return Long.parseLong(s);
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    private static String normalizeServerUrl(String server) {
-        if (server == null) return "";
-        String url = server.trim();
-        if (url.isEmpty()) return "";
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            url = "https://" + url;
-        }
-        while (url.endsWith("/") && !url.endsWith("://")) {
-            url = url.substring(0, url.length() - 1);
-        }
-        return url;
-    }
-
-    private static String buildReserveUrlsJson(JSONArray rawReserveUrls, String primaryUrl) {
-        LinkedHashSet<String> seen = new LinkedHashSet<>();
-        JSONArray out = new JSONArray();
-        if (rawReserveUrls != null) {
-            for (int i = 0; i < rawReserveUrls.length(); i++) {
-                String normalized = normalizeServerUrl(rawReserveUrls.optString(i));
-                if (normalized.isEmpty() || normalized.equals(primaryUrl) || !seen.add(normalized)) continue;
-                out.put(normalized);
-            }
-        }
-        return out.toString();
-    }
-
-    private static JSONObject readJsonObject(File file) {
-        Object value = readJsonValue(file);
-        return (value instanceof JSONObject) ? (JSONObject) value : new JSONObject();
-    }
-
-    private static JSONArray readJsonArray(File file) {
-        Object value = readJsonValue(file);
-        return (value instanceof JSONArray) ? (JSONArray) value : new JSONArray();
-    }
-
-    private static Object readJsonValue(File file) {
-        if (file == null || !file.isFile()) return null;
-        try (InputStream is = new FileInputStream(file)) {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = is.read(buffer)) != -1) out.write(buffer, 0, read);
-            String text = out.toString("UTF-8");
-            if (text.isEmpty()) return null;
-            return new JSONTokener(text).nextValue();
-        } catch (IOException | org.json.JSONException e) {
-            Log.w(TAG, "cannot read JSON file " + file + ": " + e.getMessage());
-            return null;
         }
     }
 
