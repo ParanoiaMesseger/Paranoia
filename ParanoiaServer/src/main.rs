@@ -128,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/call/signal", put(routes::call_signal::handle))
         .route("/call/poll", put(routes::call_poll::handle))
+        .merge(routes::admin::router())
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");

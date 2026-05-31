@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.8 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.9 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -245,6 +245,38 @@ elseif(PARANOIA_IS_IOS)
         "${CMAKE_CURRENT_SOURCE_DIR}/deps/ffmpeg/${_paranoia_ios_arch}"
         "${_paranoia_ios_prefix}")
 else()
+    # Desktop: сначала пробуем СВОЙ минимальный статический FFmpeg+OpenH264
+    # (scripts/build_ffmpeg_linux.sh → deps/ffmpeg/linux-<arch>). Это делает
+    # бинарь независимым от системного FFmpeg и переносимым между дистрибутивами
+    # (на Ubuntu 22.04 системный FFmpeg 4.4, на 24.04 — 6.x). Если prebuilt'а
+    # нет — откатываемся на системный FFmpeg через find_package/pkg-config ниже.
+    if(PARANOIA_IS_LINUX)
+        string(TOLOWER "linux-${CMAKE_SYSTEM_PROCESSOR}" _paranoia_linux_tag)
+        _paranoia_try_prebuilt_ffmpeg(
+            "${CMAKE_CURRENT_SOURCE_DIR}/deps/ffmpeg/${_paranoia_linux_tag}"
+            "${_paranoia_linux_tag}")
+
+        set(_paranoia_openh264_root "${CMAKE_CURRENT_SOURCE_DIR}/deps/openh264/${_paranoia_linux_tag}")
+        if(PARANOIA_HAS_FFMPEG AND EXISTS "${_paranoia_openh264_root}/lib/libopenh264.a")
+            # libavcodec.a ссылается на символы OpenH264 (WelsCreateSVCEncoder
+            # и т. п.) — без libopenh264.a будет undefined reference при линковке.
+            add_library(paranoia_openh264_prebuilt STATIC IMPORTED)
+            set_target_properties(paranoia_openh264_prebuilt PROPERTIES
+                IMPORTED_LOCATION "${_paranoia_openh264_root}/lib/libopenh264.a"
+                INTERFACE_INCLUDE_DIRECTORIES "${_paranoia_openh264_root}/include"
+                # Статический FFmpeg тянет libm; libstdc++ (нужен OpenH264)
+                # подцепится автоматически — Paranoia линкуется через g++.
+                # openh264 идёт последним в списке таргетов → m окажется в конце.
+                INTERFACE_LINK_LIBRARIES "m"
+            )
+            list(APPEND PARANOIA_FFMPEG_TARGETS paranoia_openh264_prebuilt)
+            message(STATUS "Paranoia video: linking OpenH264 (static) from ${_paranoia_openh264_root}")
+        elseif(PARANOIA_HAS_FFMPEG)
+            message(WARNING "Paranoia video: prebuilt FFmpeg found but OpenH264 missing at ${_paranoia_openh264_root}; H.264 encode будет недоступен. Run scripts/build_openh264_linux.sh.")
+        endif()
+    endif()
+
+    if(NOT PARANOIA_HAS_FFMPEG)
     find_package(FFMPEG COMPONENTS avcodec avutil avfilter swscale QUIET)
 
     # FFMPEG_FOUND ещё не гарантирует, что созданы imported targets — в Qt6.10
@@ -273,6 +305,7 @@ else()
                 PkgConfig::LIBAVFILTER PkgConfig::LIBSWSCALE PkgConfig::LIBAVCODEC PkgConfig::LIBAVUTIL)
         endif()
     endif()
+    endif() # NOT PARANOIA_HAS_FFMPEG — системный FFmpeg как fallback
 endif()
 
 set(PARANOIA_HAS_VIDEO 0)
@@ -391,6 +424,7 @@ target_include_directories(Paranoia
 )
 
 set_source_files_properties(ui/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+set_source_files_properties(ui/Reactions.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 qt_add_qml_module(Paranoia
     URI ParanoiaUiClient
@@ -443,7 +477,9 @@ qt_add_qml_module(Paranoia
     QML_FILES
     ui/Main.qml
     ui/Theme.qml
+    ui/Reactions.qml
     ui/Components/AppIcon.qml
+    ui/Components/EmojiPicker.qml
     ui/Components/CallButton.qml
     ui/Components/ParaButton.qml
     ui/Components/RefreshIconButton.qml
@@ -763,6 +799,33 @@ if(TARGET Qt6::VirtualKeyboard)
         FILES
         ui/keyboard/Paranoia/KeyboardIcon.qml
         ui/keyboard/Paranoia/style.qml
+    )
+    # Кастомные раскладки клавиатуры. Подключаются через переменную окружения
+    # QT_VIRTUALKEYBOARD_LAYOUT_PATH=qrc:/paranoia/keyboard_layouts (см. main.cpp).
+    # Базируются на штатных раскладках Qt: гарантируют alternativeKeys
+    # (е→ё, ь→ъ, .→!?) в собранном APK и не содержат кнопки скрытия клавиатуры.
+    qt_add_resources(Paranoia "keyboard_layouts"
+        PREFIX "/paranoia/keyboard_layouts"
+        BASE "ui/keyboard/layouts"
+        FILES
+        ui/keyboard/layouts/fallback/main.qml
+        ui/keyboard/layouts/fallback/symbols.qml
+        ui/keyboard/layouts/fallback/numbers.qml
+        ui/keyboard/layouts/fallback/digits.qml
+        ui/keyboard/layouts/fallback/dialpad.qml
+        ui/keyboard/layouts/fallback/handwriting.qml
+        ui/keyboard/layouts/en_US/main.fallback
+        ui/keyboard/layouts/en_US/symbols.fallback
+        ui/keyboard/layouts/en_US/numbers.fallback
+        ui/keyboard/layouts/en_US/digits.fallback
+        ui/keyboard/layouts/en_US/dialpad.fallback
+        ui/keyboard/layouts/en_US/handwriting.fallback
+        ui/keyboard/layouts/ru_RU/main.qml
+        ui/keyboard/layouts/ru_RU/handwriting.qml
+        ui/keyboard/layouts/ru_RU/symbols.fallback
+        ui/keyboard/layouts/ru_RU/numbers.fallback
+        ui/keyboard/layouts/ru_RU/digits.fallback
+        ui/keyboard/layouts/ru_RU/dialpad.fallback
     )
 endif()
 

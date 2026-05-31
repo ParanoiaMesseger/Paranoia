@@ -6,8 +6,10 @@
 #include "session/Dialog.hpp"
 #include "session/ServerSession.hpp"
 #include "session/SessionStore.hpp"
+#include "platform/PlatformNotifications.hpp"
 #include "utils/Utils.hpp"
 #include <ParanoiaFFI>
+#include <QFileInfo>
 #include <QFutureWatcher>
 #include <QGuiApplication>
 
@@ -15,9 +17,15 @@
 
 #include <QCryptographicHash>
 #include <QFuture>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QPointer>
+#include <QUrl>
 #include <QJsonParseError>
 #include <QMutexLocker>
 #include <QThreadPool>
@@ -147,6 +155,19 @@ MainBackend::MainBackend(NotificationCoordinator &notifications, QObject *parent
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::loginStateChanged);
     connect(SessionStore::instance(), &SessionStore::sessionsChanged, this, &MainBackend::sessionsChanged);
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::sessionsChanged);
+    // Авто-синхронизация корпоративной связки при активации сессии (вход/старт).
+    // Тихо no-op, если профиль не корпоративный (нет corp-конфига).
+    connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this,
+            &MainBackend::syncCorporateKeyring);
+
+    // Любое изменение списка диалогов / keyring'а / сессий — повод пересобрать
+    // snapshot для notifications-сервиса. Подцепляем оба сигнала: dialogsChanged
+    // покрывает add/remove/keyring-update, sessionsChanged — login/logout/смену
+    // профиля. publishServiceSnapshot — дешёвый (просто read из RAM + JNI call),
+    // дополнительное дробление по «реально ли seq сдвинулся» — за ChatBackend
+    // (см. вызовы оттуда после successful pull).
+    connect(this, &MainBackend::dialogsChanged, this, &MainBackend::publishServiceSnapshot);
+    connect(this, &MainBackend::sessionsChanged, this, &MainBackend::publishServiceSnapshot);
 
     // device_key.json и admins.crypt теперь под vault'ом — отложены до unlock'а.
     // Lock происходит ТОЛЬКО при выходе (деструктор) — авто-lock в фоне отключён
@@ -223,6 +244,10 @@ void MainBackend::initVault()
     const QString root = Paths::appDataRoot().path();
     if (ParanoiaFFI::vault_init(root) != 0)
         qWarning().noquote() << "vault_init failed:" << ParanoiaFFI::last_error();
+    // Диагностика персистентности: путь и наличие vault.json при старте.
+    qInfo().noquote() << "[vault] appDataRoot =" << root
+                      << " vault.json exists =" << QFileInfo::exists(root + "/vault.json")
+                      << " status =" << static_cast<int>(ParanoiaFFI::vault_status());
 }
 
 void MainBackend::vaultSetPin(const QString &pin)
@@ -397,6 +422,8 @@ void MainBackend::onVaultUnlocked()
     loadClientConfig();
     setHasStoredClientProfiles(hasStoredClientProfileOnDisk());
     emit vaultUnlocked();
+    // Снапшот для notifications-сервиса: сессии уже подняты loadClientConfig().
+    publishServiceSnapshot();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1113,6 +1140,96 @@ QVariantList MainBackend::getAdminServers() const
     return result;
 }
 
+// ── Корпоративный API: синхронизация связки ────────────────────────────────────
+
+QVariantMap MainBackend::corporateConfig() const
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const QJsonObject o = Utils::readJsonObjectFile(Paths::profileCorp(session->profileId));
+    return QVariantMap{{"url", o.value("url").toString()}, {"psk", o.value("psk").toString()}};
+}
+
+void MainBackend::setCorporateApi(const QString &url, const QString &psk)
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) {
+        emit corporateSyncFinished(false, 0, "Нет активной сессии");
+        return;
+    }
+    QJsonObject o;
+    o["url"] = url.trimmed();
+    o["psk"] = psk.trimmed();
+    Utils::writeJsonObjectFile(Paths::profileCorp(session->profileId), o);
+    emit corporateConfigChanged();
+}
+
+void MainBackend::applyCorporateKeyring(const QString &keyringJson)
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const QJsonObject root = QJsonDocument::fromJson(keyringJson.toUtf8()).object();
+    // roster: username(server_id) → ФИО (имя диалога)
+    QHash<QString, QString> names;
+    for (const auto &v : root.value("roster").toArray()) {
+        const QJsonObject o = v.toObject();
+        names.insert(o.value("username").toString(), o.value("full_name").toString());
+    }
+    int updated = 0;
+    for (const auto &v : root.value("keyring").toArray()) {
+        const QJsonObject e = v.toObject();
+        const QString partner  = e.value("partner").toString();
+        const QByteArray key   = QByteArray::fromBase64(e.value("key").toString().toLatin1());
+        const quint64 startSeq = static_cast<quint64>(e.value("start_seq").toDouble(1));
+        if (partner.isEmpty() || key.size() != 32 || startSeq == 0) continue;
+        // Если диалог с этим server_id уже есть — сохраняем его текущее имя
+        // (локальное переименование приоритетнее ФИО), и не плодим дубликат.
+        QString peer;
+        for (const auto &d : session->dialogs)
+            if (d.peerServerId == partner) { peer = d.peer; break; }
+        if (peer.isEmpty()) peer = names.value(partner).trimmed();
+        if (peer.isEmpty()) peer = partner;
+        upsertDialogKeyringEntry(peer, partner, key, startSeq, false);
+        ++updated;
+    }
+    emit corporateSyncFinished(true, updated,
+                               updated > 0 ? QStringLiteral("Связка обновлена") : QStringLiteral("Связка пуста"));
+}
+
+void MainBackend::syncCorporateKeyring()
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return; // тихо: вызывается и автоматически при смене сессии
+    const QJsonObject cfg = Utils::readJsonObjectFile(Paths::profileCorp(session->profileId));
+    QString distUrl   = cfg.value("url").toString().trimmed(); // url = нода дистрибуции
+    const QString psk = cfg.value("psk").toString().trimmed();
+    if (distUrl.isEmpty() || psk.isEmpty()) return; // профиль не корпоративный — тихо
+    while (distUrl.endsWith('/')) distUrl.chop(1);
+
+    const QString serverId   = session->serverId;
+    const QString signingKey = session->private_key;
+    if (serverId.isEmpty() || signingKey.isEmpty()) return;
+
+    QPointer self(this);
+    // corp_sync делает блокирующий HTTP + расшифровку — на worker-потоке.
+    QThreadPool::globalInstance()->start([self, distUrl, serverId, signingKey, psk]() {
+        const QString keyringJson = ParanoiaFFI::corp_sync(distUrl, serverId, signingKey, psk);
+        // last_error потоко-локальна — читаем здесь же.
+        const QString err = keyringJson.isEmpty() ? ParanoiaFFI::last_error() : QString();
+        QMetaObject::invokeMethod(qApp, [self, keyringJson, err]() {
+            if (!self) return;
+            if (keyringJson.isEmpty()) {
+                if (err.isEmpty())
+                    emit self->corporateSyncFinished(true, 0, QStringLiteral("Связка пуста"));
+                else
+                    emit self->corporateSyncFinished(false, 0, QStringLiteral("Синхронизация: ") + err);
+                return;
+            }
+            self->applyCorporateKeyring(keyringJson);
+        });
+    });
+}
+
 // ── History Management ────────────────────────────────────────────────────────
 
 void MainBackend::deleteDialogLocal(const QString &peer)
@@ -1197,8 +1314,11 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
         return ParanoiaFFI::errorResult("Неподдерживаемый тип профиля экспорта.");
     if (receiverPubkeyB64.trimmed().isEmpty())
         return ParanoiaFFI::errorResult("Не указан публичный ключ принимающего устройства.");
-    const QString normalizedFilePath = Utils::normalizeLocalFilePath(filePath);
-    if (normalizedFilePath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
+    // На Android FileDialog (SaveFile) возвращает content:// URI — его нельзя
+    // нормализовать в локальный путь, поэтому передаём цель как есть и пишем
+    // через Utils::writeBytesToTarget (SAF на Android, обычный файл на desktop).
+    const QString exportTarget = filePath.trimmed();
+    if (exportTarget.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
     QJsonObject payload;
     payload["format_version"] = 1;
     payload["profile_type"]   = normalizedProfile;
@@ -1263,19 +1383,12 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
             return ParanoiaFFI::errorResult("Некорректный публичный ключ принимающего устройства.");
         return ParanoiaFFI::errorResult("Ошибка шифрования экспорта.");
     }
-    QFile file(normalizedFilePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return ParanoiaFFI::errorResult("Не удалось открыть файл для записи: " + normalizedFilePath);
     const QByteArray envelopeBytes = envelope.toUtf8();
-    if (file.write(envelopeBytes) != envelopeBytes.size()) {
-        file.close();
-        return ParanoiaFFI::errorResult("Не удалось полностью записать файл экспорта.");
-    }
-    file.close();
-    Utils::setOwnerOnlyPermissions(normalizedFilePath);
+    if (!Utils::writeBytesToTarget(exportTarget, envelopeBytes))
+        return ParanoiaFFI::errorResult("Не удалось записать файл экспорта.");
     return QVariantMap{
         {"ok", true},
-        {"path", normalizedFilePath},
+        {"path", exportTarget},
         {"dialogues", exportedDialogues},
         {"keyEntries", exportedKeyEntries},
     };
@@ -1284,16 +1397,27 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
 QVariantMap MainBackend::importProfile(const QString &filePath)
 {
     if (m_devicePrivkey.isEmpty()) return ParanoiaFFI::errorResult("Device keypair не инициализирован.");
-    const QString normalizedFilePath = Utils::normalizeLocalFilePath(filePath);
+    // На Android FileDialog возвращает content:// URI — QFile его не откроет.
+    // resolveImportPath на Android копирует контент в CacheLocation и
+    // возвращает путь к копии; cleanup ниже.
+    const QString normalizedFilePath = Utils::resolveImportPath(filePath);
     if (normalizedFilePath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
+    const bool isContentUri =
+        filePath.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
     QFile file(normalizedFilePath);
-    if (!file.open(QIODevice::ReadOnly)) return ParanoiaFFI::errorResult("Не удалось открыть файл: " + normalizedFilePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        if (isContentUri) QFile::remove(normalizedFilePath);
+        return ParanoiaFFI::errorResult("Не удалось открыть файл: " + normalizedFilePath);
+    }
     if (file.size() > Utils::MaxExportFileBytes) {
         file.close();
+        if (isContentUri) QFile::remove(normalizedFilePath);
         return ParanoiaFFI::errorResult("Файл экспорта слишком большой.");
     }
     const QString envelopeJson = QString::fromUtf8(file.readAll());
     file.close();
+    // Кэш-копия от resolveImportPath больше не нужна — освобождаем место.
+    if (isContentUri) QFile::remove(normalizedFilePath);
     if (envelopeJson.trimmed().isEmpty()) return ParanoiaFFI::errorResult("Файл пуст.");
     auto payloadJson = ParanoiaFFI::ecies_decrypt(m_devicePrivkey, envelopeJson);
     if (payloadJson.isEmpty()) {
@@ -1549,6 +1673,13 @@ QVariantMap MainBackend::takeShareTarget()
 
 QVariantMap MainBackend::deleteExportFile(const QString &filePath)
 {
+    const QString raw = filePath.trimmed();
+    // content:// (Android SAF): удалять через QFile нельзя, а через
+    // ContentResolver.delete() прав обычно нет. Возвращаем «manual» сразу
+    // вместо вводящей в заблуждение ошибки FS.
+    if (raw.startsWith(QStringLiteral("content://"), Qt::CaseInsensitive))
+        return ParanoiaFFI::errorResult(
+            "Файл выбран из системного хранилища — удалите его вручную через файловый менеджер.");
     const QString trimmedPath = Utils::normalizeLocalFilePath(filePath);
     if (trimmedPath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
     if (!QFile::exists(trimmedPath))
@@ -1564,6 +1695,12 @@ QString MainBackend::urlToLocalPath(const QUrl &url) const
     // QML может передать сюда уже-локальный путь как строку — Qt сконвертирует
     // в QUrl с пустым scheme, тогда .path() даст обратно ту же строку.
     if (url.scheme().isEmpty()) return url.toString();
+    // Android SAF: FileDialog возвращает content:// URI. toLocalFile() для него
+    // пуст, поэтому возвращаем URI как есть (в кодированном виде, чтобы не
+    // потерять %-escape'ы для ContentResolver). Его разруливают
+    // Utils::resolveImportPath (импорт) и Utils::writeBytesToTarget (экспорт).
+    if (url.scheme().compare(QStringLiteral("content"), Qt::CaseInsensitive) == 0)
+        return url.toString(QUrl::FullyEncoded);
     return url.toLocalFile();
 }
 
@@ -1685,4 +1822,52 @@ void MainBackend::loadDeviceKey()
     if (!privateKey.isEmpty()) m_devicePrivkey = privateKey;
     saveDeviceKey();
     emit deviceKeyChanged();
+}
+
+void MainBackend::publishServiceSnapshot()
+{
+    QJsonArray profiles;
+    const auto sessions = SessionStore::instance()->allSessions();
+    for (const auto &session : sessions) {
+        if (!session) continue;
+        if (session->server.isEmpty() || session->private_key.isEmpty()
+            || session->serverId.isEmpty())
+            continue;
+
+        QJsonArray reserveUrls;
+        for (const QString &u : session->reserveServerUrls) reserveUrls.append(u);
+
+        QJsonArray dialogs;
+        // last_pulled_seq лежит в SQLCipher; берём его пока vault unlocked
+        // и UI ещё держит handle. Сервис будет использовать это значение
+        // как baseline для notify_count.
+        for (const Dialog &d : session->dialogs) {
+            if (d.peerServerId.isEmpty()) continue;
+            uint64_t seq = 0;
+            {
+                QMutexLocker lock(&session->ffiMutex);
+                if (session->ffi) {
+                    session->ffi->last_pulled_seq(session->serverId, d.peerServerId, seq);
+                }
+            }
+            QJsonObject dialog;
+            dialog["partnerServerId"] = d.peerServerId;
+            dialog["seq"]             = qint64(seq);
+            dialogs.append(dialog);
+        }
+        if (dialogs.isEmpty()) continue;
+
+        QJsonObject profile;
+        profile["server"]         = session->server;
+        profile["reserveUrls"]    = reserveUrls;
+        profile["signingKeyB64"]  = session->private_key;
+        profile["senderServerId"] = session->serverId;
+        profile["dialogs"]        = dialogs;
+        profiles.append(profile);
+    }
+    QJsonObject root;
+    root["profiles"] = profiles;
+    const QString json =
+        QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
+    PlatformNotifications::publishServiceSnapshot(json);
 }

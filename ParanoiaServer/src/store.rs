@@ -247,6 +247,50 @@ impl PacketStore {
         self.db.write(batch).context("RocksDB write batch failed")
     }
 
+    /// Перечислить все диалоги в хранилище как `(dialogue_id, last_seq)`.
+    ///
+    /// Служебные ключи `receipt:*` пропускаются. Ключи RocksDB отсортированы
+    /// лексикографически, а `dialogue_id` имеет фиксированную длину (hex SHA256)
+    /// с zero-padded seq, поэтому все пакеты одного диалога идут подряд.
+    pub fn list_dialogues(&self) -> Result<Vec<(String, u64)>> {
+        let mut result: Vec<(String, u64)> = Vec::new();
+        let mut current_id: Option<String> = None;
+        let mut current_last: u64 = 0;
+
+        let iter = self.db.iterator(IteratorMode::Start);
+        for item in iter {
+            let (key_bytes, _) = item.context("RocksDB iterator error")?;
+            let key_str = std::str::from_utf8(&key_bytes).context("Non-UTF8 key in RocksDB")?;
+            if key_str.starts_with("receipt:") {
+                continue;
+            }
+            let Some((id, seq_str)) = key_str.split_once(':') else {
+                continue;
+            };
+            let Ok(seq) = seq_str.parse::<u64>() else {
+                continue;
+            };
+            match current_id.as_deref() {
+                Some(cur) if cur == id => {
+                    if seq > current_last {
+                        current_last = seq;
+                    }
+                }
+                _ => {
+                    if let Some(prev) = current_id.take() {
+                        result.push((prev, current_last));
+                    }
+                    current_id = Some(id.to_string());
+                    current_last = seq;
+                }
+            }
+        }
+        if let Some(prev) = current_id.take() {
+            result.push((prev, current_last));
+        }
+        Ok(result)
+    }
+
     pub fn receipt_state(&self, username: &str, dialogue_id: &str) -> Result<ReceiptState> {
         let key = make_receipt_key(username, dialogue_id);
         let Some(value) = self.db.get(&key)? else {
@@ -539,5 +583,29 @@ mod tests {
         store.remove_range("dlg-a", 0, 100).unwrap();
         assert_eq!(store.last_seq("dlg-a").unwrap(), 0);
         assert_eq!(store.last_seq("dlg-b").unwrap(), 3);
+    }
+
+    #[test]
+    fn list_dialogues_reports_each_dialogue_with_last_seq() {
+        let (_tmp, store) = open_store();
+        // Используем валидные hex dialogue_id (фиксированная длина, как в проде).
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        push_seqs(&store, &a, &[1, 2, 3, 7]);
+        push_seqs(&store, &b, &[1, 5]);
+        // Служебный receipt-ключ не должен попадать в список диалогов.
+        store
+            .set_receipts_enabled("alice", &a, true)
+            .expect("receipt");
+
+        let mut got = store.list_dialogues().unwrap();
+        got.sort();
+        assert_eq!(got, vec![(a.clone(), 7), (b.clone(), 5)]);
+    }
+
+    #[test]
+    fn list_dialogues_empty_store() {
+        let (_tmp, store) = open_store();
+        assert!(store.list_dialogues().unwrap().is_empty());
     }
 }

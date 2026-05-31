@@ -47,6 +47,14 @@ impl AdminKeyPair {
         B64.encode(sk_bytes)
     }
 
+    /// Подписать произвольное каноническое сообщение admin-API.
+    /// Используется в [`crate::admin_api`] для подписи запросов управления
+    /// сервером. Возвращает base64 Ed25519-подпись (64 байта).
+    pub fn sign_canonical(&self, message: &str) -> String {
+        let sig: Signature = self.sk.sign(message.as_bytes());
+        B64.encode(sig.to_bytes())
+    }
+
     /// Сгенерировать admin_sig для регистрации пользователя.
     ///
     /// `username` — логин пользователя,

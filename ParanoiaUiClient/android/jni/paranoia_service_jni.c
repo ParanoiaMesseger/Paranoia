@@ -6,8 +6,12 @@
 // и падает, потому что javaVM у Qt в этом процессе ничем не заполнен
 // (QtActivity там никогда не стартовала).
 //
-// Здесь — только тонкая обёртка над paranoia_lib C-ABI, чтобы Java-сервис
-// мог сам пройтись по профилям/диалогам и спросить у сервера notify_count.
+// Сервис работает ТОЛЬКО по in-memory snapshot'у, который UI присылает
+// после unlock'а (см. ParanoiaForegroundService::snapshot). Никакого
+// SQLCipher, никакого vault — даже dump процесса не вскрывает контент
+// диалогов. Здесь — тонкая обёртка над двумя C-FFI: paranoia_android_init
+// (для reqwest/network init) и paranoia_service_notify_count (stateless
+// /notify к серверу). Bonus: paranoia_last_error для диагностики.
 
 #include <jni.h>
 #include <stdint.h>
@@ -33,61 +37,36 @@ Java_app_paranoia_client_ParanoiaForegroundService_paranoiaInit(JNIEnv *env, jcl
     return paranoia_android_init((void *)env, (void *)context) == 0 ? JNI_TRUE : JNI_FALSE;
 }
 
+// Stateless notify-count: ни handle, ни БД, ни keyring'а. Все нужные
+// идентификаторы и ключ подписи приходят из snapshot'а (UI-процесса).
+// Возвращает count >= 0 при успехе, -1 при сетевой/протокольной ошибке.
+// Подробности ошибки см. paranoia_last_error.
 JNIEXPORT jlong JNICALL
-Java_app_paranoia_client_ParanoiaForegroundService_paranoiaClientNew(JNIEnv *env, jclass cls,
-                                                                     jstring server_url,
-                                                                     jstring reserve_urls_json,
-                                                                     jstring server_id,
-                                                                     jstring private_key_b64,
-                                                                     jstring db_path)
+Java_app_paranoia_client_ParanoiaForegroundService_paranoiaServiceNotifyCount(
+    JNIEnv *env, jclass cls,
+    jstring server_url, jstring reserve_urls_json,
+    jstring signing_key_b64, jstring sender_server_id, jstring partner_server_id,
+    jlong seq)
 {
     (void)cls;
-    const char *url  = take_chars(env, server_url);
-    const char *res  = take_chars(env, reserve_urls_json);
-    const char *id   = take_chars(env, server_id);
-    const char *key  = take_chars(env, private_key_b64);
-    const char *db   = take_chars(env, db_path);
+    const char *url        = take_chars(env, server_url);
+    const char *res        = take_chars(env, reserve_urls_json);
+    const char *sk         = take_chars(env, signing_key_b64);
+    const char *sender     = take_chars(env, sender_server_id);
+    const char *partner    = take_chars(env, partner_server_id);
 
-    ParanoiaHandle *handle = paranoia_client_new(url ? url : "",
-                                                 res ? res : "",
-                                                 id ? id : "",
-                                                 key ? key : "",
-                                                 db ? db : "");
+    uint64_t count = 0;
+    const int rc = paranoia_service_notify_count(
+        url ? url : "", res ? res : "", sk ? sk : "",
+        sender ? sender : "", partner ? partner : "",
+        seq < 0 ? 0 : (uint64_t)seq, &count);
 
     release_chars(env, server_url, url);
     release_chars(env, reserve_urls_json, res);
-    release_chars(env, server_id, id);
-    release_chars(env, private_key_b64, key);
-    release_chars(env, db_path, db);
-    return (jlong)(uintptr_t)handle;
-}
+    release_chars(env, signing_key_b64, sk);
+    release_chars(env, sender_server_id, sender);
+    release_chars(env, partner_server_id, partner);
 
-JNIEXPORT void JNICALL
-Java_app_paranoia_client_ParanoiaForegroundService_paranoiaClientFree(JNIEnv *env, jclass cls, jlong handle)
-{
-    (void)env;
-    (void)cls;
-    if (handle) paranoia_client_free((ParanoiaHandle *)(uintptr_t)handle);
-}
-
-JNIEXPORT jlong JNICALL
-Java_app_paranoia_client_ParanoiaForegroundService_paranoiaNotifyCount(JNIEnv *env, jclass cls, jlong handle,
-                                                                       jstring user_a, jstring user_b,
-                                                                       jstring keyring_json)
-{
-    (void)cls;
-    if (!handle) return -1;
-    const char *a = take_chars(env, user_a);
-    const char *b = take_chars(env, user_b);
-    const char *k = take_chars(env, keyring_json);
-
-    uint64_t count = 0;
-    const int rc = paranoia_notify_count_keyring((ParanoiaHandle *)(uintptr_t)handle,
-                                                 a ? a : "", b ? b : "", k ? k : "", &count);
-
-    release_chars(env, user_a, a);
-    release_chars(env, user_b, b);
-    release_chars(env, keyring_json, k);
     if (rc != 0) return -1;
     if (count > (uint64_t)INT64_MAX) return INT64_MAX;
     return (jlong)count;

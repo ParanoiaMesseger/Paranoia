@@ -666,38 +666,90 @@ Rectangle {
             width: 284
             spacing: 2
 
+            // Список быстрых реакций (настраиваемый синглтон Reactions).
+            // Раскладывается в несколько строк (Flow); по достижении 3 строк
+            // включается вертикальное пролистывание.
             Rectangle {
+                id: reactionsContainer
                 width: menuColumn.width
-                height: 42
                 radius: Theme.radiusSm
                 color: "transparent"
-                Row {
-                    anchors.centerIn: parent
-                    spacing: 6
-                    Repeater {
-                        model: ["👍", "🔥", "🤡", "💩", "❤️", "😂", "😢"]
-                        delegate: Rectangle {
-                            required property string modelData
-                            width: 30
-                            height: 30
+
+                readonly property int cellSize: 30
+                readonly property int cellSpacing: 6
+                readonly property int maxRows: 3
+                readonly property int maxFlowHeight: maxRows * cellSize + (maxRows - 1) * cellSpacing
+                height: Math.min(reactionsFlowMenu.implicitHeight, maxFlowHeight) + 8
+
+                Flickable {
+                    id: reactionsFlick
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    clip: true
+                    contentWidth: width
+                    contentHeight: reactionsFlowMenu.implicitHeight
+                    interactive: contentHeight > height
+                    flickableDirection: Flickable.VerticalFlick
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    Flow {
+                        id: reactionsFlowMenu
+                        width: reactionsFlick.width
+                        spacing: reactionsContainer.cellSpacing
+
+                        Repeater {
+                            model: Reactions.list
+                            delegate: Rectangle {
+                                required property string modelData
+                                width: reactionsContainer.cellSize
+                                height: reactionsContainer.cellSize
+                                radius: Theme.radiusSm
+                                color: reactionArea.containsMouse ? Theme.bgInput : Theme.bgSecondary
+                                border.width: 1
+                                border.color: Theme.border
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData
+                                    font.pixelSize: 16
+                                    font.family: Theme.fontFamily
+                                }
+                                MouseArea {
+                                    id: reactionArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    enabled: messageMenu.messageId.length > 0
+                                    onClicked: {
+                                        messageMenu.close()
+                                        Chat.sendReaction(messageMenu.messageId, modelData)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Кнопка настройки списка реакций (открывает эмодзи-пикер).
+                        Rectangle {
+                            width: reactionsContainer.cellSize
+                            height: reactionsContainer.cellSize
                             radius: Theme.radiusSm
-                            color: reactionArea.containsMouse ? Theme.bgInput : Theme.bgSecondary
+                            color: editReactionArea.containsMouse ? Theme.bgInput : Theme.bgSecondary
                             border.width: 1
                             border.color: Theme.border
-                            Text {
+                            AppIcon {
                                 anchors.centerIn: parent
-                                text: modelData
-                                font.pixelSize: 16
-                                font.family: Theme.fontFamily
+                                width: 16; height: 16
+                                name: "plus"
+                                iconColor: Theme.accentHover
+                                strokeWidth: 2.2
                             }
                             MouseArea {
-                                id: reactionArea
+                                id: editReactionArea
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                enabled: messageMenu.messageId.length > 0
+                                cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     messageMenu.close()
-                                    Chat.sendReaction(messageMenu.messageId, modelData)
+                                    reactionsConfig.open()
                                 }
                             }
                         }
@@ -1279,12 +1331,17 @@ Rectangle {
                         anchors.fill: parent
                         anchors.leftMargin: 10
                         anchors.rightMargin: 10
-                        placeholderText: "Поиск по диалогу…"
-                        placeholderTextColor: Theme.textHint
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontSm
                         font.family: Theme.fontFamily
                         background: null
+                        verticalAlignment: TextInput.AlignVCenter
+                        // Обнуляем паддинги, чтобы вводимый текст начинался
+                        // ровно там же, где placeholder.
+                        topPadding: 0
+                        bottomPadding: 0
+                        leftPadding: 0
+                        rightPadding: 0
                         selectByMouse: true
                         text: root.searchQuery
                         onTextChanged: {
@@ -1294,6 +1351,18 @@ Rectangle {
                         }
                         Keys.onEscapePressed: root.closeSearch()
                         Keys.onReturnPressed: root.searchStep(-1)
+
+                        // Собственный placeholder: встроенный в Material-стиле
+                        // (Android) всплывает вверх и наезжает на границу поля.
+                        Text {
+                            anchors.fill: parent
+                            verticalAlignment: Text.AlignVCenter
+                            visible: searchField.text.length === 0
+                            text: "Поиск по диалогу…"
+                            color: Theme.textHint
+                            font: searchField.font
+                            elide: Text.ElideRight
+                        }
                     }
                 }
 
@@ -1406,6 +1475,16 @@ Rectangle {
                 model: ListModel { id: msgModel }
 
                 ScrollBar.vertical: ScrollBar {}
+
+                // «Прилипание к низу»: если пользователь стоит у последнего
+                // сообщения, при изменении высоты вьюпорта (открытие/закрытие
+                // виртуальной клавиатуры) список остаётся у низа, а не уезжает
+                // за обрез. Флаг обновляется только когда жест пролистывания
+                // действительно завершён, чтобы не сбрасываться во время скролла.
+                property bool stickToBottom: true
+                onHeightChanged: if (stickToBottom) Qt.callLater(positionViewAtEnd)
+                onMovementEnded: stickToBottom = root.isListAtEnd()
+                onDraggingChanged: if (!dragging) stickToBottom = root.isListAtEnd()
 
                 delegate: Item {
                     width: listView.width
@@ -1970,7 +2049,7 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: listView.positionViewAtEnd()
+                    onClicked: { listView.stickToBottom = true; listView.positionViewAtEnd() }
                 }
 
                 ToolTip.visible: scrollToBottomArea.containsMouse
@@ -2192,6 +2271,32 @@ Rectangle {
                         }
                     }
 
+                    // Кнопка эмодзи — открывает эмодзи-пикер для вставки в текст.
+                    Rectangle {
+                        Layout.preferredWidth: 40
+                        Layout.preferredHeight: 40
+                        Layout.alignment: Qt.AlignVCenter
+                        radius: Theme.radiusSm
+                        color: emojiArea.containsMouse ? Theme.bgCard : Theme.bgInput
+                        border.width: 1
+                        border.color: Theme.border
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "🙂"
+                            font.pixelSize: 20
+                            font.family: Theme.fontFamily
+                        }
+
+                        MouseArea {
+                            id: emojiArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: inputEmojiPicker.open()
+                        }
+                    }
+
                     ScrollView {
                         id: msgInputScroll
                         Layout.fillWidth: true
@@ -2353,6 +2458,10 @@ Rectangle {
                             root.clearDraft()
                             root.clearPendingReply()
                             sendUnlockTimer.restart()
+                            // Автопрокрутка вниз при отправке: гарантированно
+                            // показываем только что отправленное сообщение.
+                            listView.stickToBottom = true
+                            Qt.callLater(listView.positionViewAtEnd)
                         }
 
                         onClicked: {
@@ -2379,6 +2488,115 @@ Rectangle {
         onSaveRequested: function(messageId, filename) {
             root.openSaveDialog(messageId, filename)
         }
+    }
+
+    // ── Эмодзи-пикер для вставки в поле ввода ────────────────────────────
+    EmojiPicker {
+        id: inputEmojiPicker
+        anchors.centerIn: Overlay.overlay
+        heading: "Эмодзи"
+        closeOnPick: false   // можно вставить несколько подряд
+        onPicked: function(emoji) {
+            msgInput.insert(msgInput.cursorPosition, emoji)
+        }
+        onClosed: msgInput.forceActiveFocus()
+    }
+
+    // ── Настройка списка быстрых реакций ─────────────────────────────────
+    Popup {
+        id: reactionsConfig
+        anchors.centerIn: Overlay.overlay
+        width: 340; padding: 20
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color: Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 14
+
+            Text {
+                Layout.fillWidth: true
+                text: "Быстрые реакции"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family: Theme.fontFamily
+                font.weight: Font.Medium
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "Нажмите на реакцию, чтобы убрать её из списка."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            Flow {
+                Layout.fillWidth: true
+                spacing: 8
+                Repeater {
+                    model: Reactions.list
+                    delegate: Rectangle {
+                        required property int index
+                        required property string modelData
+                        width: 40; height: 40
+                        radius: Theme.radiusSm
+                        color: cfgReactionArea.containsMouse ? Theme.errorBg : Theme.bgCard
+                        border.width: 1
+                        border.color: cfgReactionArea.containsMouse ? Theme.error : Theme.border
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData
+                            font.pixelSize: 20
+                            font.family: Theme.fontFamily
+                        }
+                        MouseArea {
+                            id: cfgReactionArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: Reactions.removeAt(index)
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Добавить"
+                    onClicked: reactionEmojiPicker.open()
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Сбросить"
+                    secondary: true
+                    onClicked: Reactions.reset()
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "Готово"
+                    secondary: true
+                    onClicked: reactionsConfig.close()
+                }
+            }
+        }
+    }
+
+    // Эмодзи-пикер для добавления новой реакции в список.
+    EmojiPicker {
+        id: reactionEmojiPicker
+        anchors.centerIn: Overlay.overlay
+        heading: "Добавить реакцию"
+        closeOnPick: true
+        onPicked: function(emoji) { Reactions.add(emoji) }
     }
 
     // ── Подтверждение удаления выделенных сообщений ──────────────────────

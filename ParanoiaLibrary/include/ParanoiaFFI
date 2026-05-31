@@ -154,6 +154,44 @@ public:
             QS_RS5(server_url, reserve_server_urls_json, username, user_pubkey_b64, secret_b64));
     }
 
+    // ── Admin-API ─────────────────────────────────────────────────────────
+    static QString admin_list_users(QSTR server_url, QSTR reserve_server_urls_json, QSTR admin_secret_b64)
+    { return RS_QS(::paranoia_admin_list_users(QS_RS3(server_url, reserve_server_urls_json, admin_secret_b64))); }
+
+    static QString admin_delete_user(QSTR server_url, QSTR reserve_server_urls_json, QSTR admin_secret_b64,
+                                     QSTR username)
+    {
+        return RS_QS(::paranoia_admin_delete_user(QS_RS4(server_url, reserve_server_urls_json, admin_secret_b64,
+                                                         username)));
+    }
+
+    static QString admin_list_dialogues(QSTR server_url, QSTR reserve_server_urls_json, QSTR admin_secret_b64)
+    { return RS_QS(::paranoia_admin_list_dialogues(QS_RS3(server_url, reserve_server_urls_json, admin_secret_b64))); }
+
+    static QString admin_prune_dialogues(QSTR server_url, QSTR reserve_server_urls_json, QSTR admin_secret_b64)
+    { return RS_QS(::paranoia_admin_prune_dialogues(QS_RS3(server_url, reserve_server_urls_json, admin_secret_b64))); }
+
+    static QString admin_get_config(QSTR server_url, QSTR reserve_server_urls_json, QSTR admin_secret_b64)
+    { return RS_QS(::paranoia_admin_get_config(QS_RS3(server_url, reserve_server_urls_json, admin_secret_b64))); }
+
+    static QString admin_set_config(QSTR server_url, QSTR reserve_server_urls_json, QSTR admin_secret_b64,
+                                    QSTR patch_json)
+    {
+        return RS_QS(::paranoia_admin_set_config(QS_RS4(server_url, reserve_server_urls_json, admin_secret_b64,
+                                                        patch_json)));
+    }
+
+    static QString admin_register_user(QSTR server_url, QSTR reserve_server_urls_json, QSTR admin_secret_b64,
+                                       QSTR username, QSTR user_pubkey_b64)
+    {
+        return RS_QS(::paranoia_admin_register_user(QS_RS(server_url), QS_RS(reserve_server_urls_json),
+                                                    QS_RS(admin_secret_b64), QS_RS(username),
+                                                    QS_RS(user_pubkey_b64)));
+    }
+
+    static QString admin_pubkey_from_secret(QSTR admin_secret_b64)
+    { return admin_secret_b64.isEmpty() ? QString() : RS_QS(::paranoia_admin_pubkey_from_secret(QS_RS(admin_secret_b64))); }
+
     static QString qr_create_invitation(QSTR initiator_id)
     { return RS_QS(::paranoia_qr_create_invitation(QS_RS(initiator_id))); }
 
@@ -184,6 +222,23 @@ public:
 
     static QString ecies_decrypt(QSTR device_private_key_b64, QSTR envelope_json)
     { return RS_QS(::paranoia_ecies_decrypt(QS_RS2(device_private_key_b64, envelope_json))); }
+
+    // ── Corporate/commercial distribution-нода ──────────────────────────────
+    static QString corp_publish(QSTR dist_url, QSTR admin_secret_b64, QSTR server_id, QSTR psk_b64,
+                                unsigned long long version, QSTR plaintext)
+    {
+        return RS_QS(::paranoia_corp_publish(QS_RS(dist_url), QS_RS(admin_secret_b64), QS_RS(server_id),
+                                             QS_RS(psk_b64), version, QS_RS(plaintext)));
+    }
+
+    static QString corp_delete(QSTR dist_url, QSTR admin_secret_b64, QSTR server_id)
+    { return RS_QS(::paranoia_corp_delete(QS_RS3(dist_url, admin_secret_b64, server_id))); }
+
+    static QString commercial_publish(QSTR dist_url, QSTR admin_secret_b64, QSTR data_json)
+    { return RS_QS(::paranoia_commercial_publish(QS_RS3(dist_url, admin_secret_b64, data_json))); }
+
+    static QString corp_sync(QSTR dist_url, QSTR server_id, QSTR signing_key_b64, QSTR psk_b64)
+    { return RS_QS(::paranoia_corp_sync(QS_RS4(dist_url, server_id, signing_key_b64, psk_b64))); }
 
     static std::pair<PrivateKey, PublicKey> generate_keypair()
     {

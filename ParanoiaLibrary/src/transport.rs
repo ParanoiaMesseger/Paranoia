@@ -285,7 +285,10 @@ impl Transport {
 
     // ── HTTP утилита ────────────────────────────────────────────────────
 
-    async fn put_json(&self, path: &str, body: &Value) -> Result<Value> {
+    /// Отправить plain-JSON `PUT` на произвольный путь (без cover-обёртки) с
+    /// перебором резервных endpoint'ов. Используется admin-API
+    /// ([`crate::admin_api`]) и регистрацией.
+    pub(crate) async fn put_json(&self, path: &str, body: &Value) -> Result<Value> {
         let mut last_retry_error = None;
         for server_url in &self.server_urls {
             let url = format!("{}{}", server_url, path);

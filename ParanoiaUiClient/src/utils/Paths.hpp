@@ -24,6 +24,7 @@ namespace Paths
 
     QDir profileDir(const QString &profileId);
     QString profileClient(const QString &profileId);
+    QString profileCorp(const QString &profileId);
     QString profileDialogs(const QString &profileId);
     QString profileDb(const QString &profileId);
 

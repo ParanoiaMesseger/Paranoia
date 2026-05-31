@@ -346,6 +346,279 @@ pub extern "C" fn paranoia_register_user(
     })
 }
 
+// ── Admin-API (управление сервером по подписи администратора) ────────────────
+
+/// Преобразовать результат admin-API в C-строку, классифицируя сетевые ошибки.
+fn admin_result_to_c(result: anyhow::Result<String>) -> *mut c_char {
+    match result {
+        Ok(s) => string_to_c(s),
+        Err(e) => {
+            let chain = anyhow_error_chain(&e);
+            set_last_error(&crate::error_classify::classify_network_error(&chain, &chain));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Список зарегистрированных пользователей сервера. JSON-строка
+/// `{success, count, users}` или NULL при ошибке. Free: paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_list_users(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    admin_secret_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_ptr());
+        let reserve = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_ptr()
+        );
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::list_users(&server_url, &reserve, &secret))
+    })
+}
+
+/// Удалить пользователя с сервера. JSON-строка `{success, message}` или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_delete_user(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    admin_secret_b64: *const c_char,
+    username: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_ptr());
+        let reserve = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_ptr()
+        );
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let username = ffi_try!(cstr_arg(username), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::delete_user(
+            &server_url,
+            &reserve,
+            &secret,
+            &username,
+        ))
+    })
+}
+
+/// Перечислить диалоги сервера. JSON-строка `{success, count, dialogues}` или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_list_dialogues(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    admin_secret_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_ptr());
+        let reserve = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_ptr()
+        );
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::list_dialogues(&server_url, &reserve, &secret))
+    })
+}
+
+/// Прунинг диалогов без живых участников. JSON-строка `{success, pruned,
+/// pruned_ids}` или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_prune_dialogues(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    admin_secret_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_ptr());
+        let reserve = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_ptr()
+        );
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::prune_dialogues(&server_url, &reserve, &secret))
+    })
+}
+
+/// Получить безопасное представление конфига сервера. JSON-строка
+/// `{success, config}` или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_get_config(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    admin_secret_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_ptr());
+        let reserve = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_ptr()
+        );
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::get_config(&server_url, &reserve, &secret))
+    })
+}
+
+/// Применить патч конфига сервера. patch_json — JSON-объект с полями
+/// `port/stun_bind/turn_public_ip/turn_relay_port_range`. JSON-строка
+/// `{success, message}` или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_set_config(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    admin_secret_b64: *const c_char,
+    patch_json: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_ptr());
+        let reserve = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_ptr()
+        );
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let patch = ffi_try!(cstr_arg(patch_json), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::set_config(
+            &server_url,
+            &reserve,
+            &secret,
+            &patch,
+        ))
+    })
+}
+
+/// Зарегистрировать пользователя через admin put_json-путь (единый код-путь с
+/// остальными admin-вызовами). JSON-строка `{success, message}` или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_register_user(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    admin_secret_b64: *const c_char,
+    username: *const c_char,
+    user_pubkey_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let server_url = ffi_try!(cstr_arg(server_url), invalid_argument_ptr());
+        let reserve = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_ptr()
+        );
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let username = ffi_try!(cstr_arg(username), invalid_argument_ptr());
+        let pubkey = ffi_try!(cstr_arg(user_pubkey_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::register_user(
+            &server_url,
+            &reserve,
+            &secret,
+            &username,
+            &pubkey,
+        ))
+    })
+}
+
+/// Вывести admin-pubkey (base64) из приватного ключа админа. NULL при ошибке.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_pubkey_from_secret(
+    admin_secret_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("admin_error", || {
+        clear_last_error();
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::admin_api::admin_pubkey(&secret))
+    })
+}
+
+// ── Corporate/commercial distribution-нода ──────────────────────────────────
+
+/// Зашифровать связку сотрудника его PSK и запушить блоб на distribution-ноду
+/// (подпись админ-ключом). plaintext — keyring JSON. version монотонно растёт
+/// (панель передаёт unix-ms). JSON-ответ ноды или NULL. Free: paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_publish(
+    dist_url: *const c_char,
+    admin_secret_b64: *const c_char,
+    server_id: *const c_char,
+    psk_b64: *const c_char,
+    version: u64,
+    plaintext: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        let psk_b64 = ffi_try!(cstr_arg(psk_b64), invalid_argument_ptr());
+        let plaintext = ffi_try!(cstr_arg(plaintext), invalid_argument_ptr());
+        let result = (|| -> anyhow::Result<String> {
+            let psk = crate::crypto::decode_b64(&psk_b64)
+                .map_err(|_| anyhow::anyhow!("invalid_psk"))?;
+            let blob = crate::corp::seal(&psk, &sid, version, plaintext.as_bytes())?;
+            let blob_b64 = crate::crypto::encode_b64(&blob);
+            crate::corp_api::corp_push(&dist, &secret, &sid, version, &blob_b64)
+        })();
+        admin_result_to_c(result)
+    })
+}
+
+/// Удалить блоб сотрудника с distribution-ноды (подпись админ-ключом).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_delete(
+    dist_url: *const c_char,
+    admin_secret_b64: *const c_char,
+    server_id: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        admin_result_to_c(crate::corp_api::corp_delete(&dist, &secret, &sid))
+    })
+}
+
+/// Запушить весь коммерческий датасет (несекретный JSON) на distribution-ноду.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_commercial_publish(
+    dist_url: *const c_char,
+    admin_secret_b64: *const c_char,
+    data_json: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let data = ffi_try!(cstr_arg(data_json), invalid_argument_ptr());
+        admin_result_to_c(crate::corp_api::commercial_push(&dist, &secret, &data))
+    })
+}
+
+/// Забрать и расшифровать связку сотрудника с distribution-ноды (owner-proof
+/// подписью signing-ключом). Возвращает plaintext keyring JSON, пустую строку
+/// если блоба ещё нет, или NULL при ошибке. Free: paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_sync(
+    dist_url: *const c_char,
+    server_id: *const c_char,
+    signing_key_b64: *const c_char,
+    psk_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        let sk = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_ptr());
+        let psk = ffi_try!(cstr_arg(psk_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::corp_api::corp_sync(&dist, &sid, &sk, &psk))
+    })
+}
+
 /// Отправить текстовое сообщение с локальным keyring JSON.
 /// keyring_json: [{"start_seq":1,"key":"base64-32-bytes"}, ...]
 /// NULL означает ошибку отправки/сохранения. Ошибку см. paranoia_last_error().
@@ -1895,6 +2168,88 @@ pub extern "C" fn paranoia_vault_decrypt_attachment(
             }
             Err(e) => {
                 set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+// ── Background notification poll (без SQLCipher / vault) ─────────────────────
+//
+// Используется автономным notifications-сервисом на Android: у сервиса нет
+// доступа к master_key (PIN), значит ни LocalStore (SQLCipher) ни любые
+// vault-protected файлы открыть нельзя. Snapshot c (signing_key, server_id,
+// peer_server_id, last_seen_seq) приходит из UI-процесса один раз после
+// unlock'а и держится в RAM сервиса. Эта функция собирает временный Transport,
+// подписывает один /notify и возвращает количество новых сообщений после `seq`.
+//
+// Из крипто-материала тут только Ed25519 signing key (нужен для подписи
+// запроса серверу). Никакие сессионные ключи диалога, master_key, db_key
+// сюда не передаются — даже compromise сервиса не вскрывает содержимое.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_service_notify_count(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    signing_key_b64: *const c_char,
+    sender_server_id: *const c_char,
+    partner_server_id: *const c_char,
+    seq: u64,
+    out_count: *mut u64,
+) -> i32 {
+    ffi_catch_i32("service_notify_error", || {
+        clear_last_error();
+        if out_count.is_null() {
+            return invalid_argument_i32();
+        }
+        let server = ffi_try!(cstr_arg(server_url), invalid_argument_i32());
+        let reserves = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_i32()
+        );
+        let sk_b64 = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_i32());
+        let sender = ffi_try!(cstr_arg(sender_server_id), invalid_argument_i32());
+        let partner = ffi_try!(cstr_arg(partner_server_id), invalid_argument_i32());
+
+        let sk_bytes = match decode_b64_32(&sk_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                set_last_error("invalid_signing_key: expected 32 bytes base64");
+                return -1;
+            }
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+
+        // Та же конструкция подписи, что в Dialogue::notify_count
+        // (см. ParanoiaLibrary/src/dialogue.rs): иначе сервер вернёт 401.
+        let msg = format!("{sender}{partner}{seq}");
+        let sig = crate::crypto::sign(&signing_key, msg.as_bytes());
+
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(_) => {
+                set_last_error("runtime_error");
+                return -1;
+            }
+        };
+        let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
+        let transport = crate::transport::Transport::new(&server, reserves.iter(), cover);
+        let core = crate::transport::CoreNotify {
+            sender,
+            partner,
+            seq,
+            sig,
+        };
+
+        match rt.block_on(transport.notify(&core)) {
+            Ok(count) => {
+                unsafe { *out_count = count };
+                0
+            }
+            Err(e) => {
+                set_last_error(&classify_network_error(
+                    &anyhow_error_chain(&e),
+                    "service_notify_error",
+                ));
                 -1
             }
         }
