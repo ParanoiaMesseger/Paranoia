@@ -128,7 +128,13 @@ fn parse_authorization(headers: &HeaderMap) -> Result<ArrivedAuth, String> {
         .ok_or_else(|| "Missing authorization".to_string())?
         .to_str()
         .map_err(|_| "Invalid authorization".to_string())?;
-    let token = raw.strip_prefix("Paranoia ").unwrap_or(raw).trim();
+    // Снимаем любую схему-префикс (например "Bearer "), не привязываясь к
+    // конкретному слову — клиент маскирует её под обычный bearer-токен и может
+    // менять схему через профиль маскировки.
+    let token_b64 = raw.rsplit(' ').next().unwrap_or(raw).trim();
+    // Токен — это base64("username:sig_b64"); разворачиваем обратно.
+    let decoded = crypto::decode_b64(token_b64).map_err(|_| "Invalid authorization".to_string())?;
+    let token = String::from_utf8(decoded).map_err(|_| "Invalid authorization".to_string())?;
     let (username, sig) = token
         .split_once(':')
         .ok_or_else(|| "Invalid authorization".to_string())?;
@@ -181,4 +187,45 @@ fn fail(msg: String) -> Value {
         "success": false,
         "message": msg,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn parse_authorization_unwraps_masked_bearer_token() {
+        let token = crypto::encode_b64(b"alice:c2ln");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let auth = parse_authorization(&headers).expect("valid token");
+        assert_eq!(auth.username, "alice");
+        assert_eq!(auth.sig, "c2ln");
+    }
+
+    #[test]
+    fn parse_authorization_accepts_token_without_scheme() {
+        let token = crypto::encode_b64(b"bob:c2ln");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&token).unwrap(),
+        );
+        let auth = parse_authorization(&headers).expect("valid token");
+        assert_eq!(auth.username, "bob");
+    }
+
+    #[test]
+    fn parse_authorization_rejects_garbage() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer not_base64!!!"),
+        );
+        assert!(parse_authorization(&headers).is_err());
+    }
 }

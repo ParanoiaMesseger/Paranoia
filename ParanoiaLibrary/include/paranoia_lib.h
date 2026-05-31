@@ -433,6 +433,41 @@ int paranoia_vault_set_pin(CSTR pin);
 // Разблокировать. 0=ok, 1=wrong_pin, 2=locked_out, 3=not_initialized, -1=internal.
 int paranoia_vault_unlock(CSTR pin);
 
+// PKCS#11-токен (доступно только при сборке libparanoia с фичей `pkcs11`).
+// Инициализировать НОВЫЙ vault под токеном. 0=ok, 1=already_initialized, -1=error.
+int paranoia_vault_init_token(CSTR module_path, CSTR token_pin);
+// Разблокировать token-mode vault. 0=ok, 3=not_initialized, -1=error.
+int paranoia_vault_unlock_token(CSTR module_path, CSTR token_pin);
+
+// ── Masking-профиль (маскировка трафика / раздача)
+// Сменить активную маскировку: profile_json (JSON профиля) или NULL/"" =
+// встроенная food-маска. 0=ok, -1=error.
+int paranoia_set_masking_profile(ParanoiaHandle *h, CSTR profile_json);
+// Применить ПОДПИСАННЫЙ профиль: проверить подпись доверенным ключом
+// trusted_pubkey_b64 и при успехе сменить маскировку. 0=ok, -1=error.
+int paranoia_set_signed_masking_profile(ParanoiaHandle *h, CSTR signed_json, CSTR trusted_pubkey_b64);
+// Подписать профиль extended-секретом (панель). JSON конверта или NULL.
+// Освобождать paranoia_free_string.
+char *paranoia_sign_masking_profile(CSTR profile_json, CSTR extended_secret_b64);
+// Скачать подписанный профиль (GET url, опц. Bearer bearer_token=NULL/""),
+// проверить подпись trusted_pubkey_b64 и применить. 0=ok, -1=error.
+int paranoia_fetch_and_apply_signed_profile(ParanoiaHandle *h, CSTR url, CSTR trusted_pubkey_b64, CSTR bearer_token);
+// Задать активный masking-профиль для admin/reg-трафика (глобально). NULL/"" —
+// очистить (admin-трафик пойдёт плоско). 0=ok, -1=error.
+int paranoia_admin_set_masking_profile(CSTR profile_json);
+// Случайная правдоподобная схема маскировки (JSON SchemaVariant) — «бросить
+// кости» в панели. Доступна только в сборке libparanoia с фичей schema-gen;
+// иначе символ отсутствует. NULL при ошибке. Освобождать paranoia_free_string.
+char *paranoia_generate_masking_schema(void);
+// Случайный путь фейкового эндпоинта (таргет). Только в сборке с фичей
+// schema-gen. NULL при ошибке. Освобождать paranoia_free_string.
+char *paranoia_generate_masking_path(void);
+// Запушить подписанный masking-профиль на distribution-ноду (PUT
+// /masking/profile). admin_secret_b64 — base admin-ключ сервера (подпись
+// записи). signed_profile_json — конверт, подписанный extended-ключом. Пустая
+// строка при успехе, иначе сообщение об ошибке. Освобождать paranoia_free_string.
+char *paranoia_masking_publish(CSTR dist_url, CSTR admin_secret_b64, CSTR signed_profile_json);
+
 // Очистить master_key из RAM. Всегда 0.
 int paranoia_vault_lock(void);
 

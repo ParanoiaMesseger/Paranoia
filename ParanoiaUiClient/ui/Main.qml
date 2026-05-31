@@ -332,6 +332,14 @@ ApplicationWindow {
             }
             onOpenVersionInfo: stackView.push(versionInfoPage)
             onOpenChangePin: stackView.push(changePinPage)
+            onOpenMasking: stackView.push(maskingPage)
+        }
+    }
+
+    Component {
+        id: maskingPage
+        MaskingPage {
+            onBack: stackView.pop()
         }
     }
 

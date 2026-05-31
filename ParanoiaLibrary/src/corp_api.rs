@@ -63,6 +63,46 @@ async fn put_json(base: &str, path: &str, body: &Value) -> Result<String> {
     Ok(text)
 }
 
+/// Если активен профиль с видом `node` — отправить дескриптор операции через
+/// cover-туннель ноды и вернуть `(status, body_text)`. Иначе `None` (слать
+/// плоско). Маскирует distribution-трафик (corp/commercial) тем же профилем.
+fn node_tunnel(dist_url: &str, descriptor: &Value) -> Result<Option<(u16, String)>> {
+    let Some(profile) = crate::admin_api::active_masking_profile() else {
+        return Ok(None);
+    };
+    let Some(spec) = profile.kinds.get("node") else {
+        return Ok(None);
+    };
+    let inner = serde_json::to_vec(descriptor)?;
+    let covered = paranoia_cover::wrap_auto(&profile, "node", &inner)
+        .map_err(|e| anyhow!("cover wrap: {e}"))?;
+    let rt = Runtime::new()?;
+    let text = rt.block_on(put_json(dist_url, &spec.path, &covered))?;
+    let resp_cover: Value =
+        serde_json::from_str(&text).map_err(|_| anyhow!("bad cover response"))?;
+    let resp_inner = paranoia_cover::unwrap(&profile, "node_resp", &resp_cover)
+        .map_err(|e| anyhow!("cover unwrap: {e}"))?;
+    let resp: Value = serde_json::from_slice(&resp_inner)?;
+    let status = resp.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    let body = resp.get("body").cloned().unwrap_or(Value::Null);
+    Ok(Some((status, serde_json::to_string(&body)?)))
+}
+
+/// Отправить write-операцию (corp.put/delete, commercial.put): через туннель,
+/// если профиль активен, иначе плоско на `plain_path`. Возвращает тело ответа.
+fn send_write(dist_url: &str, plain_path: &str, op: &str, body: &Value) -> Result<String> {
+    if let Some((status, text)) =
+        node_tunnel(dist_url, &json!({ "op": op, "body": body }))?
+    {
+        if (200..300).contains(&status) {
+            return Ok(text);
+        }
+        bail!("http {}: {}", status, text);
+    }
+    let rt = Runtime::new()?;
+    rt.block_on(put_json(dist_url, plain_path, body))
+}
+
 // ── Запись (панель/админ) ───────────────────────────────────────────────────
 
 /// Запушить шифрованный блоб связки сотрудника. blob_b64 — выход `corp::seal`.
@@ -84,8 +124,7 @@ pub fn corp_push(
         "op": "corp.put", "nonce": nonce, "ts": ts,
         "server_id": server_id, "version": version, "blob_b64": blob_b64, "sig": sig,
     });
-    let rt = Runtime::new()?;
-    rt.block_on(put_json(dist_url, "/corp/put", &body))
+    send_write(dist_url, "/corp/put", "corp.put", &body)
 }
 
 /// Удалить блоб сотрудника (увольнение/удаление).
@@ -98,8 +137,7 @@ pub fn corp_delete(dist_url: &str, admin_secret_b64: &str, server_id: &str) -> R
     let body = json!({
         "op": "corp.delete", "nonce": nonce, "ts": ts, "server_id": server_id, "sig": sig,
     });
-    let rt = Runtime::new()?;
-    rt.block_on(put_json(dist_url, "/corp/delete", &body))
+    send_write(dist_url, "/corp/delete", "corp.delete", &body)
 }
 
 /// Запушить весь коммерческий датасет (несекретный; раздаётся ботам на чтение).
@@ -116,8 +154,30 @@ pub fn commercial_push(dist_url: &str, admin_secret_b64: &str, data_json: &str) 
     let body = json!({
         "op": "commercial.put", "nonce": nonce, "ts": ts, "data_json": data_json, "sig": sig,
     });
-    let rt = Runtime::new()?;
-    rt.block_on(put_json(dist_url, "/commercial/put", &body))
+    send_write(dist_url, "/commercial/put", "commercial.put", &body)
+}
+
+/// Запушить ПОДПИСАННЫЙ masking-профиль на ноду (PUT /masking/profile). Нода
+/// начинает раздавать его клиентам сразу — те применяют при следующем запросе.
+/// `signed_profile_json` — конверт SignedProfile (подписан extended-ключом).
+pub fn masking_publish(
+    dist_url: &str,
+    admin_secret_b64: &str,
+    signed_profile_json: &str,
+) -> Result<String> {
+    let kp =
+        AdminKeyPair::from_secret_b64(admin_secret_b64).map_err(|_| anyhow!("invalid_admin_key"))?;
+    // Валидируем как JSON, но подписываем/шлём сырую строку — чтобы sha256
+    // совпал на ноде без риска ре-сериализации.
+    let _: Value = serde_json::from_str(signed_profile_json).map_err(|_| anyhow!("invalid_profile_json"))?;
+    let nonce = Uuid::new_v4().to_string();
+    let ts = now_secs();
+    let extra = sha256_hex(signed_profile_json.as_bytes());
+    let sig = kp.sign_canonical(&canonical_write("masking.put", &nonce, ts, &extra));
+    let body = json!({
+        "op": "masking.put", "nonce": nonce, "ts": ts, "profile": signed_profile_json, "sig": sig,
+    });
+    send_write(dist_url, "/masking/profile", "masking.put", &body)
 }
 
 // ── Чтение (клиент сотрудника) ──────────────────────────────────────────────
@@ -163,8 +223,17 @@ pub fn corp_sync(
     let pubkey_b64 = encode_b64(vk.to_bytes().as_slice());
     let sig_b64 = encode_b64(sig.as_slice());
 
-    let rt = Runtime::new()?;
-    let (status, text) = rt.block_on(corp_get(dist_url, server_id, &pubkey_b64, ts, &sig_b64))?;
+    let descriptor = json!({
+        "op": "corp.get", "server_id": server_id,
+        "x_pubkey": pubkey_b64, "x_ts": ts.to_string(), "x_sig": sig_b64,
+    });
+    let (status, text) = match node_tunnel(dist_url, &descriptor)? {
+        Some(r) => r,
+        None => {
+            let rt = Runtime::new()?;
+            rt.block_on(corp_get(dist_url, server_id, &pubkey_b64, ts, &sig_b64))?
+        }
+    };
     if status == 404 {
         return Ok(String::new()); // блоба ещё нет
     }

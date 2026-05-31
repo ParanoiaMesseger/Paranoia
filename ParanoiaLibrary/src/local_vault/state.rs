@@ -15,12 +15,19 @@ const VERIFIER_PLAINTEXT: &[u8] = b"{\"v\":1,\"verifier\":\"paranoia-vault-v1\"}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VaultState {
     pub v: u32,
+    // PIN-режим: соль + verifier. В токен-режиме не используются (пустые).
+    #[serde(default)]
     pub salt_b64: String,
+    #[serde(default)]
     pub verifier_b64: String,
     #[serde(default)]
     pub failed_count: u32,
     #[serde(default)]
     pub lockout_until: Option<DateTime<Utc>>,
+    /// Токен-режим (PKCS#11): master-key, обёрнутый ключом аппаратного токена.
+    /// `Some` ⇒ vault разблокируется только токеном (PIN не используется).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_wrapped_master_b64: Option<String>,
 }
 
 impl VaultState {
@@ -31,7 +38,34 @@ impl VaultState {
             verifier_b64: B64.encode(verifier),
             failed_count: 0,
             lockout_until: None,
+            token_wrapped_master_b64: None,
         }
+    }
+
+    /// Состояние для токен-режима: master обёрнут ключом токена.
+    pub fn new_token(wrapped_master: &[u8]) -> Self {
+        Self {
+            v: 1,
+            salt_b64: String::new(),
+            verifier_b64: String::new(),
+            failed_count: 0,
+            lockout_until: None,
+            token_wrapped_master_b64: Some(B64.encode(wrapped_master)),
+        }
+    }
+
+    pub fn is_token_mode(&self) -> bool {
+        self.token_wrapped_master_b64.is_some()
+    }
+
+    /// Шифртекст обёрнутого master (токен-режим).
+    pub fn token_wrapped_master(&self) -> Result<Vec<u8>> {
+        let b64 = self
+            .token_wrapped_master_b64
+            .as_ref()
+            .ok_or_else(|| anyhow!("vault: not a token-mode vault"))?;
+        B64.decode(b64.as_bytes())
+            .map_err(|e| anyhow!("vault: bad wrapped-master b64: {e}"))
     }
 
     pub fn salt(&self) -> Result<[u8; SALT_LEN]> {

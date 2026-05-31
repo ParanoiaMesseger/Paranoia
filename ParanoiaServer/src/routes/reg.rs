@@ -6,9 +6,9 @@ use tracing::{info, warn};
 
 #[derive(Deserialize)]
 pub struct RegRequest {
-    username: String,
-    pub_key: String,   // base64, 32 bytes
-    admin_sig: String, // base64, 64 bytes
+    pub username: String,
+    pub pub_key: String,   // base64, 32 bytes
+    pub admin_sig: String, // base64, 64 bytes
 }
 
 #[derive(Serialize)]
@@ -43,20 +43,19 @@ async fn do_reg(state: Arc<AppState>, req: RegRequest) -> ApiResponse {
         return fail("pub_key must be 32 bytes".into());
     }
 
-    // Verify admin signature over username+pub_key (base64 string)
-    let admin_pubkey = {
-        let cfg = state.config.read().await;
-        match cfg.admin_pubkey_bytes() {
-            Ok(k) => k,
-            Err(e) => {
-                return fail(format!("Server config error: {e}"));
-            }
-        }
-    };
+    // Регистрация — операция уровня BASE: принимаем подпись base- или
+    // extended-ключа (extended ⊇ base).
     let signed_msg = format!("{}{}", req.username, req.pub_key);
-    if let Err(e) = crypto::verify_signature(&admin_pubkey, signed_msg.as_bytes(), &admin_sig) {
+    if let Err(e) = crate::routes::admin::verify_admin_sig(
+        &state,
+        signed_msg.as_bytes(),
+        &admin_sig,
+        crate::routes::admin::Capability::Base,
+    )
+    .await
+    {
         warn!("Rejected registration for '{}': {e}", req.username);
-        return fail("Invalid admin signature".into());
+        return fail(format!("Invalid admin signature: {e}"));
     }
 
     // Register user

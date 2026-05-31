@@ -12,7 +12,6 @@ Rectangle {
     property int initialTabIndex: 0
 
     property string exportFilePath: ""
-    property string importFilePath: ""
 
     signal back
     signal profileImported
@@ -91,37 +90,11 @@ Rectangle {
         }
     }
 
-    FileDialog {
-        id: importOpenDialog
-        title: "Выбрать export-файл"
-        fileMode: FileDialog.OpenFile
-        nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
-        onAccepted: {
-            importFilePath = Backend.urlToLocalPath(selectedFile);
-            importFeedback.text = "";
-            deleteFileBanner.visible = false;
-            const res = Backend.importProfile(importFilePath.trim());
-            if (res.ok) {
-                importFeedback.text = "✓ Импорт выполнен. Диалогов: " + res.importedDialogues + ", ключей: " + res.importedKeyEntries + ", профилей: " + (res.importedProfiles || 0) + ", admin-серверов: " + res.importedAdminServers;
-                if (res.conflicts > 0)
-                    importFeedback.text += "\nКонфликтов keyring: " + res.conflicts + " (не перезаписаны)";
-                if (res.skippedEntries > 0)
-                    importFeedback.text += "\nПропущено записей: " + res.skippedEntries;
-                deleteFileBanner.visible = true;
-                root.profileImported();
-            } else {
-                importFeedback.text = res.error || "Ошибка импорта.";
-            }
-        }
-    }
-
     Component.onCompleted: {
         tabBar.currentIndex = root.initialTabIndex;
         exportFeedback.text = "";
-        importFeedback.text = "";
         exportReceiverKey.text = "";
         exportFilePath = "";
-        importFilePath = "";
         root.refreshExportDialogs();
     }
 
@@ -201,7 +174,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Файл экспорта шифруется публичным ключом принимающего устройства."
+                            text: "Файл шифруется ключом принимающего устройства."
                             color: Theme.textSecondary
                             font.pixelSize: Theme.fontSm
                             font.family: Theme.fontFamily
@@ -376,7 +349,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "WARNING // Файл содержит ваши ключи и keyring. Храните его в безопасном месте."
+                            text: "Файл содержит ваши ключи. Храните его в безопасном месте."
                             color: Theme.textSecondary
                             font.pixelSize: Theme.fontXs
                             font.family: Theme.fontFamily
@@ -422,114 +395,17 @@ Rectangle {
                     width: importScroll.availableWidth
                     spacing: 12
 
-                    Item {
-                        Layout.preferredHeight: 8
-                    }
+                    Item { Layout.preferredHeight: 8 }
 
-                    ColumnLayout {
+                    // Единая логика импорта (та же, что на отдельной странице импорта).
+                    ImportProfilePanel {
                         Layout.fillWidth: true
                         Layout.leftMargin: 16
                         Layout.rightMargin: 16
-                        spacing: 12
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: "Импортировать профиль из зашифрованного файла. Передайте ваш публичный ключ экспортирующему устройство."
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSm
-                            font.family: Theme.fontFamily
-                            wrapMode: Text.WordWrap
-                        }
-
-                        CopyablePublicKeyBlock {
-                            Layout.fillWidth: true
-                            title: "Ваш публичный ключ:"
-                            keyText: Backend.devicePubkey
-                            backgroundColor: Theme.bgSecondary
-                            titleColor: Theme.textPrimary
-                            titleFontSize: Theme.fontSm
-                            keyElide: Text.ElideRight
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: "После успешного импорта рекомендуется удалить файл экспорта."
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontXs
-                            font.family: Theme.fontFamily
-                            wrapMode: Text.WordWrap
-                        }
-
-                        Text {
-                            id: importFeedback
-                            Layout.fillWidth: true
-                            color: text.includes("✓") ? Theme.success : Theme.error
-                            font.pixelSize: Theme.fontSm
-                            font.family: Theme.fontFamily
-                            wrapMode: Text.WordWrap
-                            visible: text.length > 0
-                        }
-
-                        Rectangle {
-                            id: deleteFileBanner
-                            Layout.fillWidth: true
-                            implicitHeight: deleteFileLayout.implicitHeight + 16
-                            color: Theme.bgSecondary
-                            radius: Theme.radiusSm
-                            border.color: Theme.border
-                            visible: false
-
-                            ColumnLayout {
-                                id: deleteFileLayout
-                                anchors.fill: parent
-                                anchors.leftMargin: 12
-                                anchors.rightMargin: 12
-                                spacing: 8
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: "Удалить файл экспорта?"
-                                    color: Theme.textSecondary
-                                    font.pixelSize: Theme.fontSm
-                                    font.family: Theme.fontFamily
-                                    wrapMode: Text.WordWrap
-                                }
-
-                                ParaButton {
-                                    text: "Удалить"
-                                    Layout.fillWidth: true
-                                    implicitHeight: 36
-                                    onClicked: {
-                                        let path = importFilePath.trim();
-                                        const res = Backend.deleteExportFile(path);
-                                        if (res.ok)
-                                            importFeedback.text += "\nФайл экспорта удалён.";
-                                        else
-                                            importFeedback.text += "\nУдалите файл вручную: " + path + " (" + (res.error || "ошибка") + ")";
-                                        deleteFileBanner.visible = false;
-                                    }
-                                }
-
-                                ParaButton {
-                                    text: "Нет"
-                                    secondary: true
-                                    Layout.fillWidth: true
-                                    implicitHeight: 36
-                                    onClicked: deleteFileBanner.visible = false
-                                }
-                            }
-                        }
-
-                        ParaButton {
-                            Layout.fillWidth: true
-                            text: "Импортировать"
-                            onClicked: importOpenDialog.open()
-                        }
-
-                        Item {
-                            Layout.preferredHeight: 16
-                        }
+                        onProfileImported: root.profileImported()
                     }
+
+                    Item { Layout.preferredHeight: 16 }
                 }
             }
         }

@@ -63,6 +63,14 @@ fi
 # Генерируем configure если его нет (источник из git archive без autogen)
 if [ ! -f "$SRCDIR/configure" ]; then
     echo "==> Генерация configure (autoreconf)..."
+    # hunspell использует libtool → autoreconf зовёт libtoolize. На macOS
+    # Homebrew кладёт GNU-libtoolize не в bin (там Apple /usr/bin/libtool),
+    # а в keg-only gnubin под корректным именем libtoolize. Без него autoreconf
+    # падает 'libtoolize: command not found'. Добавляем gnubin в PATH.
+    if command -v brew >/dev/null 2>&1; then
+        _libtool_gnubin="$(brew --prefix libtool 2>/dev/null)/libexec/gnubin"
+        [ -d "$_libtool_gnubin" ] && export PATH="$_libtool_gnubin:$PATH"
+    fi
     (cd "$SRCDIR" && autoreconf -fi)
 fi
 

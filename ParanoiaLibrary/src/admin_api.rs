@@ -9,8 +9,9 @@
 //! `ParanoiaServer/src/routes/admin/mod.rs::canonical_message`.
 
 use anyhow::{Result, anyhow};
+use paranoia_cover::MaskingProfile;
 use serde_json::{Map, Value};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -18,6 +19,63 @@ use uuid::Uuid;
 use crate::AdminKeyPair;
 use crate::client_cover_food::FoodDeliveryClientCover;
 use crate::transport::Transport;
+
+/// Глобальный активный masking-профиль для admin/reg-трафика. Если задан и
+/// содержит виды `admin`/`reg` — соответствующие запросы маскируются (тело
+/// заворачивается cover-движком, путь берётся из профиля), иначе идут плоско.
+/// Глобален по процессу (как vault) — задаётся панелью один раз.
+static ADMIN_PROFILE: OnceLock<RwLock<Option<Arc<MaskingProfile>>>> = OnceLock::new();
+
+fn profile_slot() -> &'static RwLock<Option<Arc<MaskingProfile>>> {
+    ADMIN_PROFILE.get_or_init(|| RwLock::new(None))
+}
+
+/// Задать/очистить активный профиль маскировки admin-трафика.
+pub fn set_masking_profile(profile_json: Option<&str>) -> Result<()> {
+    let parsed = match profile_json {
+        Some(s) if !s.trim().is_empty() => Some(Arc::new(MaskingProfile::from_json(s)?)),
+        _ => None,
+    };
+    *profile_slot().write().unwrap() = parsed;
+    Ok(())
+}
+
+fn current_profile() -> Option<Arc<MaskingProfile>> {
+    profile_slot().read().unwrap().clone()
+}
+
+/// Активный профиль маскировки (общий для admin- и corp/commercial-трафика).
+pub(crate) fn active_masking_profile() -> Option<Arc<MaskingProfile>> {
+    current_profile()
+}
+
+/// Отправить тело `body` для admin/reg вида `kind` через cover-шлюз профиля, если
+/// он активен и содержит этот вид. Возвращает `Ok(Some(resp_json))` при
+/// маскированной отправке, `Ok(None)` если профиль/вид не задан (отправлять
+/// плоско).
+fn try_covered_send(
+    server_url: &str,
+    reserve_urls: &[String],
+    kind: &str,
+    resp_kind: &str,
+    body: &Value,
+) -> Result<Option<String>> {
+    let Some(profile) = current_profile() else {
+        return Ok(None);
+    };
+    let Some(spec) = profile.kinds.get(kind) else {
+        return Ok(None);
+    };
+    let inner = serde_json::to_vec(body)?;
+    let covered = paranoia_cover::wrap_auto(&profile, kind, &inner)?;
+    let rt = Runtime::new()?;
+    let cover = Arc::new(FoodDeliveryClientCover::new());
+    let transport = Transport::new(server_url, reserve_urls.iter().map(String::as_str), cover);
+    let resp_cover = rt.block_on(transport.put_json(&spec.path, &covered))?;
+    let resp_inner = paranoia_cover::unwrap(&profile, resp_kind, &resp_cover)?;
+    let resp: Value = serde_json::from_slice(&resp_inner)?;
+    Ok(Some(serde_json::to_string(&resp)?))
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -77,6 +135,11 @@ fn do_admin(
     }
     env.insert("sig".into(), Value::String(sig));
     let body = Value::Object(env);
+
+    // Маскированный путь через cover-шлюз, если профиль активен.
+    if let Some(resp) = try_covered_send(server_url, reserve_urls, "admin", "admin_resp", &body)? {
+        return Ok(resp);
+    }
 
     let rt = Runtime::new()?;
     let cover = Arc::new(FoodDeliveryClientCover::new());
@@ -160,6 +223,10 @@ pub fn register_user(
         "pub_key": user_pubkey_b64,
         "admin_sig": sig,
     });
+
+    if let Some(resp) = try_covered_send(server_url, reserve_urls, "reg", "reg_resp", &body)? {
+        return Ok(resp);
+    }
 
     let rt = Runtime::new()?;
     let cover = Arc::new(FoodDeliveryClientCover::new());

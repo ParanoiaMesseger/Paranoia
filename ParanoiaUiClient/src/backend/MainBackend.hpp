@@ -1,7 +1,9 @@
 #pragma once
 #include <QObject>
 #include <QVariantList>
+#include <QVariantMap>
 #include <QStringList>
+#include <QJsonObject>
 #include <QUrl>
 
 class NotificationCoordinator;
@@ -20,6 +22,11 @@ class MainBackend : public QObject
     Q_PROPERTY(bool hasStoredClientProfiles READ hasStoredClientProfiles NOTIFY storedClientProfilesChanged)
     /// 0=not_initialized (нужен SetPin), 1=locked (нужен UnlockPin), 2=unlocked (норма), -1=ошибка.
     Q_PROPERTY(int vaultStatus READ vaultStatus NOTIFY vaultStatusChanged)
+    /// Состояние сверки маскировки активного профиля для индикатора у сервера:
+    /// "" (нет/не применимо), "checking", "verified" (сверено, без изменений),
+    /// "updated" (изменилось и применено), "error".
+    Q_PROPERTY(QString maskingState READ maskingState NOTIFY maskingStateChanged)
+    Q_PROPERTY(QString maskingProfileName READ maskingProfileName NOTIFY maskingStateChanged)
 
 public:
     explicit MainBackend(NotificationCoordinator &notifications, QObject *parent = nullptr);
@@ -33,6 +40,8 @@ public:
     QString activeProfileId() const;
     bool hasStoredClientProfiles() const;
     int vaultStatus() const;
+    QString maskingState() const { return m_maskingState; }
+    QString maskingProfileName() const { return m_maskingProfileName; }
 
     Q_INVOKABLE void vaultSetPin(const QString &pin);
     Q_INVOKABLE void vaultUnlock(const QString &pin);
@@ -46,6 +55,18 @@ public:
     Q_INVOKABLE void generateKeyPair();
     Q_INVOKABLE void loginClient(const QString &server, const QString &reserveServer, const QString &username,
                                  const QString &private_key);
+    /// Логин с метаданными подключения (тариф + параметры раздачи маскировки),
+    /// которые приходят из «профиля подключения» (QR/файл параметров сервера).
+    /// Используется при регистрации private/commercial; corporate идёт через
+    /// importProfile (полный шифрованный бандл).
+    Q_INVOKABLE void loginClientWithMeta(const QString &server, const QString &reserveServer,
+                                         const QString &username, const QString &private_key,
+                                         const QString &tariff, const QString &maskingUrl,
+                                         const QString &maskingBearer, const QString &maskingTrustedPubkey);
+    /// Разобрать «профиль подключения»: путь к файлу или текст QR (открытый JSON
+    /// `paranoia.connect.v1`). Возвращает {ok, error, tariff, server,
+    /// reserve_server_urls, masking_url, masking_trusted_pubkey}.
+    Q_INVOKABLE QVariantMap parseConnectionBundle(const QString &pathOrText) const;
     Q_INVOKABLE void activateProfile(const QString &profileId);
     Q_INVOKABLE void registerUser(const QString &domain, const QString &pubkey);
     Q_INVOKABLE QVariantList getReserveDomains(const QString &targetType, const QString &targetId,
@@ -81,12 +102,28 @@ public:
     Q_INVOKABLE QVariantList getAdminServers() const;
 
     // ── Корпоративный API: синхронизация связки сотрудника ──────────────────
-    /// Конфиг Корп-API активного профиля: {url, psk}.
-    Q_INVOKABLE QVariantMap corporateConfig() const;
-    /// Сохранить URL Корп-API и PSK для активного профиля.
-    Q_INVOKABLE void setCorporateApi(const QString &url, const QString &psk);
     /// Подтянуть связку (ключи диалогов с коллегами) по Корп-API и применить.
+    /// Конфиг (url+psk) задаётся только импортом корпоративного бандла при
+    /// регистрации (см. importProfile) — ручной настройки нет. Вызывается
+    /// автоматически при входе/смене сессии (no-op без corp.json).
     Q_INVOKABLE void syncCorporateKeyring();
+
+    // ── Маскировка трафика ──────────────────────────────────────────────────
+    /// Статус маскировки активного профиля для экрана управления:
+    /// {tariff, profileName, state, hasUrl, hasTrusted}.
+    Q_INVOKABLE QVariantMap maskingStatus() const;
+    /// Стянуть подписанный профиль маскировки с ноды (masking_url из конфига
+    /// профиля, опц. Bearer), проверить подпись доверенным ключом и применить.
+    /// Сверяет sha256 с сохранённым (индикатор verified/updated). No-op без
+    /// masking_url. Асинхронно; результат — через maskingStateChanged/maskingApplied.
+    Q_INVOKABLE void syncMaskingFromNode();
+    /// Применить профиль маскировки из файла. Если профиль подписан и есть
+    /// доверенный ключ — проверяется подпись; иначе при allowUnsigned
+    /// применяется без подписи (для частного развёртывания, с предупреждением).
+    /// Возвращает {ok, error, profileName, signed}.
+    Q_INVOKABLE QVariantMap applyMaskingFromFile(const QString &filePath, bool allowUnsigned);
+    /// Вернуть встроенную маску (очистить профиль). {ok}.
+    Q_INVOKABLE QVariantMap resetMasking();
 
     Q_INVOKABLE QVariantList getSessionList() const;
     Q_INVOKABLE void switchSession(const QString &profileId);
@@ -167,10 +204,12 @@ signals:
     void vaultUnlockResult(int result);
     void vaultSetPinResult(int result);
     void vaultChangePinResult(int result);
-    void corporateConfigChanged();
     /// Результат синхронизации связки по Корп-API. ok, число обновлённых
     /// диалогов, сообщение.
     void corporateSyncFinished(bool ok, int updated, const QString &message);
+    void maskingStateChanged();
+    /// Результат применения/сверки маскировки. ok, сообщение для UI.
+    void maskingApplied(bool ok, const QString &message);
 
 private:
     static MainBackend *s_instance;
@@ -178,10 +217,17 @@ private:
     class QNetworkAccessManager *m_net = nullptr; // ленивая инициализация для Корп-API
     QString m_devicePrivkey;
     bool m_hasStoredClientProfiles = false;
+    QString m_maskingState;
+    QString m_maskingProfileName;
     void setHasStoredClientProfiles(bool hasProfiles);
+    void setMaskingState(const QString &state, const QString &profileName = {});
+    /// masking-конфиг активного профиля из client.json:
+    /// {profileId, tariff, url, bearer, trusted}. Пусто — нет активной сессии.
+    QVariantMap activeMaskingConfig() const;
     void loginClientInternal(const QString &server, const QString &username, const QString &private_key,
                              const QStringList &reserveServerUrls, bool makeActive,
-                             bool rotateRegistrationKeyOnSuccess = false);
+                             bool rotateRegistrationKeyOnSuccess = false,
+                             const QJsonObject &connectionMeta = {});
     void rotateRegistrationKeyPair(const QString &previousPrivateKey = {});
     void loadClientConfig();
     void saveDeviceKey() const;

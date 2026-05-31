@@ -24,6 +24,18 @@ pub mod users;
 /// Допустимый перекос времени admin-запроса (вместе с nonce — защита от replay).
 const MAX_TS_SKEW_SECS: u64 = 300;
 
+/// Требуемый уровень прав admin-операции.
+///
+/// `Base` — управление пользователями (reg/dereg/list); такой ключ кладётся в
+/// онлайн-сервисы. `Extended` — полное управление сервером (config,
+/// dialogues/prune); ключ хранится офлайн в панели. Extended ⊇ Base: extended-
+/// подпись проходит и там, где достаточно base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    Base,
+    Extended,
+}
+
 /// Виденные nonce → ts. Очищается от устаревших записей при каждой проверке.
 static SEEN_NONCES: LazyLock<Mutex<HashMap<String, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -78,6 +90,7 @@ pub async fn verify(
     env: &AdminEnvelope,
     expected_op: &str,
     extra: &str,
+    capability: Capability,
 ) -> Result<(), String> {
     if env.op != expected_op {
         return Err("op_mismatch".into());
@@ -100,15 +113,98 @@ pub async fn verify(
     }
 
     let sig = crypto::decode_b64(&env.sig).map_err(|_| "bad_sig_encoding".to_string())?;
-    let admin_pub = {
-        let cfg = state.config.read().await;
-        cfg.admin_pubkey_bytes()
-            .map_err(|e| format!("server_config_error: {e}"))?
-    };
     let msg = canonical_message(&env.op, &env.nonce, env.ts, extra);
-    crypto::verify_signature(&admin_pub, msg.as_bytes(), &sig)
-        .map_err(|_| "invalid_admin_signature".to_string())?;
-    Ok(())
+    verify_admin_sig(state, msg.as_bytes(), &sig, capability).await
+}
+
+/// Сверить подпись `sig` над `msg` с admin-ключами согласно требуемому уровню
+/// прав. `Extended` принимает только extended-ключ; `Base` — base ИЛИ extended
+/// (extended ⊇ base). Используется и из [`verify`], и из `/reg`.
+pub async fn verify_admin_sig(
+    state: &Arc<AppState>,
+    msg: &[u8],
+    sig: &[u8],
+    capability: Capability,
+) -> Result<(), String> {
+    let (base, extended) = {
+        let cfg = state.config.read().await;
+        let base = cfg
+            .admin_pubkey_bytes()
+            .map_err(|e| format!("server_config_error: {e}"))?;
+        (base, cfg.extended_admin_pubkey_bytes())
+    };
+    verify_with_keys(&base, extended.as_ref(), capability, msg, sig)
+}
+
+/// Чистая проверка подписи против base/extended-ключей по уровню прав.
+fn verify_with_keys(
+    base: &[u8; 32],
+    extended: Option<&[u8; 32]>,
+    capability: Capability,
+    msg: &[u8],
+    sig: &[u8],
+) -> Result<(), String> {
+    match capability {
+        Capability::Extended => {
+            let ext = extended.ok_or_else(|| "extended_key_not_configured".to_string())?;
+            crypto::verify_signature(ext, msg, sig)
+                .map_err(|_| "invalid_admin_signature".to_string())
+        }
+        Capability::Base => {
+            if crypto::verify_signature(base, msg, sig).is_ok() {
+                return Ok(());
+            }
+            if let Some(ext) = extended
+                && crypto::verify_signature(ext, msg, sig).is_ok()
+            {
+                return Ok(());
+            }
+            Err("invalid_admin_signature".to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn keypair(seed: u8) -> (SigningKey, [u8; 32]) {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        (sk, pk)
+    }
+
+    #[test]
+    fn capability_matrix() {
+        let (base_sk, base_pk) = keypair(1);
+        let (ext_sk, ext_pk) = keypair(2);
+        let (other_sk, _) = keypair(3);
+        let msg = b"paranoia-admin\nlist_users\nn1\n100\n";
+
+        let base_sig = base_sk.sign(msg).to_bytes();
+        let ext_sig = ext_sk.sign(msg).to_bytes();
+        let other_sig = other_sk.sign(msg).to_bytes();
+
+        // Base-операция: проходит base и extended, не проходит чужой.
+        assert!(verify_with_keys(&base_pk, Some(&ext_pk), Capability::Base, msg, &base_sig).is_ok());
+        assert!(verify_with_keys(&base_pk, Some(&ext_pk), Capability::Base, msg, &ext_sig).is_ok());
+        assert!(
+            verify_with_keys(&base_pk, Some(&ext_pk), Capability::Base, msg, &other_sig).is_err()
+        );
+
+        // Extended-операция: только extended; base отклоняется.
+        assert!(
+            verify_with_keys(&base_pk, Some(&ext_pk), Capability::Extended, msg, &ext_sig).is_ok()
+        );
+        assert!(
+            verify_with_keys(&base_pk, Some(&ext_pk), Capability::Extended, msg, &base_sig).is_err()
+        );
+
+        // Extended-операция без настроенного extended-ключа → ошибка.
+        let err = verify_with_keys(&base_pk, None, Capability::Extended, msg, &base_sig).unwrap_err();
+        assert_eq!(err, "extended_key_not_configured");
+    }
 }
 
 /// Путь к конфигу сервера (тот же, что использует `main.rs`).

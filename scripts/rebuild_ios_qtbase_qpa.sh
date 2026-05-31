@@ -116,6 +116,32 @@ else
     }
 fi
 
+# 2b. Совместимость с clang из Xcode 26 (clang 21): qyieldcpu.h зовёт ARM-интринсик
+#     __yield() в ветке `#if __has_builtin(__yield)`, но __has_builtin у нового
+#     clang возвращает true, а сама функция объявлена только в <arm_acle.h>. Без
+#     неё в C++/ObjC++ это hard error (implicit-function-declaration). Qt свои
+#     модульные таргеты собирает с собственными флагами и игнорирует
+#     CMAKE_CXX_FLAGS, поэтому force-include не проходит — инъектируем include
+#     прямо в заголовок (идемпотентно). Апстрим Qt сделал то же самое.
+QYIELD_HDR="$QTBASE_SRC/src/corelib/thread/qyieldcpu.h"
+if [ -f "$QYIELD_HDR" ] && ! grep -q 'Paranoia: arm_acle' "$QYIELD_HDR"; then
+    echo "==> Инъекция <arm_acle.h> в qyieldcpu.h (clang 21 / Xcode 26 fix)"
+    # Вставляем include сразу после include-блока (после qtconfigmacros.h).
+    /usr/bin/sed -i '' \
+        's|#include <QtCore/qtconfigmacros.h>|#include <QtCore/qtconfigmacros.h>\
+\
+// Paranoia: arm_acle для объявления __yield() на ARM (clang 21 / Xcode 26)\
+#if defined(__has_include)\
+#  if defined(__aarch64__) \&\& __has_include(<arm_acle.h>)\
+#    include <arm_acle.h>\
+#  endif\
+#endif|' "$QYIELD_HDR"
+    grep -q 'Paranoia: arm_acle' "$QYIELD_HDR" || {
+        echo "ERROR: не удалось инъектировать arm_acle.h в $QYIELD_HDR" >&2
+        exit 1
+    }
+fi
+
 # 3. Configure qtbase для iOS.
 #    NB: НЕ передаём qt.toolchain.cmake (auto-generated из qtbase) — Qt сам
 #    ругается «qt.toolchain.cmake includes itself» (QtAutoDetectHelpers.cmake,
