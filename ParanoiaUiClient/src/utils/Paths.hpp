@@ -25,6 +25,9 @@ namespace Paths
     QDir profileDir(const QString &profileId);
     QString profileClient(const QString &profileId);
     QString profileCorp(const QString &profileId);
+    /// Состояние применённой маскировки профиля: {hash, name}. Используется для
+    /// сверки «изменилась ли маска» при входе (см. MainBackend::syncMaskingFromNode).
+    QString profileMaskingState(const QString &profileId);
     QString profileDialogs(const QString &profileId);
     QString profileDb(const QString &profileId);
 

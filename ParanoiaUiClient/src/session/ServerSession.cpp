@@ -57,7 +57,13 @@ void ServerSession::saveClientConfigForProfile(const QString &profileId, const Q
     if (profileId.isEmpty() || server.isEmpty() || privateKey.isEmpty()) return;
     if (!Paths::ensureProfileDir(profileId)) return;
     const QString normalizedServer = Utils::normalizedServerUrl(server);
-    QJsonObject obj;
+    // Сохраняем метаданные подключения (тариф + параметры маскировки), если они
+    // уже записаны — частые перезаписи (правки резерва/TURN) не должны их стирать.
+    QJsonObject obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+    for (const QString &key : {QStringLiteral("server"), QStringLiteral("reserve_server_urls"),
+                               QStringLiteral("turn_server_urls"), QStringLiteral("username"),
+                               QStringLiteral("server_id"), QStringLiteral("private_key")})
+        obj.remove(key);
     obj["server"] = normalizedServer;
     obj["reserve_server_urls"] =
         Utils::stringListToJsonArray(Utils::normalizedServerUrls(reserveServerUrls, normalizedServer));

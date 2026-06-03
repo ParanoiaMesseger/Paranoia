@@ -5,8 +5,22 @@ use crate::transport::{
 use anyhow::Result;
 use serde_json::Value;
 
+/// HTTP-маршрут для вида пакета, заданный профилем маскировки: путь + метод.
+#[derive(Debug, Clone)]
+pub struct CoverRoute {
+    pub path: String,
+    pub method: String,
+}
+
 /// Интерфейс маскарадного слоя на клиенте.
 pub trait ClientCover: Send + Sync + 'static {
+    /// Профильный путь/метод для вида пакета (`"push"`, `"pull"`, …). `None` →
+    /// транспорт использует встроенные значения (`/push` и т.п.). По умолчанию
+    /// `None` — переопределяет только schema-cover.
+    fn route(&self, _kind: &str) -> Option<CoverRoute> {
+        None
+    }
+
     fn wrap_push(&self, core: &CorePush) -> Result<Value>;
     fn wrap_pull(&self, core: &CorePull) -> Result<Value>;
     fn wrap_map(&self, core: &CoreMap) -> Result<Value>;

@@ -1,9 +1,10 @@
-use crate::{client_cover::ClientCover, crypto};
+use crate::{client_cover::ClientCover, crypto, masking::HttpMasking};
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::{Client, StatusCode, header};
+use reqwest::{Client, Method, StatusCode, header};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -134,7 +135,11 @@ struct RegRequest<'a> {
 pub struct Transport {
     client: Client,
     server_urls: Vec<String>,
-    cover: Arc<dyn ClientCover>,
+    /// Сменяемый в рантайме cover-слой (для мгновенной смены masking-профиля).
+    cover: std::sync::RwLock<Arc<dyn ClientCover>>,
+    masking: HttpMasking,
+    /// Счётчик ротации User-Agent (round-robin по пулу).
+    ua_rotation: AtomicUsize,
 }
 
 enum EndpointError {
@@ -161,8 +166,53 @@ impl Transport {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             server_urls,
-            cover,
+            cover: std::sync::RwLock::new(cover),
+            masking: HttpMasking::default(),
+            ua_rotation: AtomicUsize::new(0),
         }
+    }
+
+    /// Текущий cover-слой (клон Arc — не держим guard через await).
+    pub fn current_cover(&self) -> Arc<dyn ClientCover> {
+        Arc::clone(
+            &self
+                .cover
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Заменить cover-слой в рантайме (мгновенная смена masking-профиля).
+    pub fn set_cover(&self, cover: Arc<dyn ClientCover>) {
+        *self
+            .cover
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cover;
+    }
+
+    /// Заменить настройки маскировки HTTP-конверта (метод/UA/Cache-Control/схема
+    /// Authorization). По умолчанию применяется [`HttpMasking::default`].
+    pub fn set_masking(&mut self, masking: HttpMasking) {
+        self.masking = masking;
+    }
+
+    /// Builder-вариант [`Self::set_masking`].
+    pub fn with_masking(mut self, masking: HttpMasking) -> Self {
+        self.masking = masking;
+        self
+    }
+
+    /// Применить общие маскирующие заголовки (User-Agent, Cache-Control) к
+    /// любому запросу.
+    fn apply_masking(&self, mut rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let rotation = self.ua_rotation.fetch_add(1, Ordering::Relaxed);
+        if let Some(ua) = self.masking.user_agent(rotation) {
+            rb = rb.header(header::USER_AGENT, ua);
+        }
+        if let Some(cc) = &self.masking.cache_control {
+            rb = rb.header(header::CACHE_CONTROL, cc.clone());
+        }
+        rb
     }
 
     // ── регистрировать пользователя (без cover) ─────────────────────────
@@ -192,59 +242,75 @@ impl Transport {
     // ── ядро протокола через cover ──────────────────────────────────────
 
     pub async fn push(&self, core: &CorePush) -> Result<()> {
-        let body = self.cover.wrap_push(core)?;
-        let resp = self.put_json("/push", &body).await?;
-        self.cover.unwrap_push_response(&resp)
+        let cover = self.current_cover();
+        let body = cover.wrap_push(core)?;
+        let resp = self.cover_send(&cover, "push", "/push", &body).await?;
+        cover.unwrap_push_response(&resp)
     }
 
     pub async fn pull(&self, core: &CorePull) -> Result<Vec<RawPacket>> {
-        let body = self.cover.wrap_pull(core)?;
-        let resp = self.put_json("/pull", &body).await?;
-        self.cover.unwrap_pull_response(&resp)
+        let cover = self.current_cover();
+        let body = cover.wrap_pull(core)?;
+        let resp = self.cover_send(&cover, "pull", "/pull", &body).await?;
+        cover.unwrap_pull_response(&resp)
     }
 
     pub async fn map(&self, core: &CoreMap) -> Result<MapResponse> {
-        let body = self.cover.wrap_map(core)?;
-        let resp = self.put_json("/map", &body).await?;
-        self.cover.unwrap_map_response(&resp)
+        let cover = self.current_cover();
+        let body = cover.wrap_map(core)?;
+        let resp = self.cover_send(&cover, "map", "/map", &body).await?;
+        cover.unwrap_map_response(&resp)
     }
 
     pub async fn notify(&self, core: &CoreNotify) -> Result<u64> {
-        let body = self.cover.wrap_notify(core)?;
-        let resp = self.put_json("/notify", &body).await?;
-        self.cover.unwrap_notify_response(&resp)
+        let cover = self.current_cover();
+        let body = cover.wrap_notify(core)?;
+        let resp = self.cover_send(&cover, "notify", "/notify", &body).await?;
+        cover.unwrap_notify_response(&resp)
     }
 
-    /// Зондировать /notify: считаем endpoint доступным, если сервер ответил
+    /// Зондировать notify: считаем endpoint доступным, если сервер ответил
     /// валидным JSON, даже если на уровне протокола это ошибка
     /// (например, "user not registered" для фиктивного запроса).
     /// Возвращает Err только при сетевых/TLS/HTTP-ошибках или невалидном JSON.
     pub async fn probe(&self, core: &CoreNotify) -> Result<()> {
-        let body = self.cover.wrap_notify(core)?;
-        let _resp = self.put_json("/notify", &body).await?;
+        let cover = self.current_cover();
+        let body = cover.wrap_notify(core)?;
+        let _resp = self.cover_send(&cover, "notify", "/notify", &body).await?;
         Ok(())
     }
 
     pub async fn determinate(&self, core: &CoreDeterminate) -> Result<()> {
-        let body = self.cover.wrap_determinate(core)?;
-        let resp = self.put_json("/determinate", &body).await?;
-        self.cover.unwrap_determinate_response(&resp)
+        let cover = self.current_cover();
+        let body = cover.wrap_determinate(core)?;
+        let resp = self
+            .cover_send(&cover, "determinate", "/determinate", &body)
+            .await?;
+        cover.unwrap_determinate_response(&resp)
     }
 
     pub async fn call_signal(&self, core: &CoreCallSignal) -> Result<()> {
-        let body = self.cover.wrap_call_signal(core)?;
-        let resp = self.put_json("/call/signal", &body).await?;
-        self.cover.unwrap_call_signal_response(&resp)
+        let cover = self.current_cover();
+        let body = cover.wrap_call_signal(core)?;
+        let resp = self
+            .cover_send(&cover, "call_signal", "/call/signal", &body)
+            .await?;
+        cover.unwrap_call_signal_response(&resp)
     }
 
     pub async fn call_poll(&self, core: &CoreCallPoll) -> Result<Vec<CallEnvelopeIn>> {
-        let body = self.cover.wrap_call_poll(core)?;
-        let resp = self.put_json("/call/poll", &body).await?;
-        self.cover.unwrap_call_poll_response(&resp)
+        let cover = self.current_cover();
+        let body = cover.wrap_call_poll(core)?;
+        let resp = self
+            .cover_send(&cover, "call_poll", "/call/poll", &body)
+            .await?;
+        cover.unwrap_call_poll_response(&resp)
     }
 
     pub async fn arrived_get(&self, core: &CoreArrivedGet) -> Result<ArrivedResponse> {
-        let auth = arrived_auth_header(&core.sender, &core.sig);
+        let auth = self
+            .masking
+            .arrived_auth_value(&core.sender, &crypto::encode_b64(&core.sig));
         let resp = self
             .get_json_authorized(
                 "/arrived",
@@ -273,7 +339,7 @@ impl Transport {
 
     pub async fn arrived_set(&self, core: &CoreArrivedSet) -> Result<()> {
         let sig = crypto::encode_b64(&core.sig);
-        let auth = arrived_auth_header(&core.sender, &core.sig);
+        let auth = self.masking.arrived_auth_value(&core.sender, &sig);
         let body = json!({
             "dialogue_id": core.dialogue_id.as_str(),
             "receipts_enabled": core.receipts_enabled,
@@ -289,10 +355,35 @@ impl Transport {
     /// перебором резервных endpoint'ов. Используется admin-API
     /// ([`crate::admin_api`]) и регистрацией.
     pub(crate) async fn put_json(&self, path: &str, body: &Value) -> Result<Value> {
+        self.request_json(self.masking.method_for(path), path, body)
+            .await
+    }
+
+    /// Отправить cover-обёрнутое тело для вида `kind`. Путь/метод берутся из
+    /// профиля маскировки ([`ClientCover::route`]); если профиль не активен —
+    /// используются встроенные `default_path` и метод из [`HttpMasking`].
+    async fn cover_send(
+        &self,
+        cover: &Arc<dyn ClientCover>,
+        kind: &str,
+        default_path: &str,
+        body: &Value,
+    ) -> Result<Value> {
+        match cover.route(kind) {
+            Some(route) => {
+                let method = Method::from_bytes(route.method.as_bytes()).unwrap_or(Method::PUT);
+                self.request_json(method, &route.path, body).await
+            }
+            None => self.put_json(default_path, body).await,
+        }
+    }
+
+    /// Перебор резервных endpoint'ов с явным HTTP-методом.
+    async fn request_json(&self, method: Method, path: &str, body: &Value) -> Result<Value> {
         let mut last_retry_error = None;
         for server_url in &self.server_urls {
             let url = format!("{}{}", server_url, path);
-            match self.put_json_once(&url, body).await {
+            match self.put_json_once(method.clone(), &url, body).await {
                 Ok(resp) => return Ok(resp),
                 Err(EndpointError::Retry(err)) => last_retry_error = Some(err),
                 Err(EndpointError::Stop(err)) => return Err(err),
@@ -306,10 +397,14 @@ impl Transport {
     }
 
     async fn put_json_authorized(&self, path: &str, body: &Value, auth: &str) -> Result<Value> {
+        let method = self.masking.method_for(path);
         let mut last_retry_error = None;
         for server_url in &self.server_urls {
             let url = format!("{}{}", server_url, path);
-            match self.put_json_once_authorized(&url, body, auth).await {
+            match self
+                .put_json_once_authorized(method.clone(), &url, body, auth)
+                .await
+            {
                 Ok(resp) => return Ok(resp),
                 Err(EndpointError::Retry(err)) => last_retry_error = Some(err),
                 Err(EndpointError::Stop(err)) => return Err(err),
@@ -346,10 +441,16 @@ impl Transport {
 
     async fn put_json_once(
         &self,
+        method: Method,
         url: &str,
         body: &Value,
     ) -> std::result::Result<Value, EndpointError> {
-        let resp = match self.client.put(url).json(body).send().await {
+        let resp = match self
+            .apply_masking(self.client.request(method, url))
+            .json(body)
+            .send()
+            .await
+        {
             Ok(resp) => resp,
             Err(err) if err.is_builder() => {
                 return Err(EndpointError::Stop(
@@ -382,13 +483,13 @@ impl Transport {
 
     async fn put_json_once_authorized(
         &self,
+        method: Method,
         url: &str,
         body: &Value,
         auth: &str,
     ) -> std::result::Result<Value, EndpointError> {
         let resp = match self
-            .client
-            .put(url)
+            .apply_masking(self.client.request(method, url))
             .header(header::AUTHORIZATION, auth)
             .json(body)
             .send()
@@ -432,8 +533,7 @@ impl Transport {
     ) -> std::result::Result<Value, EndpointError> {
         let url = url_with_query(url, query);
         let resp = match self
-            .client
-            .get(url)
+            .apply_masking(self.client.get(url))
             .header(header::AUTHORIZATION, auth)
             .send()
             .await
@@ -474,10 +574,6 @@ fn push_server_url(server_urls: &mut Vec<String>, url: &str) {
     if !url.is_empty() && !server_urls.contains(&url) {
         server_urls.push(url);
     }
-}
-
-fn arrived_auth_header(sender: &str, sig: &[u8]) -> String {
-    format!("Paranoia {sender}:{}", crypto::encode_b64(sig))
 }
 
 fn check_direct_ok(body: &Value, op: &str) -> Result<()> {
@@ -522,11 +618,14 @@ fn percent_encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client_cover_schema::SchemaClientCover;
     use crate::transport::{
         CoreDeterminate, CoreMap, CoreNotify, CorePull, CorePush, MapResponse, RawPacket,
     };
+    use paranoia_cover::MaskingProfile;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Mutex;
     use std::thread;
 
     struct NoopCover;
@@ -671,5 +770,81 @@ mod tests {
             .expect("reserve endpoint should handle request");
         primary_server.join().expect("primary server thread");
         reserve_server.join().expect("reserve server thread");
+    }
+
+    /// Сервер, который запоминает путь из первой строки запроса.
+    fn spawn_path_capturing_server(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, thread::JoinHandle<()>, std::sync::Arc<Mutex<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let captured = std::sync::Arc::new(Mutex::new(String::new()));
+        let captured_thread = std::sync::Arc::clone(&captured);
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            if let Some(path) = req.lines().next().and_then(|l| l.split_whitespace().nth(1)) {
+                *captured_thread.lock().unwrap() = path.to_string();
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        (url, handle, captured)
+    }
+
+    #[tokio::test]
+    async fn schema_cover_routes_request_to_profile_path() {
+        let key = paranoia_cover::b64_encode(&[0u8; 32]);
+        let json = format!(
+            r#"{{"name":"t","cover_key_b64":"{key}","kinds":{{"push":{{"path":"/v9/widgets","method":"PUT","schemas":[{{"template":{{"d":""}},"carriers":["d"]}}]}}}}}}"#
+        );
+        let profile = MaskingProfile::from_json(&json).unwrap();
+        let cover = Arc::new(SchemaClientCover::new(Arc::new(profile)));
+        let (url, server, captured) = spawn_path_capturing_server("200 OK", "{}");
+        let transport = Transport::new(&url, std::iter::empty::<&str>(), cover);
+
+        // Ответ "{}" не развернётся как push_resp — push() вернёт Err, но путь
+        // запроса уже зафиксирован сервером.
+        let _ = transport
+            .push(&CorePush {
+                sender: "a".into(),
+                recver: "b".into(),
+                seq: 1,
+                payload: vec![],
+                sig: vec![],
+            })
+            .await;
+        server.join().expect("server thread");
+        assert_eq!(*captured.lock().unwrap(), "/v9/widgets");
+    }
+
+    #[test]
+    fn set_cover_swaps_active_cover_at_runtime() {
+        let transport = Transport::new(
+            "http://127.0.0.1:1",
+            std::iter::empty::<&str>(),
+            Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new()),
+        );
+        // food-маска не задаёт profile-маршрут.
+        assert!(transport.current_cover().route("push").is_none());
+
+        let key = paranoia_cover::b64_encode(&[0u8; 32]);
+        let json = format!(
+            r#"{{"name":"t","cover_key_b64":"{key}","kinds":{{"push":{{"path":"/v9/widgets","schemas":[{{"template":{{"d":""}},"carriers":["d"]}}]}}}}}}"#
+        );
+        let profile = MaskingProfile::from_json(&json).unwrap();
+        transport.set_cover(Arc::new(SchemaClientCover::new(Arc::new(profile))));
+
+        let route = transport
+            .current_cover()
+            .route("push")
+            .expect("profile route after swap");
+        assert_eq!(route.path, "/v9/widgets");
     }
 }

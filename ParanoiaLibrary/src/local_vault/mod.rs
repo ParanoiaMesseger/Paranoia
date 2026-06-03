@@ -3,6 +3,8 @@
 
 pub mod crypto;
 pub mod io;
+#[cfg(feature = "pkcs11")]
+pub mod pkcs11;
 pub mod state;
 pub mod vault;
 
@@ -16,3 +18,5 @@ pub use vault::{
     rekey_begin, rekey_commit, rekey_db, rekey_file, set_pin, status, unlock, verify_pin,
     with_db_key, with_files_key, with_json_key, VaultStatus,
 };
+#[cfg(feature = "pkcs11")]
+pub use vault::{init_token, unlock_token};

@@ -54,12 +54,8 @@ function Controller() {
             return;
         }
 
-        var mt;
-        if (systemInfo.productType === "windows") {
-            mt = targetDir + "/ParanoiaMaintenance.exe";
-        } else {
-            mt = targetDir + "/ParanoiaMaintenance";
-        }
+        // IFW используется только для Windows (Linux → .deb, macOS → .dmg).
+        var mt = targetDir + "/ParanoiaMaintenance.exe";
 
         if (!installer.fileExists(mt)) {
             console.log("controlscript[" + source + "]: no existing install at " + mt);
@@ -69,7 +65,7 @@ function Controller() {
         Controller.prototype._cleanupAttempted = true;
         console.log("controlscript[" + source + "]: removing existing install at " + targetDir);
 
-        if (systemInfo.productType === "windows") {
+        {
             var winPath = Controller.prototype._toNativePath(targetDir);
 
             // Kill anything still holding files in TargetDir.
@@ -99,12 +95,6 @@ function Controller() {
                 Controller.prototype._safeExecute("reg.exe",
                     ["delete", regCandidates[i], "/f"], source);
             }
-        } else {
-            // Linux / macOS — пробуем сначала MaintenanceTool purge (silent),
-            // он на этих платформах ведёт себя предсказуемее. Если не сложится —
-            // дожимаем rm -rf.
-            Controller.prototype._safeExecute(mt, ["purge"], source);
-            Controller.prototype._safeExecute("rm", ["-rf", targetDir], source);
         }
 
         if (installer.fileExists(mt)) {
@@ -126,11 +116,7 @@ function Controller() {
         var homeDir = installer.value("HomeDir");
         console.log("controlscript[ctor]: HomeDir = " + homeDir);
         if (homeDir) {
-            if (systemInfo.productType === "windows") {
-                targetDir = homeDir + "/AppData/Local/Programs/Paranoia";
-            } else if (systemInfo.kernelType === "linux") {
-                targetDir = homeDir + "/Paranoia";
-            }
+            targetDir = homeDir + "/AppData/Local/Programs/Paranoia";
         }
     }
     Controller.prototype._cleanupOldInstall(targetDir, "ctor");

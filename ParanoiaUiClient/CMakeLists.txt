@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.9 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.10 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -485,6 +485,7 @@ qt_add_qml_module(Paranoia
     ui/Components/RefreshIconButton.qml
     ui/Components/CheckMark.qml
     ui/Components/CopyablePublicKeyBlock.qml
+    ui/Components/ImportProfilePanel.qml
     ui/Components/DeliveryStatusIcon.qml
     ui/Components/ParaHeader.qml
     ui/Components/ParaInput.qml
@@ -507,6 +508,7 @@ qt_add_qml_module(Paranoia
     ui/Pages/UpdateKeyPage.qml
     ui/Pages/RegisterUserPage.qml
     ui/Pages/AddReserveDomainPage.qml
+    ui/Pages/MaskingPage.qml
     ui/Pages/VersionInfoPage.qml
     ui/Pages/SetPin.qml
     ui/Pages/UnlockPin.qml

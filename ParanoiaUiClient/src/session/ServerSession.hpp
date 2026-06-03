@@ -30,7 +30,9 @@ public:
 
     /// Нет смысла делать приавтными поля, которые делаешь доступными через get/set.
     const QString server;
-    const QString username;
+    // Не const: для корпоративных профилей отображаемое имя (ФИО) приходит с
+    // корп-сервера в связке и может обновляться (см. applyCorporateKeyring).
+    QString username;
     const QString serverId;
     const QString private_key;
     const QString profileId;

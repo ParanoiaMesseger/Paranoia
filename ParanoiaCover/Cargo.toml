@@ -1,0 +1,33 @@
+[package]
+name = "paranoia-cover"
+version = "0.1.0"
+edition = "2024"
+
+# Общий движок schema-cover: формат masking-профиля, AEAD-конверт cover-слоя,
+# раскладка payload по полям-носителям и брутфорс-разворот. Используется и
+# клиентом (ParanoiaLibrary), и сервером (ParanoiaServer), чтобы формат был
+# побайтово совместим без ручной синхронизации.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order — чтобы можно было рандомизировать порядок ключей в маскирующем
+# JSON (ломает тривиальную сборку payload «по позиции»).
+serde_json = { version = "1", features = ["preserve_order"] }
+base64 = "0.22"
+chacha20poly1305 = "0.10.1"
+rand = "0.8"
+sha2 = "0.10"
+anyhow = "1"
+# Подпись/проверка masking-профиля (раздача: extended-ключ подписывает,
+# клиент проверяет доверенным ключом).
+ed25519-dalek = "2"
+# Валидация правдоподобия по JSON Schema — только для панели/дева. Клиент и
+# сервер собираются без этой фичи, чтобы не тянуть тяжёлую зависимость.
+jsonschema = { version = "0.26", optional = true }
+# Генерация правдоподобных значений для случайных схем («бросить кости» в
+# панели). Только за фичей schema-gen — в клиент/сервер не тянется.
+fake = { version = "2.9", optional = true }
+
+[features]
+validation = ["dep:jsonschema"]
+schema-gen = ["dep:fake"]

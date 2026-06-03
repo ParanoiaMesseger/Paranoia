@@ -171,20 +171,20 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
+                    text: "Резервные адреса используются при проблемах с доступом к основному адресу."
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    wrapMode: Text.WordWrap
+                }
+
+                Text {
+                    Layout.fillWidth: true
                     text: "Основной адрес: " + root.primaryDomain
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
                     elide: Text.ElideRight
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    text: "Резервные адреса используются как fallback при подключении. При открытии окна каждый адрес автоматически проверяется PUT-запросом на /notify; рядом с адресом показывается время отклика."
-                    color: Theme.textSecondary
-                    font.pixelSize: Theme.fontSm
-                    font.family: Theme.fontFamily
-                    wrapMode: Text.WordWrap
                 }
 
                 RowLayout {
@@ -369,7 +369,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     visible: root.targetType === "client"
-                    text: "Резервные TURN-серверы используются для звонков, когда P2P между собеседниками не пробивается (NAT, разные сети). Первичный TURN берётся из адреса основного сервера. Формат: host:port (порт по умолчанию 3478)."
+                    text: "Резервные TURN-серверы используются для звонков, когда не удается установить прямое соединение между собеседниками и основной TURN сервер недоступен."
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily

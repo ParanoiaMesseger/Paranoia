@@ -1,6 +1,6 @@
 //! Admin-операции над реестром пользователей.
 
-use super::{AdminEnvelope, config_path, err_json, verify};
+use super::{AdminEnvelope, Capability, config_path, err_json, verify};
 use crate::AppState;
 use axum::{Json, extract::State};
 use serde_json::{Map, Value, json};
@@ -12,7 +12,7 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     Json(env): Json<AdminEnvelope>,
 ) -> Json<Value> {
-    if let Err(e) = verify(&state, &env, "list_users", "").await {
+    if let Err(e) = verify(&state, &env, "list_users", "", Capability::Base).await {
         return err_json(&e);
     }
     let cfg = state.config.read().await;
@@ -37,7 +37,7 @@ pub async fn delete(
         Some(u) if !u.is_empty() => u,
         _ => return err_json("missing_username"),
     };
-    if let Err(e) = verify(&state, &env, "delete_user", &username).await {
+    if let Err(e) = verify(&state, &env, "delete_user", &username, Capability::Base).await {
         return err_json(&e);
     }
 

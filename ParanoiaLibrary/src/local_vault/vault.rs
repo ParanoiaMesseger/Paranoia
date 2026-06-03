@@ -192,6 +192,50 @@ pub fn unlock(pin: &str) -> Result<()> {
     }
 }
 
+/// Инициализировать НОВЫЙ vault под аппаратным токеном (PKCS#11). Генерирует
+/// случайный master, оборачивает его ключом токена (master на диск не попадает в
+/// открытом виде) и сразу разблокирует. Падает, если vault уже инициализирован.
+/// Токен-PIN заменяет app-PIN; разблокировка требует физического токена.
+#[cfg(feature = "pkcs11")]
+pub fn init_token(module_path: &str, pin: &str) -> Result<()> {
+    use rand::RngCore;
+    if pin.is_empty() {
+        bail!("vault: token pin must not be empty");
+    }
+    let root = app_data_root()?;
+    if VaultState::load(&root)?.is_some() {
+        bail!("vault: already initialized");
+    }
+    let mut master = Zeroizing::new([0u8; KEY_LEN]);
+    rand::rngs::OsRng.fill_bytes(master.as_mut());
+    let wrapped = super::pkcs11::wrap_master(module_path, pin, master.as_ref())?;
+    let state = VaultState::new_token(&wrapped);
+    state.save_atomic(&root)?;
+    install_master(&root, &master)?;
+    Ok(())
+}
+
+/// Разблокировать token-mode vault: развернуть master ключом токена (на чипе).
+#[cfg(feature = "pkcs11")]
+pub fn unlock_token(module_path: &str, pin: &str) -> Result<()> {
+    let root = app_data_root()?;
+    let Some(state) = VaultState::load(&root)? else {
+        bail!("not_initialized");
+    };
+    if !state.is_token_mode() {
+        bail!("vault: not a token-mode vault");
+    }
+    let wrapped = state.token_wrapped_master()?;
+    let unwrapped = super::pkcs11::unwrap_master(module_path, pin, &wrapped)?;
+    if unwrapped.len() != KEY_LEN {
+        bail!("vault: unexpected master length {} from token", unwrapped.len());
+    }
+    let mut master = Zeroizing::new([0u8; KEY_LEN]);
+    master.copy_from_slice(&unwrapped);
+    install_master(&root, &master)?;
+    Ok(())
+}
+
 pub fn lock() {
     let mut guard = VAULT.write().unwrap();
     *guard = None;

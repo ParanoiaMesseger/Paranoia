@@ -3,21 +3,7 @@ function Component() {}
 Component.prototype.createOperations = function() {
     component.createOperations();
 
-    if (systemInfo.kernelType === "linux") {
-        component.addOperation("Mkdir", "@HomeDir@/.local/bin");
-        component.addOperation(
-            "CreateLink",
-            "@HomeDir@/.local/bin/Paranoia",
-            "@TargetDir@/bin/Paranoia"
-        );
-        component.addOperation("Mkdir", "@HomeDir@/.local/share/applications");
-        component.addOperation(
-            "CreateLink",
-            "@HomeDir@/.local/share/applications/app.paranoia.client.desktop",
-            "@TargetDir@/share/applications/app.paranoia.client.desktop"
-        );
-    }
-
+    // IFW используется только для Windows (Linux → .deb, macOS → .dmg).
     if (systemInfo.productType === "windows") {
         // Install MSVC runtime silently.
         // Accepted exit codes: 0 (success), 1638 (newer or equal version already

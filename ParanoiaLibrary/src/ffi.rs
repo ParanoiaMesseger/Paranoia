@@ -599,6 +599,25 @@ pub extern "C" fn paranoia_commercial_publish(
     })
 }
 
+/// Запушить подписанный masking-профиль на distribution-ноду (PUT
+/// /masking/profile). admin_secret_b64 — base admin-ключ сервера (подпись
+/// записи). signed_profile_json — конверт, подписанный extended-ключом.
+/// Пустая строка при успехе, иначе сообщение об ошибке; NULL — внутр. сбой.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_masking_publish(
+    dist_url: *const c_char,
+    admin_secret_b64: *const c_char,
+    signed_profile_json: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("masking_publish_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let profile = ffi_try!(cstr_arg(signed_profile_json), invalid_argument_ptr());
+        admin_result_to_c(crate::corp_api::masking_publish(&dist, &secret, &profile))
+    })
+}
+
 /// Забрать и расшифровать связку сотрудника с distribution-ноды (owner-proof
 /// подписью signing-ключом). Возвращает plaintext keyring JSON, пустую строку
 /// если блоба ещё нет, или NULL при ошибке. Free: paranoia_free_string.
@@ -1243,6 +1262,156 @@ pub extern "C" fn paranoia_last_pulled_seq(
             }
             Err(_) => {
                 set_last_error("last_seq_error");
+                -1
+            }
+        }
+    })
+}
+
+/// Сменить активную маскировку клиента в рантайме (мгновенно для последующих
+/// запросов). `profile_json` — JSON masking-профиля; NULL/"" возвращает
+/// встроенную food-маску. 0 — успех, -1 — ошибка (см. paranoia_last_error()).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_set_masking_profile(
+    handle: *mut ParanoiaHandle,
+    profile_json: *const c_char,
+) -> i32 {
+    ffi_catch_i32("masking_profile_error", || {
+        clear_last_error();
+        let h = ffi_try!(handle_ref(handle), invalid_argument_i32());
+        let json = if profile_json.is_null() {
+            None
+        } else {
+            Some(ffi_try!(cstr_arg(profile_json), invalid_argument_i32()))
+        };
+        match h.client.set_masking_profile(json.as_deref()) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&format!("invalid masking profile: {e}"));
+                -1
+            }
+        }
+    })
+}
+
+/// Применить ПОДПИСАННЫЙ masking-профиль: проверить подпись доверенным ключом
+/// `trusted_pubkey_b64` и при успехе сменить маскировку. 0=ok, -1=error
+/// (нет валидной подписи / неверный профиль — см. paranoia_last_error()).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_set_signed_masking_profile(
+    handle: *mut ParanoiaHandle,
+    signed_json: *const c_char,
+    trusted_pubkey_b64: *const c_char,
+) -> i32 {
+    ffi_catch_i32("signed_masking_profile_error", || {
+        clear_last_error();
+        let h = ffi_try!(handle_ref(handle), invalid_argument_i32());
+        let signed = ffi_try!(cstr_arg(signed_json), invalid_argument_i32());
+        let trusted = ffi_try!(cstr_arg(trusted_pubkey_b64), invalid_argument_i32());
+        match h.client.set_signed_masking_profile(&signed, &trusted) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Скачать подписанный профиль с ноды (`GET url`, опц. Bearer `bearer_token` —
+/// NULL/"" без токена), проверить подпись `trusted_pubkey_b64` и применить.
+/// 0=ok, -1=error (см. paranoia_last_error()).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_fetch_and_apply_signed_profile(
+    handle: *mut ParanoiaHandle,
+    url: *const c_char,
+    trusted_pubkey_b64: *const c_char,
+    bearer_token: *const c_char,
+) -> i32 {
+    ffi_catch_i32("fetch_masking_profile_error", || {
+        clear_last_error();
+        let h = ffi_try!(handle_ref(handle), invalid_argument_i32());
+        let url = ffi_try!(cstr_arg(url), invalid_argument_i32());
+        let trusted = ffi_try!(cstr_arg(trusted_pubkey_b64), invalid_argument_i32());
+        let bearer = if bearer_token.is_null() {
+            None
+        } else {
+            cstr_arg(bearer_token).ok()
+        };
+        match h.rt.block_on(h.client.fetch_and_apply_signed_profile(
+            &url,
+            &trusted,
+            bearer.as_deref(),
+        )) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                -1
+            }
+        }
+    })
+}
+
+/// Подписать masking-профиль extended-секретом (панель). Возвращает JSON
+/// подписанного конверта или NULL при ошибке (см. paranoia_last_error()).
+/// Освобождать через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_sign_masking_profile(
+    profile_json: *const c_char,
+    extended_secret_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("sign_masking_profile_error", || {
+        clear_last_error();
+        let profile = ffi_try!(cstr_arg(profile_json), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(extended_secret_b64), invalid_argument_ptr());
+        match crate::sign_masking_profile(&profile, &secret) {
+            Ok(json) => string_to_c(json),
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Сгенерировать случайную правдоподобную схему маскировки (JSON SchemaVariant)
+/// — «бросить кости» в панели. Только в сборке с фичей `schema-gen`. Возвращает
+/// pretty-JSON; освобождать через paranoia_free_string.
+#[cfg(feature = "schema-gen")]
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_generate_masking_schema() -> *mut c_char {
+    ffi_catch_ptr("generate_masking_schema_error", || {
+        clear_last_error();
+        string_to_c(crate::generate_masking_schema())
+    })
+}
+
+/// Случайный путь фейкового эндпоинта. Только в сборке с фичей `schema-gen`.
+/// Освобождать paranoia_free_string.
+#[cfg(feature = "schema-gen")]
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_generate_masking_path() -> *mut c_char {
+    ffi_catch_ptr("generate_masking_path_error", || {
+        clear_last_error();
+        string_to_c(crate::generate_masking_path())
+    })
+}
+
+/// Задать/очистить активный masking-профиль для admin/reg-трафика (глобально по
+/// процессу). NULL/"" — очистить (admin-трафик пойдёт плоско). 0=ok, -1=error.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_admin_set_masking_profile(profile_json: *const c_char) -> i32 {
+    ffi_catch_i32("admin_masking_profile_error", || {
+        clear_last_error();
+        let json = if profile_json.is_null() {
+            None
+        } else {
+            cstr_arg(profile_json).ok()
+        };
+        match crate::admin_api::set_masking_profile(json.as_deref()) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_last_error(&anyhow_error_chain(&e));
                 -1
             }
         }
@@ -1901,6 +2070,53 @@ pub extern "C" fn paranoia_vault_unlock(pin: *const c_char) -> i32 {
                 } else {
                     -1
                 }
+            }
+        }
+    })
+}
+
+/// Инициализировать НОВЫЙ vault под PKCS#11-токеном. `module_path` — путь к
+/// `.so`/`.dll` PKCS#11-модуля, `token_pin` — PIN токена. Коды: 0=ok,
+/// 1=already_initialized, -1=error (см. paranoia_last_error()).
+#[cfg(feature = "pkcs11")]
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_init_token(
+    module_path: *const c_char,
+    token_pin: *const c_char,
+) -> i32 {
+    ffi_catch_i32("vault_init_token_error", || {
+        clear_last_error();
+        let module = ffi_try!(cstr_arg(module_path), invalid_argument_i32());
+        let pin = ffi_try!(cstr_arg(token_pin), invalid_argument_i32());
+        match crate::local_vault::init_token(&module, &pin) {
+            Ok(()) => 0,
+            Err(e) => {
+                let msg = anyhow_error_chain(&e);
+                set_last_error(&msg);
+                if msg.contains("already initialized") { 1 } else { -1 }
+            }
+        }
+    })
+}
+
+/// Разблокировать token-mode vault. Коды: 0=ok, 3=not_initialized,
+/// -1=error (нет токена / неверный PIN / не token-mode).
+#[cfg(feature = "pkcs11")]
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_vault_unlock_token(
+    module_path: *const c_char,
+    token_pin: *const c_char,
+) -> i32 {
+    ffi_catch_i32("vault_unlock_token_error", || {
+        clear_last_error();
+        let module = ffi_try!(cstr_arg(module_path), invalid_argument_i32());
+        let pin = ffi_try!(cstr_arg(token_pin), invalid_argument_i32());
+        match crate::local_vault::unlock_token(&module, &pin) {
+            Ok(()) => 0,
+            Err(e) => {
+                let msg = anyhow_error_chain(&e);
+                set_last_error(&msg);
+                if msg.contains("not_initialized") { 3 } else { -1 }
             }
         }
     })

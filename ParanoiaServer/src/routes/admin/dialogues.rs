@@ -1,6 +1,6 @@
 //! Admin-операции над диалогами: перечисление и прунинг.
 
-use super::{AdminEnvelope, err_json, verify};
+use super::{AdminEnvelope, Capability, err_json, verify};
 use crate::{AppState, crypto};
 use axum::{Json, extract::State};
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     Json(env): Json<AdminEnvelope>,
 ) -> Json<Value> {
-    if let Err(e) = verify(&state, &env, "list_dialogues", "").await {
+    if let Err(e) = verify(&state, &env, "list_dialogues", "", Capability::Extended).await {
         return err_json(&e);
     }
     match state.store.list_dialogues() {
@@ -39,7 +39,7 @@ pub async fn prune(
     State(state): State<Arc<AppState>>,
     Json(env): Json<AdminEnvelope>,
 ) -> Json<Value> {
-    if let Err(e) = verify(&state, &env, "prune", "").await {
+    if let Err(e) = verify(&state, &env, "prune", "", Capability::Extended).await {
         return err_json(&e);
     }
 

@@ -293,6 +293,51 @@ public:
         }
     }
 
+    // PKCS#11-токен (требует сборки libparanoia с фичей `pkcs11`).
+    static int vault_init_token(QSTR module_path, QSTR token_pin)
+    { return ::paranoia_vault_init_token(QS_RS(module_path), QS_RS(token_pin)); }
+
+    static VaultUnlockResult vault_unlock_token(QSTR module_path, QSTR token_pin)
+    {
+        const int rc = ::paranoia_vault_unlock_token(QS_RS(module_path), QS_RS(token_pin));
+        switch (rc) {
+            case 0: return VaultUnlockResult::Ok;
+            case 3: return VaultUnlockResult::NotInitialized;
+            default: return VaultUnlockResult::Internal;
+        }
+    }
+
+    // ── Masking-профиль ──────────────────────────────────────────────────────
+    int set_masking_profile(QSTR profile_json)
+    { return ::paranoia_set_masking_profile(ptr, QS_RS(profile_json)); }
+
+    int set_signed_masking_profile(QSTR signed_json, QSTR trusted_pubkey_b64)
+    { return ::paranoia_set_signed_masking_profile(ptr, QS_RS2(signed_json, trusted_pubkey_b64)); }
+
+    // Подписать профиль extended-секретом (панель). Пустая строка при ошибке.
+    static QString sign_masking_profile(QSTR profile_json, QSTR extended_secret_b64)
+    { return RS_QS(::paranoia_sign_masking_profile(QS_RS2(profile_json, extended_secret_b64))); }
+
+    int fetch_and_apply_signed_profile(QSTR url, QSTR trusted_pubkey_b64, QSTR bearer_token)
+    { return ::paranoia_fetch_and_apply_signed_profile(ptr, QS_RS3(url, trusted_pubkey_b64, bearer_token)); }
+
+    // Активный masking-профиль для admin/reg-трафика (глобально). "" — очистить.
+    static int admin_set_masking_profile(QSTR profile_json)
+    { return ::paranoia_admin_set_masking_profile(QS_RS(profile_json)); }
+
+    // Случайная схема маскировки (JSON SchemaVariant). "" при ошибке. Только в
+    // сборке libparanoia с фичей schema-gen (панель).
+    static QString generate_masking_schema()
+    { return RS_QS(::paranoia_generate_masking_schema()); }
+
+    // Случайный путь фейкового эндпоинта. "" при ошибке. Фича schema-gen.
+    static QString generate_masking_path()
+    { return RS_QS(::paranoia_generate_masking_path()); }
+
+    // Запушить подписанный masking-профиль на ноду. "" при успехе, иначе ошибка.
+    static QString masking_publish(QSTR dist_url, QSTR admin_secret_b64, QSTR signed_profile_json)
+    { return RS_QS(::paranoia_masking_publish(QS_RS3(dist_url, admin_secret_b64, signed_profile_json))); }
+
     static int vault_lock() { return ::paranoia_vault_lock(); }
 
     static int vault_verify_pin(QSTR pin) { return ::paranoia_vault_verify_pin(QS_RS(pin)); }

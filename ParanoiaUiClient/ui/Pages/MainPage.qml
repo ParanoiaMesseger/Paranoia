@@ -43,6 +43,7 @@ Rectangle {
     signal openAddReserveDomain(string targetType, string targetId, string primaryDomain)
     signal openVersionInfo()
     signal openChangePin()
+    signal openMasking()
 
     function reserveDomainsText(domains) {
         if (!domains || domains.length === 0)
@@ -383,6 +384,40 @@ Rectangle {
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontXs
                                 font.family:    Theme.fontFamily
+                            }
+
+                            // Индикатор маскировки: refresh (сверка идёт),
+                            // check (сверено/применено), x (ошибка). Скрыт, если
+                            // профиль не задаёт раздачу маски. Тап — экран маскировки.
+                            Item {
+                                id: maskIndicator
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 18; height: 18
+                                readonly property string ms: Backend.maskingState
+                                visible: ms.length > 0
+
+                                AppIcon {
+                                    anchors.centerIn: parent
+                                    width: 14; height: 14
+                                    name: parent.ms === "checking" ? "refresh"
+                                          : parent.ms === "error"    ? "x" : "check"
+                                    iconColor: parent.ms === "error" ? Theme.error
+                                               : parent.ms === "checking" ? Theme.textSecondary
+                                               : Theme.success
+                                    strokeWidth: 2
+
+                                    RotationAnimator on rotation {
+                                        running: maskIndicator.ms === "checking"
+                                        from: 0; to: 360; duration: 900
+                                        loops: Animation.Infinite
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.openMasking()
+                                }
                             }
                         }
 
@@ -908,15 +943,9 @@ Rectangle {
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Корпоративная связка"
+                        text:             "Маскировка трафика"
                         secondary:        true
-                        onClicked: {
-                            const cfg = Backend.corporateConfig()
-                            corpUrlField.text = cfg.url || ""
-                            corpPskField.text = cfg.psk || ""
-                            corpStatus.text = ""
-                            corpPopup.open()
-                        }
+                        onClicked:        root.openMasking()
                     }
 
                     ParaButton {
@@ -1340,62 +1369,4 @@ Rectangle {
         }
     }
 
-    // ── Корпоративная связка (Корп-API) ───────────────────────────────────
-    Connections {
-        target: Backend
-        function onCorporateSyncFinished(ok, updated, message) {
-            corpStatus.text = ok ? ("✓ " + message + " (диалогов: " + updated + ")") : ("✗ " + message)
-            corpStatus.color = ok ? Theme.success : Theme.error
-        }
-    }
-
-    Popup {
-        id: corpPopup
-        anchors.centerIn: Overlay.overlay
-        modal: true
-        width: 460
-        padding: 0
-        background: Rectangle { color: Theme.bgCard; radius: Theme.radiusMd; border.color: Theme.accent; border.width: 1 }
-        contentItem: ColumnLayout {
-            spacing: 12
-            anchors.margins: 18
-
-            Text { text: "Корпоративная связка"; color: Theme.textPrimary
-                   font.pixelSize: Theme.fontLg; font.family: Theme.fontFamily; font.weight: Font.DemiBold }
-            Text {
-                Layout.fillWidth: true; Layout.preferredWidth: 420
-                wrapMode: Text.Wrap
-                text: "Адрес ноды дистрибуции и ваш PSK выдаёт администратор организации. Клиент по ним подтянет ключи диалогов с коллегами (связка шифруется вашим PSK; нода хранит только шифртекст)."
-                color: Theme.textSecondary; font.pixelSize: Theme.fontXs; font.family: Theme.fontFamily
-            }
-
-            ParaInput { id: corpUrlField; Layout.fillWidth: true; label: "URL ноды дистрибуции"
-                        placeholder: "https://api.example.com" }
-            ParaInput { id: corpPskField; Layout.fillWidth: true; label: "PSK (ключ доступа)"
-                        placeholder: "preshared key" }
-
-            Text { id: corpStatus; Layout.fillWidth: true; Layout.preferredWidth: 420
-                   text: ""; visible: text !== ""; wrapMode: Text.Wrap
-                   font.pixelSize: Theme.fontXs; font.family: Theme.fontFamily }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-                ParaButton {
-                    Layout.fillWidth: true
-                    text: "Сохранить и обновить"
-                    onClicked: {
-                        Backend.setCorporateApi(corpUrlField.text, corpPskField.text)
-                        corpStatus.text = "Синхронизация…"; corpStatus.color = Theme.textSecondary
-                        Backend.syncCorporateKeyring()
-                    }
-                }
-                ParaButton {
-                    text: "Закрыть"
-                    secondary: true
-                    onClicked: corpPopup.close()
-                }
-            }
-        }
-    }
 }

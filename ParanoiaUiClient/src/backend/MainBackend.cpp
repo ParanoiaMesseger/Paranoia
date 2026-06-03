@@ -480,9 +480,57 @@ void MainBackend::loginClient(const QString &server, const QString &reserveServe
     loginClientInternal(server, username, private_key, reserveUrls, true, true);
 }
 
+void MainBackend::loginClientWithMeta(const QString &server, const QString &reserveServer, const QString &username,
+                                      const QString &private_key, const QString &tariff, const QString &maskingUrl,
+                                      const QString &maskingBearer, const QString &maskingTrustedPubkey)
+{
+    QStringList reserveUrls;
+    if (!reserveServer.trimmed().isEmpty()) reserveUrls.append(reserveServer);
+    QJsonObject meta;
+    if (!tariff.trimmed().isEmpty())               meta["tariff"] = tariff.trimmed();
+    if (!maskingUrl.trimmed().isEmpty())           meta["masking_url"] = maskingUrl.trimmed();
+    if (!maskingBearer.trimmed().isEmpty())        meta["masking_bearer"] = maskingBearer.trimmed();
+    if (!maskingTrustedPubkey.trimmed().isEmpty()) meta["masking_trusted_pubkey"] = maskingTrustedPubkey.trimmed();
+    loginClientInternal(server, username, private_key, reserveUrls, true, true, meta);
+}
+
+QVariantMap MainBackend::parseConnectionBundle(const QString &pathOrText) const
+{
+    // Принимаем либо путь к файлу, либо сырой текст QR. Если это похоже на JSON —
+    // парсим как текст; иначе читаем как файл (учитывая content:// URI на Android).
+    QByteArray bytes;
+    const QString trimmed = pathOrText.trimmed();
+    if (trimmed.startsWith('{')) {
+        bytes = trimmed.toUtf8();
+    } else {
+        bytes = Utils::readAll(Utils::resolveImportPath(pathOrText));
+        if (bytes.isEmpty()) return QVariantMap{{"ok", false}, {"error", "Не удалось прочитать файл"}};
+    }
+    QJsonParseError perr;
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes, &perr);
+    if (perr.error != QJsonParseError::NoError || !doc.isObject())
+        return QVariantMap{{"ok", false}, {"error", "Некорректный профиль подключения (не JSON)"}};
+    const QJsonObject o = doc.object();
+    if (o.value("type").toString() != QStringLiteral("paranoia.connect.v1"))
+        return QVariantMap{{"ok", false}, {"error", "Неподдерживаемый формат профиля подключения"}};
+    const QString server = Utils::normalizedServerUrl(o.value("server").toString());
+    if (server.isEmpty())
+        return QVariantMap{{"ok", false}, {"error", "В профиле не указан адрес сервера"}};
+    const QString tariff = o.value("tariff").toString();
+    QStringList reserve = Utils::stringListFromJsonArray(o.value("reserve_server_urls").toArray());
+    return QVariantMap{
+        {"ok", true},
+        {"tariff", tariff},
+        {"server", server},
+        {"reserve_server_urls", reserve},
+        {"masking_url", o.value("masking_url").toString()},
+        {"masking_trusted_pubkey", o.value("masking_trusted_pubkey").toString()},
+    };
+}
+
 void MainBackend::loginClientInternal(const QString &server, const QString &username, const QString &private_key,
                                       const QStringList &reserveServerUrls, bool makeActive,
-                                      bool rotateRegistrationKeyOnSuccess)
+                                      bool rotateRegistrationKeyOnSuccess, const QJsonObject &connectionMeta)
 {
     const QString url                    = Utils::normalizedServerUrl(server);
     const QStringList normalizedReserves = Utils::normalizedServerUrls(reserveServerUrls, url);
@@ -509,11 +557,11 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
     QPointer self(this);
     QThreadPool::globalInstance()->start([self, url, normalizedReserves, turnServerUrls, reserveUrlsJson,
                                           trimmedUsername, serverId, private_key, dbPath, profileId, makeActive,
-                                          rotateRegistrationKeyOnSuccess]() {
+                                          rotateRegistrationKeyOnSuccess, connectionMeta]() {
         if (!self) return;
         QMetaObject::invokeMethod(self, [self, dbPath, url, normalizedReserves, turnServerUrls, reserveUrlsJson,
                                          trimmedUsername, serverId, private_key, profileId, makeActive,
-                                         rotateRegistrationKeyOnSuccess]() {
+                                         rotateRegistrationKeyOnSuccess, connectionMeta]() {
             auto handle = std::make_shared<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
             if (!self) return;
             if (!handle || !handle->isRawOk()) {
@@ -536,6 +584,15 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
                 session->saveDialogs();
             }
             session->saveClientConfig();
+            // Метаданные подключения (тариф + параметры маскировки) пишем в
+            // client.json поверх — saveClientConfigForProfile их сохраняет при
+            // последующих перезаписях.
+            if (!connectionMeta.isEmpty()) {
+                QJsonObject client = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+                for (auto it = connectionMeta.begin(); it != connectionMeta.end(); ++it)
+                    client[it.key()] = it.value();
+                Utils::writeJsonObjectFile(Paths::profileClient(profileId), client);
+            }
             self->setHasStoredClientProfiles(true);
             if (rotateRegistrationKeyOnSuccess) self->rotateRegistrationKeyPair(private_key);
             const QString notificationHintProfileId = self->m_notifications->notificationHintProfileId();
@@ -549,6 +606,12 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
                 emit self->sessionReset();
                 emit self->loginStateChanged();
                 emit self->dialogsChanged();
+                // Маскировка commercial/corporate раздаётся нодой — сверяем и
+                // применяем при входе (no-op, если профиль её не задаёт).
+                self->syncMaskingFromNode();
+                // Корпоративная связка: подтянуть ключи диалогов с коллегами
+                // (no-op, если профиль не корпоративный — нет corp-конфига).
+                self->syncCorporateKeyring();
             }
             self->m_notifications->schedulePoll(0);
         });
@@ -1141,34 +1204,25 @@ QVariantList MainBackend::getAdminServers() const
 }
 
 // ── Корпоративный API: синхронизация связки ────────────────────────────────────
-
-QVariantMap MainBackend::corporateConfig() const
-{
-    const auto session = SessionStore::instance()->activeSession();
-    if (!session) return {};
-    const QJsonObject o = Utils::readJsonObjectFile(Paths::profileCorp(session->profileId));
-    return QVariantMap{{"url", o.value("url").toString()}, {"psk", o.value("psk").toString()}};
-}
-
-void MainBackend::setCorporateApi(const QString &url, const QString &psk)
-{
-    const auto session = SessionStore::instance()->activeSession();
-    if (!session) {
-        emit corporateSyncFinished(false, 0, "Нет активной сессии");
-        return;
-    }
-    QJsonObject o;
-    o["url"] = url.trimmed();
-    o["psk"] = psk.trimmed();
-    Utils::writeJsonObjectFile(Paths::profileCorp(session->profileId), o);
-    emit corporateConfigChanged();
-}
+// Конфиг (url+psk) задаётся только импортом корпоративного бандла при регистрации
+// (см. importProfile → corp.json) — ручной настройки в UI нет.
 
 void MainBackend::applyCorporateKeyring(const QString &keyringJson)
 {
     const auto session = SessionStore::instance()->activeSession();
     if (!session) return;
     const QJsonObject root = QJsonDocument::fromJson(keyringJson.toUtf8()).object();
+    // Своё ФИО приходит с корп-сервера — для корпоративных профилей оно и есть
+    // отображаемое имя пользователя (ник пользователь не задаёт сам).
+    const QString selfFullName = root.value("full_name").toString().trimmed();
+    if (!selfFullName.isEmpty() && session->username != selfFullName) {
+        session->username = selfFullName;
+        ServerSession::saveClientConfigForProfile(session->profileId, session->server, selfFullName,
+                                                  session->serverId, session->private_key,
+                                                  session->reserveServerUrls, session->turnServerUrls);
+        Utils::upsertProfileManifest(session->profileId, session->server, selfFullName, true);
+        emit loginStateChanged();
+    }
     // roster: username(server_id) → ФИО (имя диалога)
     QHash<QString, QString> names;
     for (const auto &v : root.value("roster").toArray()) {
@@ -1227,6 +1281,187 @@ void MainBackend::syncCorporateKeyring()
             }
             self->applyCorporateKeyring(keyringJson);
         });
+    });
+}
+
+// ── Маскировка трафика ──────────────────────────────────────────────────────
+
+namespace
+{
+    // Имя профиля из JSON: подписанного {profile_json,sig_b64} или плоского
+    // {name,kinds,...}. Заодно сообщает, подписан ли профиль.
+    QString maskingProfileNameFromJson(const QByteArray &bytes, bool *isSigned)
+    {
+        const QJsonObject root = QJsonDocument::fromJson(bytes).object();
+        if (root.contains(QStringLiteral("profile_json")) && root.contains(QStringLiteral("sig_b64"))) {
+            if (isSigned) *isSigned = true;
+            const QJsonObject inner =
+                QJsonDocument::fromJson(root.value(QStringLiteral("profile_json")).toString().toUtf8()).object();
+            return inner.value(QStringLiteral("name")).toString();
+        }
+        if (isSigned) *isSigned = false;
+        return root.value(QStringLiteral("name")).toString();
+    }
+}
+
+void MainBackend::setMaskingState(const QString &state, const QString &profileName)
+{
+    bool changed = false;
+    if (m_maskingState != state) { m_maskingState = state; changed = true; }
+    if (!profileName.isNull() && m_maskingProfileName != profileName) {
+        m_maskingProfileName = profileName;
+        changed = true;
+    }
+    if (changed) emit maskingStateChanged();
+}
+
+QVariantMap MainBackend::activeMaskingConfig() const
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const QJsonObject o = Utils::readJsonObjectFile(Paths::profileClient(session->profileId));
+    return QVariantMap{
+        {"profileId", session->profileId},
+        {"tariff",    o.value("tariff").toString()},
+        {"url",       o.value("masking_url").toString().trimmed()},
+        {"bearer",    o.value("masking_bearer").toString().trimmed()},
+        {"trusted",   o.value("masking_trusted_pubkey").toString().trimmed()},
+    };
+}
+
+QVariantMap MainBackend::maskingStatus() const
+{
+    const QVariantMap cfg = activeMaskingConfig();
+    if (cfg.isEmpty())
+        return QVariantMap{{"tariff", QString()}, {"state", QString()}, {"profileName", QString()},
+                           {"hasUrl", false}, {"hasTrusted", false}};
+    return QVariantMap{
+        {"tariff",      cfg.value("tariff")},
+        {"state",       m_maskingState},
+        {"profileName", m_maskingProfileName},
+        {"hasUrl",      !cfg.value("url").toString().isEmpty()},
+        {"hasTrusted",  !cfg.value("trusted").toString().isEmpty()},
+    };
+}
+
+QVariantMap MainBackend::resetMasking()
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return QVariantMap{{"ok", false}, {"error", "Нет активной сессии"}};
+    int rc;
+    {
+        QMutexLocker locker(&session->ffiMutex);
+        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", "Сессия не готова"}};
+        rc = session->ffi->set_masking_profile(QString());
+    }
+    if (rc != 0) return QVariantMap{{"ok", false}, {"error", ParanoiaFFI::last_error()}};
+    Utils::writeJsonObjectFile(Paths::profileMaskingState(session->profileId), QJsonObject{});
+    m_maskingState.clear();
+    m_maskingProfileName.clear();
+    emit maskingStateChanged();
+    emit maskingApplied(true, QStringLiteral("Возвращена встроенная маска"));
+    return QVariantMap{{"ok", true}};
+}
+
+QVariantMap MainBackend::applyMaskingFromFile(const QString &filePath, bool allowUnsigned)
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return QVariantMap{{"ok", false}, {"error", "Нет активной сессии"}};
+    const QString localPath = Utils::resolveImportPath(filePath);
+    const QByteArray bytes  = Utils::readAll(localPath);
+    if (bytes.isEmpty()) return QVariantMap{{"ok", false}, {"error", "Не удалось прочитать файл"}};
+
+    bool isSigned = false;
+    const QString name    = maskingProfileNameFromJson(bytes, &isSigned);
+    const QString json    = QString::fromUtf8(bytes);
+    const QString trusted = activeMaskingConfig().value("trusted").toString();
+
+    if (isSigned && trusted.isEmpty())
+        return QVariantMap{{"ok", false},
+                           {"error", "Профиль подписан, но доверенный ключ не задан в профиле подключения"}};
+    if (!isSigned && !allowUnsigned)
+        return QVariantMap{{"ok", false}, {"unsigned", true},
+                           {"error", "Профиль без подписи. Подтвердите применение без проверки."}};
+
+    int rc;
+    {
+        QMutexLocker locker(&session->ffiMutex);
+        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", "Сессия не готова"}};
+        rc = isSigned ? session->ffi->set_signed_masking_profile(json, trusted)
+                      : session->ffi->set_masking_profile(json);
+    }
+    if (rc != 0) return QVariantMap{{"ok", false}, {"error", ParanoiaFFI::last_error()}};
+
+    // Сбрасываем сохранённый хэш — файловое применение перебивает node-сверку.
+    Utils::writeJsonObjectFile(Paths::profileMaskingState(session->profileId), QJsonObject{});
+    setMaskingState(QStringLiteral("updated"), name);
+    emit maskingApplied(true, isSigned ? QStringLiteral("Подписанный профиль применён")
+                                       : QStringLiteral("Профиль применён без проверки подписи"));
+    return QVariantMap{{"ok", true}, {"profileName", name}, {"signed", isSigned}};
+}
+
+void MainBackend::syncMaskingFromNode()
+{
+    const QVariantMap cfg = activeMaskingConfig();
+    const QString url = cfg.value("url").toString();
+    if (url.isEmpty()) {
+        // Профиль не раздаёт маскировку — индикатор скрыт.
+        m_maskingState.clear();
+        m_maskingProfileName.clear();
+        emit maskingStateChanged();
+        return;
+    }
+    const QString trusted = cfg.value("trusted").toString();
+    if (trusted.isEmpty()) {
+        setMaskingState(QStringLiteral("error"));
+        emit maskingApplied(false, QStringLiteral("Не задан доверенный ключ профиля"));
+        return;
+    }
+    const QString bearer    = cfg.value("bearer").toString();
+    const QString profileId = cfg.value("profileId").toString();
+
+    if (!m_net) m_net = new QNetworkAccessManager(this);
+    QNetworkRequest req{QUrl(url)};
+    if (!bearer.isEmpty())
+        req.setRawHeader("Authorization", QByteArray("Bearer ") + bearer.toUtf8());
+
+    setMaskingState(QStringLiteral("checking"));
+    QPointer self(this);
+    QNetworkReply *reply = m_net->get(req);
+    connect(reply, &QNetworkReply::finished, this, [self, reply, profileId, trusted]() {
+        reply->deleteLater();
+        if (!self) return;
+        // Сессия могла смениться, пока шёл запрос — применяем только к своему профилю.
+        auto session = SessionStore::instance()->activeSession();
+        if (!session || session->profileId != profileId) return;
+        if (reply->error() != QNetworkReply::NoError) {
+            self->setMaskingState(QStringLiteral("error"));
+            emit self->maskingApplied(false, QStringLiteral("Сеть: ") + reply->errorString());
+            return;
+        }
+        const QByteArray body = reply->readAll();
+        bool isSigned = false;
+        const QString name = maskingProfileNameFromJson(body, &isSigned);
+        int rc;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (!session->ffi) return;
+            rc = session->ffi->set_signed_masking_profile(QString::fromUtf8(body), trusted);
+        }
+        if (rc != 0) {
+            self->setMaskingState(QStringLiteral("error"));
+            emit self->maskingApplied(false, QStringLiteral("Профиль отвергнут: ") + ParanoiaFFI::last_error());
+            return;
+        }
+        const QString hash =
+            QString::fromLatin1(QCryptographicHash::hash(body, QCryptographicHash::Sha256).toHex());
+        const QJsonObject prev = Utils::readJsonObjectFile(Paths::profileMaskingState(profileId));
+        const bool changed = prev.value(QStringLiteral("hash")).toString() != hash;
+        Utils::writeJsonObjectFile(Paths::profileMaskingState(profileId),
+                                   QJsonObject{{"hash", hash}, {"name", name}});
+        self->setMaskingState(changed ? QStringLiteral("updated") : QStringLiteral("verified"), name);
+        emit self->maskingApplied(true, changed ? QStringLiteral("Маска обновлена")
+                                                : QStringLiteral("Маска сверена"));
     });
 }
 
@@ -1552,6 +1787,23 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
             }
             ServerSession::saveClientConfigForProfile(profileId, url, username, importedServerId, signingKey,
                                                       reserveUrls);
+            // Корпоративный/маскировочный бандл несёт доп. метаданные подключения:
+            // тариф, параметры раздачи маскировки и Корп-API. Доносим их в профиль.
+            const QString bundleTariff   = serverObj["tariff"].toString();
+            const QJsonObject maskingObj = serverObj["masking"].toObject();
+            const QJsonObject corpObj    = serverObj["corp"].toObject();
+            if (!bundleTariff.isEmpty() || !maskingObj.isEmpty()) {
+                QJsonObject client = Utils::readJsonObjectFile(Paths::profileClient(profileId));
+                if (!bundleTariff.isEmpty()) client["tariff"] = bundleTariff;
+                if (maskingObj.contains("url"))            client["masking_url"] = maskingObj["url"].toString();
+                if (maskingObj.contains("bearer"))         client["masking_bearer"] = maskingObj["bearer"].toString();
+                if (maskingObj.contains("trusted_pubkey")) client["masking_trusted_pubkey"] = maskingObj["trusted_pubkey"].toString();
+                Utils::writeJsonObjectFile(Paths::profileClient(profileId), client);
+            }
+            if (corpObj.contains("url") || corpObj.contains("psk"))
+                Utils::writeJsonObjectFile(Paths::profileCorp(profileId),
+                                           QJsonObject{{"url", corpObj["url"].toString()},
+                                                       {"psk", corpObj["psk"].toString()}});
             Dialog::saveToPath(Paths::profileDialogs(profileId), targetDialogs);
             Utils::upsertProfileManifest(profileId, url, username, isCurrentClient || myProfileId.isEmpty());
             if (!profileExists) ++importedProfiles;
@@ -1767,6 +2019,7 @@ void MainBackend::switchSession(const QString &profileId)
     emit sessionReset();
     emit dialogsChanged();
     emit sessionSwitched();
+    syncMaskingFromNode();
     m_notifications->schedulePoll(0);
 }
 

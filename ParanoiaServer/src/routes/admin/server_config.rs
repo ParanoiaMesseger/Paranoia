@@ -4,7 +4,7 @@
 //! `turn_public_ip`, `turn_relay_port_range`). `admin_key`, `users` и
 //! `store_path` через этот API не изменяются.
 
-use super::{AdminEnvelope, config_path, err_json, verify};
+use super::{AdminEnvelope, Capability, config_path, err_json, verify};
 use crate::AppState;
 use axum::{Json, extract::State};
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 /// `PUT /admin/config/get` — вернуть безопасное представление конфига.
 pub async fn get(State(state): State<Arc<AppState>>, Json(env): Json<AdminEnvelope>) -> Json<Value> {
-    if let Err(e) = verify(&state, &env, "get_config", "").await {
+    if let Err(e) = verify(&state, &env, "get_config", "", Capability::Extended).await {
         return err_json(&e);
     }
     let cfg = state.config.read().await;
@@ -40,7 +40,7 @@ fn patch_extra(patch: &Option<Value>) -> String {
 /// `PUT /admin/config/set` — применить патч безопасных полей и сохранить конфиг.
 pub async fn set(State(state): State<Arc<AppState>>, Json(env): Json<AdminEnvelope>) -> Json<Value> {
     let extra = patch_extra(&env.patch);
-    if let Err(e) = verify(&state, &env, "set_config", &extra).await {
+    if let Err(e) = verify(&state, &env, "set_config", &extra, Capability::Extended).await {
         return err_json(&e);
     }
     let Some(patch) = env.patch.clone() else {
