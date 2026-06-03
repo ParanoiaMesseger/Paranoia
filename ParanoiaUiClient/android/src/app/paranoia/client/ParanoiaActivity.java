@@ -66,18 +66,39 @@ public final class ParanoiaActivity extends QtActivity {
             return;
         }
         if (resultCode != RESULT_OK || data == null) return;
-        Uri uri = data.getData();
-        if (uri == null) return;
-        try {
-            // ACTION_PICK обычно не выдаёт FLAG_GRANT_READ_URI_PERMISSION навсегда —
-            // запрашиваем persistable permission, где это возможно, чтобы ChatBackend.sendFile
-            // успел прочитать файл при последующей отправке.
-            int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION;
-            getContentResolver().takePersistableUriPermission(uri, flags);
-        } catch (SecurityException ignored) {
-            // Не у всех provider'ов есть persistable permission — это норма.
+        // Мультивыбор: при выборе нескольких фото URI приходят в ClipData;
+        // при одном — в data.getData(). Собираем все и сохраняем списком.
+        ArrayList<String> picked = new ArrayList<>();
+        ClipData clip = data.getClipData();
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri u = clip.getItemAt(i).getUri();
+                if (u == null) continue;
+                tryPersistRead(u);
+                picked.add(u.toString());
+            }
+        } else {
+            Uri uri = data.getData();
+            if (uri != null) {
+                tryPersistRead(uri);
+                picked.add(uri.toString());
+            }
         }
-        ParanoiaAndroidUtils.storePickedAttachment(getApplicationContext(), uri.toString());
+        if (picked.isEmpty()) return;
+        boolean isImage = (requestCode == ParanoiaAndroidUtils.REQUEST_PICK_IMAGE);
+        ParanoiaAndroidUtils.storePickedAttachments(getApplicationContext(), picked, isImage);
+    }
+
+    // ACTION_PICK обычно не выдаёт FLAG_GRANT_READ_URI_PERMISSION навсегда —
+    // запрашиваем persistable permission, где это возможно, чтобы ChatBackend
+    // успел прочитать файл при последующей отправке. Не у всех provider'ов есть
+    // persistable permission (напр. photo-picker URI) — это норма.
+    private void tryPersistRead(Uri uri) {
+        try {
+            getContentResolver().takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException ignored) {
+        }
     }
 
     // Если приложение запущено через системный share-sheet — складываем

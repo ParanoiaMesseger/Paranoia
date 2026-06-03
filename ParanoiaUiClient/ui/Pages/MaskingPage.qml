@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import ParanoiaUiClient
 
 // Управление маскировкой трафика активного профиля.
@@ -53,10 +52,10 @@ Rectangle {
         }
     }
 
-    FileDialog {
+    ParaFileDialog {
         id: profileFileDialog
         title: "Выбрать профиль маскировки"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Профиль маскировки (*.json)", "JSON (*.json)", "Все файлы (*)"]
         onAccepted: {
             const path = Backend.urlToLocalPath(selectedFile)
@@ -88,17 +87,18 @@ Rectangle {
         }
 
         Flickable {
+            id: maskFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: contentCol.implicitHeight + 32
+            contentHeight: Math.max(maskFlick.height, contentCol.implicitHeight + 48)
             clip: true
 
             ColumnLayout {
                 id: contentCol
-                width: parent.width
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.margins: 24
+                width: Math.min(parent.width - 48, 560)
+                anchors.horizontalCenter: parent.horizontalCenter
+                // По вертикали — по центру вьюпорта (высокий контент — от верха).
+                y: Math.max(24, (maskFlick.height - implicitHeight) / 2)
                 spacing: 16
 
                 Item { Layout.preferredHeight: 8 }

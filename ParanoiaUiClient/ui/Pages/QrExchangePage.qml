@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import ParanoiaUiClient
 
 Rectangle {
@@ -22,7 +21,7 @@ Rectangle {
     property string sas:            ""
     property string feedback:       ""
     property var cameraScanTargetField: null
-    readonly property bool cameraQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
+    readonly property bool cameraQrScan: MultimediaAvailable && CameraAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
 
     function openCameraScanner(targetField) {
         root.cameraScanTargetField = targetField
@@ -38,10 +37,10 @@ Rectangle {
         scanImageDialog.open()
     }
 
-    FileDialog {
+    ParaFileDialog {
         id: scanImageDialog
         title: "Выбрать изображение QR payload"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
         property var targetField: null
         onAccepted: {
@@ -92,7 +91,8 @@ Rectangle {
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             ColumnLayout {
-                width: parent.width
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Math.min(parent.width - 32, 560)
                 spacing: 16
 
                 Item { Layout.preferredHeight: 4 }

@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import ParanoiaUiClient
 
 Rectangle {
@@ -9,7 +8,7 @@ Rectangle {
     color: Theme.bgPrimary
 
     required property string targetDomain
-    readonly property bool cameraQrScan: MultimediaAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
+    readonly property bool cameraQrScan: MultimediaAvailable && CameraAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
 
     signal back()
 
@@ -26,10 +25,10 @@ Rectangle {
         function onRegisterUserError(msg) { regFeedback.text = msg }
     }
 
-    FileDialog {
+    ParaFileDialog {
         id: registrationQrImageDialog
         title: "Выбрать изображение QR-кода"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
         onAccepted: {
             const decoded = QrCodeUtils.decodeFromImage(Backend.urlToLocalPath(selectedFile))
@@ -82,19 +81,20 @@ Rectangle {
         }
 
         Flickable {
+            id: formFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: contentCol.implicitHeight
+            contentHeight: Math.max(formFlick.height, contentCol.implicitHeight + 40)
             clip: true
 
             ColumnLayout {
                 id: contentCol
-                width: parent.width
+                // По горизонтали — по центру с ограничением; по вертикали — по
+                // центру вьюпорта (не липнуть к верху). Высокий контент — от верха.
+                width: Math.min(parent.width - 40, 560)
                 spacing: 16
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: 20
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Math.max(20, (formFlick.height - implicitHeight) / 2)
 
                 Text {
                     Layout.fillWidth: true

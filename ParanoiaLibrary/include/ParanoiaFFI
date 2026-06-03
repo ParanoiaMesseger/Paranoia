@@ -72,11 +72,54 @@ public:
             progress, user_data));
     }
 
+    // ── Фото-группы ──────────────────────────────────────────────────────
+    QString send_photo_group_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR group_id, QSTR caption)
+    {
+        return RS_QS(::paranoia_send_photo_group_json_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json),
+                                                              QS_RS(group_id), QS_RS(caption)));
+    }
+
+    QString send_photo_grouped_file_json_keyring_with_progress(QSTR user_a, QSTR user_b, QSTR keyring_json,
+                                                               QSTR file_path, QSTR mime_type, QSTR group_id,
+                                                               ::paranoia_progress_callback progress, void *user_data)
+    {
+        return RS_QS(::paranoia_send_photo_grouped_file_json_keyring_with_progress(
+            ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type),
+            QS_RS(group_id), progress, user_data));
+    }
+
+    // ── Эфемерные большие файлы ──────────────────────────────────────────
+    QString blob_limits_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json)
+    {
+        return RS_QS(::paranoia_blob_limits_json_keyring(ptr, QS_RS3(user_a, user_b, keyring_json)));
+    }
+
+    QString send_large_file_json_keyring_with_progress(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path,
+                                                       QSTR mime_type, ::paranoia_progress_callback progress,
+                                                       void *user_data)
+    {
+        return RS_QS(::paranoia_send_large_file_json_keyring_with_progress(
+            ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type),
+            progress, user_data));
+    }
+
+    QString send_file_auto_json_keyring_with_progress(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path,
+                                                      QSTR mime_type, ::paranoia_progress_callback progress,
+                                                      void *user_data)
+    {
+        return RS_QS(::paranoia_send_file_auto_json_keyring_with_progress(
+            ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type),
+            progress, user_data));
+    }
+
     QString receive_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json)
     { return RS_QS(::paranoia_receive_keyring(ptr, QS_RS3(user_a, user_b, keyring_json))); }
 
     int notify_count_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_count)
     { return ::paranoia_notify_count_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_count); }
+
+    int notify_unread_count_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_count)
+    { return ::paranoia_notify_unread_count_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_count); }
 
     int arrived_get_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_changed)
     { return ::paranoia_arrived_get_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_changed); }

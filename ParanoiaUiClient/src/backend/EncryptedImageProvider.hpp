@@ -15,9 +15,12 @@
 class EncryptedImageProvider : public QQuickImageProvider
 {
 public:
-    // Лимит RAM на расшифрованные превью. 64 МБ — порядок «несколько крупных
-    // фото» без риска OOM на mobile. Достигнут — QCache вытесняет LRU.
-    static constexpr int kMaxBytesBudget = 64 * 1024 * 1024;
+    // Лимит RAM на расшифрованные превью. Превью даунскейлятся до ~2048px
+    // (~150-400 КБ JPEG, см. makePreviewBytes в ChatBackend), поэтому 128 МБ —
+    // это сотни фото без вытеснения. Храним ЭНКОДНЫЕ байты (не декод), декод
+    // живёт в scene-graph отдельно, так что для RAM это умеренно. Достигнут —
+    // QCache вытесняет LRU.
+    static constexpr int kMaxBytesBudget = 128 * 1024 * 1024;
 
     EncryptedImageProvider()
         : QQuickImageProvider(QQuickImageProvider::Image), m_cache(kMaxBytesBudget) {}

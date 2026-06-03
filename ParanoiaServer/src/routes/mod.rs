@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod arrived;
+pub mod blob;
 pub mod cover_gateway;
 pub mod call_poll;
 pub mod call_signal;

@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import QtCore
 import ParanoiaUiClient
 
@@ -24,6 +23,13 @@ Rectangle {
     property string searchQuery: ""
     property int searchCurrentIndex: -1
     property var searchMatchIndices: []
+    // Фото-группы (мозаики) в процессе отправки: groupId -> {caption, ts, photos:[{key,source,name}]}.
+    property var pendingGroups: ({})
+    // ВРЕМЕННО: диагностика мозаики (гирлянда/attachment_not_found). Снять после фикса.
+    property bool _mosaicDebug: false
+    // Прогресс загрузки фото по ключу (groupId:idx) ∈ [0..1]; tick форсирует биндинги.
+    property var uploadProgress: ({})
+    property int uploadTick: 0
     // Режим множественного выбора (ranged-delete).
     property bool selectionMode: false
     property var selectedIds: ({})  // объект как Set: { [messageId]: true }
@@ -149,6 +155,13 @@ Rectangle {
         return (unit === 0 ? Math.round(bytes).toString() : bytes.toFixed(bytes >= 10 ? 1 : 2)) + " " + units[unit]
     }
 
+    // Срок доступности эфемерного файла (unix-секунды) в читаемом виде.
+    function formatEphemeralExpiry(ts) {
+        var t = Number(ts)
+        if (!isFinite(t) || t <= 0) return ""
+        return new Date(t * 1000).toLocaleString(Qt.locale(), "dd.MM HH:mm")
+    }
+
     function isImageMessage(kind, mimeType) {
         return kind === "image" || ((mimeType || "").indexOf("image/") === 0)
     }
@@ -160,15 +173,169 @@ Rectangle {
         saveDialog.open()
     }
 
+    // Собрать все уже загруженные (с готовым превью) фото-вложения диалога —
+    // для листания в просмотрщике. Порядок — как в ленте. Учитывает и одиночные
+    // image-сообщения, и плитки внутри мозаик (photo_group свёрнут composeMessages).
+    function buildImageGallery() {
+        var list = []
+        for (var i = 0; i < msgModel.count; ++i) {
+            var m = msgModel.get(i)
+            if (m.kind === "photo_group") {
+                var photos = []
+                try { photos = JSON.parse(m.photos_json || "[]") } catch (e) { photos = [] }
+                for (var j = 0; j < photos.length; ++j) {
+                    var p = photos[j]
+                    // Только committed-плитки с готовым превью (id + image://-source).
+                    if (!p.id || p.id.length === 0) continue
+                    if (!p.source || p.source.length === 0) continue
+                    list.push({ source: p.source, id: p.id,
+                                filename: (p.name && p.name.length > 0) ? p.name : "attachment.bin" })
+                }
+                continue
+            }
+            if (!isImageMessage(m.kind, m.mime_type)) continue
+            var src = m.preview_source || ""
+            if (src.length === 0) continue
+            list.push({ source: src,
+                        id: m.id,
+                        filename: (m.filename && m.filename.length > 0) ? m.filename : "attachment.bin" })
+        }
+        return list
+    }
+
     function openPhoto(source, messageId, filename) {
         if (source && source.length > 0) {
-            photoViewer.open(source, messageId, filename && filename.length > 0 ? filename : "attachment.bin")
+            var name = filename && filename.length > 0 ? filename : "attachment.bin"
+            var gallery = buildImageGallery()
+            var idx = -1
+            for (var i = 0; i < gallery.length; ++i) {
+                if (gallery[i].id === messageId) { idx = i; break }
+            }
+            if (idx >= 0)
+                photoViewer.openGallery(gallery, idx)
+            else
+                photoViewer.open(source, messageId, name) // не в списке — одиночно
             return
         }
         Chat.ensureImagePreview(messageId)
         errorText.text = "Загрузка превью фото…"
         errorBar.visible = true
         errorTimer.restart()
+    }
+
+    // Маршрутизация выбранных фото: одно без подписи — обычной отправкой; иначе —
+    // фото-группой (мозаика) с подписью из поля ввода.
+    function sendSelectedPhotos(files) {
+        if (!files || files.length === 0) return
+        var paths = []
+        for (var i = 0; i < files.length; ++i) paths.push(files[i].toString())
+        var caption = msgInput.text
+        if (paths.length === 1 && caption.trim().length === 0) {
+            Chat.sendFile(paths[0])
+            return
+        }
+        Chat.sendPhotoGroup(paths, caption)
+        msgInput.clear()
+        root.saveDraft()
+    }
+
+    // Свернуть пришедший плоский список в модель с мозаиками: image-сообщения с
+    // group_id собираются в плитки сообщения-заголовка photo_group; ещё не
+    // отправленные группы добавляются оптимистично из pendingGroups.
+    function composeMessages(messages) {
+        if (root._mosaicDebug) {
+            var rawd = []
+            for (var di = 0; di < messages.length; ++di) {
+                var dm = messages[di]
+                if (dm.kind === "image" || dm.kind === "photo_group")
+                    rawd.push(dm.kind + " id=" + String(dm.id || "").slice(0, 8)
+                              + " gid=" + String(dm.group_id || "∅").slice(0, 8)
+                              + " seq=" + (dm.seq || 0))
+            }
+            console.log("[mosaic] IN n=" + messages.length + " imgs/pg=" + rawd.length
+                        + " pending=" + Object.keys(root.pendingGroups).length + "\n  " + rawd.join("\n  "))
+        }
+        var groups = {}   // groupId -> ссылка на строку photo_group
+        var committedCount = {}
+        var out = []
+        for (var i = 0; i < messages.length; ++i) {
+            var m = messages[i]
+            var gid = m.group_id || ""
+            if (m.kind === "photo_group") {
+                var row = {}
+                for (var k in m) row[k] = m[k]
+                row.photos = []
+                groups[m.group_id] = row
+                committedCount[m.group_id] = 0
+                out.push(row)
+            } else if (m.kind === "image" && gid.length > 0) {
+                if (!groups[gid]) {
+                    var synth = { kind: "photo_group", group_id: gid, caption: "", text: "",
+                                  id: "grp:" + gid, sender: m.sender, sender_name: m.sender_name,
+                                  isMe: m.isMe, status: m.status, ts: m.ts, seq: m.seq,
+                                  reactions_json: "[]", photos: [] }
+                    groups[gid] = synth
+                    committedCount[gid] = 0
+                    out.push(synth)
+                }
+                // Свои фото — локальный исходник (мгновенно, без image://secure/
+                // скачивания и без мигания при коммите); чужие — через провайдер.
+                groups[gid].photos.push({ id: m.id, source: m.local_preview || m.preview_source || "",
+                                          name: m.filename || "", key: "", status: m.status })
+                committedCount[gid] = (committedCount[gid] || 0) + 1
+            } else {
+                out.push(m)
+            }
+        }
+        // Оптимистичные/частично-отправленные группы.
+        for (var pgid in root.pendingGroups) {
+            var pg = root.pendingGroups[pgid]
+            var total = pg.photos.length
+            var committed = committedCount[pgid] || 0
+            if (groups[pgid]) {
+                // Группа уже видна (часть фото committed) — дорисовываем хвост из ещё
+                // не отправленных плиток (по порядку).
+                if (committed >= total) { delete root.pendingGroups[pgid]; continue }
+                for (var t = committed; t < total; ++t)
+                    groups[pgid].photos.push({ id: "", source: pg.photos[t].source,
+                                               name: pg.photos[t].name, key: pg.photos[t].key,
+                                               status: "sending" })
+                if (groups[pgid].caption.length === 0 && pg.caption.length > 0)
+                    groups[pgid].caption = pg.caption
+            } else {
+                // Группа ещё не пришла из стора — целиком оптимистично.
+                var tiles = []
+                for (var j = 0; j < total; ++j)
+                    tiles.push({ id: "", source: pg.photos[j].source, name: pg.photos[j].name,
+                                 key: pg.photos[j].key, status: "sending" })
+                out.push({ kind: "photo_group", group_id: pgid, caption: pg.caption, text: pg.caption,
+                           id: "pending:" + pgid, sender: "", sender_name: "Вы", isMe: true,
+                           status: "sending", ts: pg.ts, seq: 0, reactions_json: "[]", photos: tiles })
+            }
+        }
+        // Сериализуем плитки в JSON-строку (ListModel плохо хранит вложенные массивы).
+        for (var n = 0; n < out.length; ++n) {
+            if (out[n].kind === "photo_group") {
+                out[n].photos_json = JSON.stringify(out[n].photos || [])
+                delete out[n].photos
+            }
+        }
+        if (root._mosaicDebug) {
+            var pgRows = []
+            for (var z = 0; z < out.length; ++z) {
+                if (out[z].kind !== "photo_group") continue
+                var ph = []
+                try { ph = JSON.parse(out[z].photos_json || "[]") } catch (e) { ph = [] }
+                var tids = []
+                for (var y = 0; y < ph.length; ++y)
+                    tids.push((ph[y].id ? String(ph[y].id).slice(0, 8) : "∅") + (ph[y].status === "sending" ? "·s" : ""))
+                pgRows.push("PG id=" + String(out[z].id || "").slice(0, 12)
+                            + " gid=" + String(out[z].group_id || "∅").slice(0, 8)
+                            + " n=" + ph.length + " [" + tids.join(",") + "]")
+            }
+            console.log("[mosaic] OUT rows=" + out.length + " photo_groups=" + pgRows.length + "\n  " + pgRows.join("\n  "))
+        }
+        return out
     }
 
     function handleBackButton(): bool {
@@ -255,8 +422,36 @@ Rectangle {
         root.selectionCount = Object.keys(next).length
     }
 
+    // Расширить список id для удаления: photo_group (мозаика) свёрнут — под его
+    // строкой скрыты отдельные image-сообщения. Удаляем и заголовок группы, и все
+    // её плитки, иначе фото остаются (и мозаика «возрождается» синтетически).
+    function expandDeleteIds(ids) {
+        var rowById = {}
+        for (var i = 0; i < msgModel.count; ++i) {
+            var m = msgModel.get(i)
+            rowById[m.id] = m
+        }
+        var out = {}
+        for (var k = 0; k < ids.length; ++k) {
+            var id = ids[k]
+            var row = rowById[id]
+            if (row && row.kind === "photo_group") {
+                // Реальный заголовок (не синтетический "grp:"/оптимистичный "pending:").
+                if (id.indexOf("grp:") !== 0 && id.indexOf("pending:") !== 0)
+                    out[id] = true
+                var photos = []
+                try { photos = JSON.parse(row.photos_json || "[]") } catch (e) { photos = [] }
+                for (var j = 0; j < photos.length; ++j)
+                    if (photos[j].id && photos[j].id.length > 0) out[photos[j].id] = true
+            } else {
+                out[id] = true
+            }
+        }
+        return Object.keys(out)
+    }
+
     function confirmDeleteSelection() {
-        const ids = Object.keys(root.selectedIds)
+        const ids = root.expandDeleteIds(Object.keys(root.selectedIds))
         if (ids.length === 0) {
             root.exitSelection()
             return
@@ -414,6 +609,17 @@ Rectangle {
 
     function messageKey(message) {
         if (!message) return ""
+        // Фото-группа: ключуем по СТАБИЛЬНОМУ group_id, а не по id строки. id
+        // меняется при переходе оптимистичная("pending:"+gid) → committed(id
+        // заголовка); если ключевать по нему, updateMessageModel посчитает порядок
+        // изменившимся и пересоберёт ВСЮ модель (clear+append) → пересоздание всех
+        // делегатов → все Image(cache:false) разом дёргают провайдер → LRU-кэш
+        // (64МБ) вытесняет часть → «Failed to get image» + мерцание всех плиток +
+        // «гирлянда» дублей мозаик. По group_id ключ стабилен → set()-путь.
+        if (message.kind === "photo_group") {
+            const gid = String(message.group_id || "")
+            if (gid.length > 0) return "grp:" + gid
+        }
         const id = String(message.id || "")
         if (id.length > 0) return "id:" + id
         const seq = Number(message.seq || 0)
@@ -502,16 +708,18 @@ Rectangle {
         function onMessagesReceived(peer, messages) {
             if (peer !== root.peer) return
             root.messagesLoaded = true
+            messages = root.composeMessages(messages)
             const wasEmpty = msgModel.count === 0
             const wasAtEnd = root.isListAtEnd()
             const anchor = wasEmpty || wasAtEnd ? null : root.visibleMessageAnchor()
             const previousContentY = listView.contentY
             if (root.updateMessageModel(messages)) {
-                if (wasAtEnd) Qt.callLater(function() { listView.positionViewAtEnd() })
+                if (wasAtEnd) Qt.callLater(function() { if (listView) listView.positionViewAtEnd() })
                 if (root.searchActive) root.recomputeSearchMatches()
                 return
             }
             Qt.callLater(function() {
+                if (!listView) return // страница могла быть разрушена до отложенного вызова
                 if (wasEmpty || wasAtEnd) {
                     listView.positionViewAtEnd()
                     return
@@ -527,6 +735,28 @@ Rectangle {
             errorText.text = msg
             errorBar.visible = true
             errorTimer.restart()
+        }
+        function onPhotoGroupStarted(groupId, caption, photos) {
+            // Сохраняем оптимистичную группу и сразу показываем мозаику.
+            var pg = root.pendingGroups
+            pg[groupId] = { caption: caption, ts: Date.now(), photos: photos }
+            root.pendingGroups = pg
+            // СИНХРОННО перерисовываем из текущего кэша → все превью видны мгновенно
+            // (локальные file://), без ожидания сетевого fetchMessages.
+            Chat.emitCachedMessages()
+        }
+        function onFileProgress(transferKey, chunkIndex, total) {
+            // НОВЫЙ объект — иначе переприсваивание той же ссылки не уведомляет
+            // биндинг progressMap в PhotoMosaic (QML сравнивает var по ссылке).
+            var up = Object.assign({}, root.uploadProgress)
+            up[transferKey] = total > 0 ? Math.min(1, chunkIndex / total) : 0
+            root.uploadProgress = up
+            root.uploadTick++
+        }
+        function onAttachmentsPicked(uris) {
+            // Мобильный нативный пикер фото — тот же путь, что мультивыбор на
+            // десктопе: подпись берётся из поля ввода, 1 фото → обычно, >1 → группа.
+            root.sendSelectedPhotos(uris)
         }
         function onReceiveError(msg) {
             root.downloadingAttachmentId = ""
@@ -599,31 +829,33 @@ Rectangle {
         Chat.stopChat()
     }
 
-    FileDialog {
+    ParaFileDialog {
         id: attachDialog
         title: "Выберите файл"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         onAccepted: Chat.sendFile(selectedFile)
     }
 
-    FileDialog {
+    ParaFileDialog {
         id: photoDialog
         title: "Выберите фото"
-        fileMode: FileDialog.OpenFile
+        // Мультивыбор: несколько фото уходят одной мозаикой-группой с подписью.
+        mode: "openMultiple"
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)", "Все файлы (*)"]
-        onAccepted: Chat.sendFile(selectedFile)
+        onAccepted: root.sendSelectedPhotos(selectedFiles)
     }
 
-    FileDialog {
+    ParaFileDialog {
         id: videoDialog
         title: "Выберите видео"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Видео (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.3gp *.ogv)", "Все файлы (*)"]
         onAccepted: Chat.sendFile(selectedFile)
     }
 
-    FolderDialog {
+    ParaFileDialog {
         id: saveDialog
+        mode: "folder"
         title: "Выберите папку для сохранения"
         onAccepted: {
             root.downloadingAttachmentId = root.pendingDownloadId
@@ -876,7 +1108,7 @@ Rectangle {
                     onClicked: {
                         const id = messageMenu.messageId
                         messageMenu.close()
-                        if (id.length > 0) Chat.deleteMessages([id])
+                        if (id.length > 0) Chat.deleteMessages(root.expandDeleteIds([id]))
                     }
                 }
             }
@@ -885,15 +1117,43 @@ Rectangle {
 
     Popup {
         id: inputMenu
-        // Базовая ширина для «Очистить/Копировать/Вставить» — 100; когда есть
-        // орфографические подсказки, расширяем до 220, чтобы слова уместились.
-        width: hasSpellSuggestions ? 220 : 100
+        // Базовая ширина для «Очистить/Копировать/Вставить» — 100; при наличии
+        // орфографии добавляется компактный пункт «Орфография ▸» (подсказки — в
+        // подменё, чтобы основное меню не разрасталось и не сбивалось позицией).
+        width: (hasSpellSuggestions && !root.isMobileOs) ? 150 : 100
         height: inputMenuColumn.implicitHeight + topPadding + bottomPadding
         padding: 6
         modal: false
         focus: false
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        // Пока открыто подменю — НЕ закрываемся по клику снаружи (иначе клик по
+        // подсказке в подменю закрывал бы основное меню раньше, чем сработает
+        // выбор). По Escape закрываемся всегда. Флаг (а не прямая ссылка на
+        // spellSubmenu.opened) — т.к. spellSubmenu объявлен ниже и forward-ссылка
+        // в биндинге, вычисляемом при создании, кидает ReferenceError.
+        property bool submenuOpen: false
+        closePolicy: submenuOpen
+                     ? Popup.CloseOnEscape
+                     : (Popup.CloseOnEscape | Popup.CloseOnPressOutside)
         z: 901
+        onClosed: spellSubmenu.close()
+
+        // Якорь = точка правого клика (в координатах root). x/y — РЕАКТИВНЫЕ
+        // биндинги от якоря и фактических width/height: когда появляется пункт
+        // «Орфография» и высота растёт, позиция пересчитывается сама (раньше
+        // высота читалась до layout'а → меню «уезжало»).
+        property real anchorX: 0
+        property real anchorY: 0
+        x: {
+            var tx = anchorX - width
+            if (tx < 8) tx = 8
+            if (tx + width > root.width - 8) tx = root.width - width - 8
+            return Math.max(8, tx)
+        }
+        y: {
+            var ty = anchorY - height
+            if (ty < 8) ty = Math.min(anchorY + 8, root.height - height - 8)
+            return Math.max(8, ty)
+        }
 
         // Контекст misspelled-word'а, выставляется перед открытием меню в TextArea.onPressed.
         property int spellStart: -1
@@ -910,6 +1170,10 @@ Rectangle {
             spellLength = 0
             spellWord = ""
             spellSuggestions = []
+            // Закрываем сами оба меню отсюда (из scope inputMenu spellSubmenu
+            // виден; изнутри его собственного делегата id не резолвится — QML-кварк
+            // с contentItem). close() → onClosed → spellSubmenu.close().
+            close()
         }
 
         background: Rectangle {
@@ -923,42 +1187,43 @@ Rectangle {
             width: inputMenu.width - inputMenu.leftPadding - inputMenu.rightPadding
             spacing: 2
 
-            // Орфографические подсказки (только если правый клик пришёлся на слово с ошибкой).
-            Repeater {
-                model: inputMenu.hasSpellSuggestions ? inputMenu.spellSuggestions : []
-                delegate: Rectangle {
-                    required property string modelData
-                    width: inputMenuColumn.width
-                    height: 32
-                    radius: Theme.radiusSm
-                    color: spellArea.containsMouse ? Theme.bgInput : "transparent"
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
-                        text: modelData
-                        color: Theme.accentHover
-                        font.pixelSize: Theme.fontSm
-                        font.family: Theme.fontFamily
-                        font.weight: Font.Medium
-                        elide: Text.ElideRight
-                    }
-                    MouseArea {
-                        id: spellArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        onClicked: {
-                            inputMenu.applySuggestion(modelData)
-                            inputMenu.close()
-                        }
-                    }
+            // Пункт «Орфография ▸» (только ПК): открывает подменю с подсказками.
+            // Подсказки вынесены в подменю, чтобы основное меню оставалось
+            // компактным и не «уезжало» с позиции при их появлении.
+            Rectangle {
+                visible: inputMenu.hasSpellSuggestions && !root.isMobileOs
+                width: inputMenuColumn.width
+                height: visible ? 34 : 0
+                radius: Theme.radiusSm
+                color: spellSubmenuArea.containsMouse ? Theme.bgInput : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 10
+                    text: "Орфография"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                }
+                AppIcon {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.right: parent.right
+                    anchors.rightMargin: 8
+                    width: 15; height: 15
+                    name: "chevronRight"
+                    iconColor: Theme.textSecondary
+                    strokeWidth: 2
+                }
+                MouseArea {
+                    id: spellSubmenuArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: spellSubmenu.openBeside(inputMenu)
                 }
             }
 
             Rectangle {
-                visible: inputMenu.hasSpellSuggestions
+                visible: inputMenu.hasSpellSuggestions && !root.isMobileOs
                 width: inputMenuColumn.width
                 height: visible ? 1 : 0
                 color: Theme.separator
@@ -995,6 +1260,73 @@ Rectangle {
                             }
                             else  msgInput.paste()
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Подменю «Орфография» (ПК): список подсказок, открывается сбоку от inputMenu.
+    Popup {
+        id: spellSubmenu
+        width: 200
+        height: spellSubmenuColumn.implicitHeight + topPadding + bottomPadding
+        padding: 6
+        modal: false
+        focus: false
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        z: 902
+        onOpened: inputMenu.submenuOpen = true
+        onClosed: inputMenu.submenuOpen = false
+
+        function openBeside(menu) {
+            // Справа от основного меню; если не влезает по ширине — слева.
+            var gx = menu.x + menu.width + 4
+            if (gx + width > root.width - 8) gx = menu.x - width - 4
+            x = Math.max(8, gx)
+            // По вертикали выравниваем по верху меню, но не вылезаем за низ экрана.
+            y = Math.max(8, Math.min(menu.y, root.height - height - 8))
+            open()
+        }
+
+        background: Rectangle {
+            color: Theme.bgCard
+            radius: Theme.radiusMd
+            border.width: 1
+            border.color: Theme.border
+        }
+        contentItem: Column {
+            id: spellSubmenuColumn
+            width: spellSubmenu.width - spellSubmenu.leftPadding - spellSubmenu.rightPadding
+            spacing: 2
+            Repeater {
+                model: inputMenu.spellSuggestions
+                delegate: Rectangle {
+                    required property string modelData
+                    width: spellSubmenuColumn.width
+                    height: 32
+                    radius: Theme.radiusSm
+                    color: spellSubArea.containsMouse ? Theme.bgInput : "transparent"
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        text: modelData
+                        color: Theme.accentHover
+                        font.pixelSize: Theme.fontSm
+                        font.family: Theme.fontFamily
+                        font.weight: Font.Medium
+                        elide: Text.ElideRight
+                    }
+                    MouseArea {
+                        id: spellSubArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        // applySuggestion сама закрывает оба меню (ссылка на
+                        // spellSubmenu изнутри его делегата не резолвится — QML-кварк).
+                        onClicked: inputMenu.applySuggestion(modelData)
                     }
                 }
             }
@@ -1498,8 +1830,13 @@ Rectangle {
                     readonly property bool isMe: model.isMe === true
                     readonly property string mimeType: model.mime_type || ""
                     readonly property bool isImage: root.isImageMessage(model.kind, mimeType)
+                    readonly property bool isPhotoGroup: model.kind === "photo_group"
+                    readonly property var groupPhotos: {
+                        if (!isPhotoGroup) return []
+                        try { return JSON.parse(model.photos_json || "[]") } catch (e) { return [] }
+                    }
                     readonly property bool hasAttachment: model.kind === "file" || model.kind === "image" || model.kind === "voice" || isImage
-                    readonly property bool showMessageText: !hasAttachment && (model.text || "").length > 0
+                    readonly property bool showMessageText: !hasAttachment && !isPhotoGroup && (model.text || "").length > 0
                     readonly property bool showFileCard: hasAttachment && !isImage
                     readonly property string attachmentName: root.fileNameFor(model)
                     readonly property string previewSource: model.preview_source || ""
@@ -1623,13 +1960,16 @@ Rectangle {
                 // На десктопе клик левой кнопкой мыши «напротив» пузыря (по
                 // строке делегата, но не по самому пузырю) сразу входит в
                 // режим выделения и выбирает это сообщение.
+                // z:-1 — строго НИЖЕ пузыря: клики по изображению/мозаике/файлу
+                // должны доходить до их MouseArea (открытие вьювера и т.п.), а
+                // этот перехватчик ловит только пустую область строки вне пузыря.
                 MouseArea {
                     anchors.fill: parent
                     visible: !root.selectionMode && !root.isMobileOs
                     enabled: !root.selectionMode && !root.isMobileOs
                     acceptedButtons: Qt.LeftButton
                     hoverEnabled: false
-                    z: 1
+                    z: -1
                     onClicked: function(mouse) {
                         if (model.id && model.id.length > 0) root.beginSelection(model.id)
                     }
@@ -1652,6 +1992,7 @@ Rectangle {
                     width: Math.min(Math.max(showMessageText ? msgText.implicitWidth : 0,
                                              hasReply ? messageReplyPreview.implicitWidth : 0,
                                              isImage ? imagePreview.implicitWidth : 0,
+                                             isPhotoGroup ? photoMosaic.implicitWidth : 0,
                                              showFileCard ? fileCard.implicitWidth : 0,
                                              hasReactions ? reactionsFlow.implicitWidth : 0,
                                              metaRow.implicitWidth,
@@ -1661,6 +2002,7 @@ Rectangle {
                                   + (hasReply ? messageReplyPreview.implicitHeight + 6 : 0)
                                   + (showMessageText ? msgText.implicitHeight : 0)
                                   + (isImage ? imagePreview.implicitHeight + 6 : 0)
+                                  + (isPhotoGroup ? photoMosaic.implicitHeight + 6 : 0)
                                   + (showFileCard ? fileCard.implicitHeight + 6 : 0)
                                   + (hasReactions ? reactionsFlow.implicitHeight + 6 : 0)
                                   + metaRow.implicitHeight + 16
@@ -1743,6 +2085,23 @@ Rectangle {
                         lineHeight: 1.3
                     }
 
+                    PhotoMosaic {
+                        id: photoMosaic
+                        anchors.top: hasReply ? messageReplyPreview.bottom : (isMe ? parent.top : senderLabel.bottom)
+                        anchors.topMargin: hasReply ? 6 : (isMe ? 10 : 6)
+                        anchors.left: parent.left
+                        anchors.leftMargin: 12
+                        visible: isPhotoGroup
+                        photos: groupPhotos
+                        caption: isPhotoGroup ? (model.caption || "") : ""
+                        maxWidth: Math.min(440, Math.max(240, listView.width * 0.55))
+                        progressMap: root.uploadProgress
+                        progressTick: root.uploadTick
+                        onTileClicked: function(id, source, name) {
+                            if (id && id.length > 0) root.openPhoto(source, id, name)
+                        }
+                    }
+
                     Rectangle {
                         id: imagePreview
                         anchors.top: showMessageText ? msgText.bottom : (hasReply ? messageReplyPreview.bottom : (isMe ? parent.top : senderLabel.bottom))
@@ -1751,7 +2110,7 @@ Rectangle {
                         anchors.right: parent.right
                         anchors.leftMargin: 12
                         anchors.rightMargin: 12
-                        height: isImage ? Math.min(220, Math.max(150, width * 0.66)) : 0
+                        height: isImage ? Math.min(340, Math.max(170, width * 0.66)) : 0
                         visible: isImage
                         radius: Theme.radiusMd
                         color: Theme.bgInput
@@ -1759,7 +2118,9 @@ Rectangle {
                         border.color: Theme.border
                         clip: true
 
-                        implicitWidth: 250
+                        // Растём с шириной окна (десктоп — крупнее, телефон — почти
+                        // во всю ширину пузыря).
+                        implicitWidth: Math.min(440, Math.max(240, listView.width * 0.55))
                         implicitHeight: height
 
                         Image {
@@ -1898,9 +2259,13 @@ Rectangle {
                                 elide: Text.ElideRight
                             }
                             Text {
+                                readonly property bool isEphemeral: (model.ephemeral_file_id || "").length > 0
                                 width: parent.width
-                                text: isDownloading ? "Сохранение…" : root.formatFileSize(model.size)
-                                color: Theme.textSecondary
+                                text: isDownloading
+                                      ? "Сохранение…"
+                                      : root.formatFileSize(model.size)
+                                        + (isEphemeral ? " · временный, до " + root.formatEphemeralExpiry(model.ephemeral_expires_at) : "")
+                                color: isEphemeral ? Theme.accentHover : Theme.textSecondary
                                 font.pixelSize: Theme.fontXs
                                 font.family: Theme.fontFamily
                                 elide: Text.ElideRight
@@ -1910,7 +2275,7 @@ Rectangle {
 
                     Flow {
                         id: reactionsFlow
-                        anchors.top: isImage ? imagePreview.bottom : (showFileCard ? fileCard.bottom : msgText.bottom)
+                        anchors.top: isPhotoGroup ? photoMosaic.bottom : (isImage ? imagePreview.bottom : (showFileCard ? fileCard.bottom : msgText.bottom))
                         anchors.topMargin: 6
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -1960,7 +2325,7 @@ Rectangle {
 
                     Row {
                         id: metaRow
-                        anchors.top: hasReactions ? reactionsFlow.bottom : (isImage ? imagePreview.bottom : (showFileCard ? fileCard.bottom : msgText.bottom))
+                        anchors.top: hasReactions ? reactionsFlow.bottom : (isPhotoGroup ? photoMosaic.bottom : (isImage ? imagePreview.bottom : (showFileCard ? fileCard.bottom : msgText.bottom)))
                         anchors.topMargin: hasReactions ? 4 : 0
                         anchors.right: parent.right
                         anchors.rightMargin: 10
@@ -1988,7 +2353,10 @@ Rectangle {
             BusyIndicator {
                 id: messagesBusy
                 anchors.centerIn: parent
-                running: Chat.messagesLoading || !root.messagesLoaded
+                // Только начальная загрузка (пустая лента). Иначе крутилка лезла
+                // поверх уже показанных сообщений при каждом fetchMessages —
+                // в т.ч. при отправке вложений (fetchMessages → messagesLoading).
+                running: (Chat.messagesLoading || !root.messagesLoaded) && msgModel.count === 0
                 visible: running
                 z: 2
             }
@@ -2064,9 +2432,12 @@ Rectangle {
         // так и для share-target'а).
         Rectangle {
             id: sendIndicator
+            // Для мозаики индикация отправки — кольца НА плитках; нижний баннер
+            // прячем, пока в полёте фото-группа (иначе дублирует и висит внизу).
+            readonly property bool mosaicInFlight: Object.keys(root.pendingGroups).length > 0
             Layout.fillWidth: true
-            Layout.preferredHeight: Chat.filesInFlight > 0 ? 44 : 0
-            visible: Chat.filesInFlight > 0
+            Layout.preferredHeight: (Chat.filesInFlight > 0 && !mosaicInFlight) ? 44 : 0
+            visible: Chat.filesInFlight > 0 && !mosaicInFlight
             color: Theme.bgSecondary
 
             // Прогресс per-transfer: ключ — sendKey из C++ (см. ChatBackend::sendFile),
@@ -2323,6 +2694,10 @@ Rectangle {
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontMd
                             font.family: Theme.fontFamily
+                            // NativeRendering обязателен, иначе scene-graph
+                            // (distance-field) рендер НЕ рисует подчёркивания из
+                            // QSyntaxHighlighter — волнистая линия опечаток не видна.
+                            renderType: Text.NativeRendering
                             topPadding: 8
                             bottomPadding: 8
                             leftPadding: 14
@@ -2332,6 +2707,7 @@ Rectangle {
                             onTextChanged: {
                                 if (text.length > 0) root.sendLocked = false
                                 root.saveDraft()
+                                spellUnderlines.requestPaint()
                             }
 
                             SpellHighlighter {
@@ -2341,6 +2717,60 @@ Rectangle {
                                 // Дублирующее подчёркивание от Hunspell визуально мешает.
                                 enabled: !root.isMobileOs
                                 locale: "ru_RU"
+                                onAvailableChanged: spellUnderlines.requestPaint()
+                            }
+
+                            // Подчёркивание опечаток: QQuickTextEdit не рендерит
+                            // underline из QSyntaxHighlighter, поэтому рисуем волнистую
+                            // линию сами. Дочерний Canvas без MouseArea — ввод/выделение
+                            // проходят в TextArea насквозь; линия идёт в зоне нижних
+                            // выносных элементов, глифы не перекрывает.
+                            Canvas {
+                                id: spellUnderlines
+                                anchors.fill: parent
+                                visible: spellHighlighter.enabled && spellHighlighter.available
+
+                                function squiggle(ctx, x1, x2, y) {
+                                    if (x2 - x1 < 1) return
+                                    var amp = 1.6, wl = 4, up = true
+                                    ctx.beginPath()
+                                    ctx.moveTo(x1, y)
+                                    for (var x = x1; x < x2; x += wl) {
+                                        var nx = Math.min(x + wl, x2)
+                                        ctx.lineTo(nx, y + (up ? -amp : amp))
+                                        up = !up
+                                    }
+                                    ctx.stroke()
+                                }
+
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    ctx.reset()
+                                    if (!spellHighlighter.enabled || !spellHighlighter.available) return
+                                    var ranges = spellHighlighter.misspelledRanges()
+                                    ctx.strokeStyle = "#FF2738"
+                                    ctx.lineWidth = 1.4
+                                    for (var i = 0; i < ranges.length; ++i) {
+                                        var s = ranges[i].start
+                                        var e = s + ranges[i].length
+                                        var r1 = msgInput.positionToRectangle(s)
+                                        var r2 = msgInput.positionToRectangle(e)
+                                        var y = r1.y + r1.height - 1
+                                        if (Math.abs(r1.y - r2.y) < 1) {
+                                            squiggle(ctx, r1.x, r2.x, y)
+                                        } else {
+                                            // Слово перенеслось — подчёркиваем по двум строкам.
+                                            squiggle(ctx, r1.x, msgInput.width - msgInput.rightPadding, y)
+                                            squiggle(ctx, msgInput.leftPadding, r2.x, r2.y + r2.height - 1)
+                                        }
+                                    }
+                                }
+
+                                Connections {
+                                    target: msgInput
+                                    function onWidthChanged() { spellUnderlines.requestPaint() }
+                                    function onContentHeightChanged() { spellUnderlines.requestPaint() }
+                                }
                             }
 
                             persistentSelection: true
@@ -2362,23 +2792,19 @@ Rectangle {
                                 }
                             }
 
-                            function placeInputMenu(clickX, clickY) {
+                            // Якорь меню = точка клика (в координатах root); сама
+                            // позиция считается реактивными биндингами inputMenu.x/y.
+                            function anchorInputMenu(clickX, clickY) {
                                 const p = mapToItem(root, clickX, clickY)
-                                let targetX = p.x - inputMenu.width
-                                if (targetX < 8) targetX = 8
-                                if (targetX + inputMenu.width > root.width - 8)
-                                    targetX = root.width - inputMenu.width - 8
-                                let targetY = p.y - inputMenu.height
-                                if (targetY < 8) targetY = Math.min(p.y + 8, root.height - inputMenu.height - 8)
-                                inputMenu.x = targetX
-                                inputMenu.y = targetY
+                                inputMenu.anchorX = p.x
+                                inputMenu.anchorY = p.y
                             }
 
                             // Правая кнопка на десктопе
                             onPressed: function(event) {
                                 if (event.button === Qt.RightButton && !isMobileOs) {
                                     populateSpellContext(event.x, event.y)
-                                    placeInputMenu(event.x, event.y)
+                                    anchorInputMenu(event.x, event.y)
                                     inputMenu.open()
                                     event.accepted = true
                                 }
@@ -2388,7 +2814,7 @@ Rectangle {
                             onPressAndHold: function(event) {
                                 if (!isMobileOs) return
                                 populateSpellContext(event.x, event.y)
-                                placeInputMenu(event.x, event.y)
+                                anchorInputMenu(event.x, event.y)
                                 inputMenu.open()
                             }
 

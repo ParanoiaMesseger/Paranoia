@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QQuickTextDocument>
 #include <QStringList>
+#include <QVariantList>
 
 class SpellSyntaxHighlighter;
 
@@ -35,6 +36,11 @@ public:
     // Returns {start, length, word, suggestions} for the misspelled word at `position`,
     // or an empty map when the position is not over a misspelled word.
     Q_INVOKABLE QVariantMap misspelledAt(int position, int maxSuggestions = 5) const;
+
+    // Все диапазоны опечаток в документе: список {start, length}. QQuickTextEdit
+    // не рендерит underline из QSyntaxHighlighter, поэтому QML рисует подчёркивание
+    // сам (Canvas-оверлей), беря эти диапазоны + positionToRectangle.
+    Q_INVOKABLE QVariantList misspelledRanges() const;
 
 signals:
     void textDocumentChanged();

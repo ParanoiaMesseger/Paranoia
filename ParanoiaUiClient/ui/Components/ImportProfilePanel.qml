@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import ParanoiaUiClient
 
 // Единая логика импорта профиля из зашифрованного export-файла. Переиспользуется
@@ -17,10 +16,10 @@ ColumnLayout {
 
     property string importFilePath: ""
 
-    FileDialog {
+    ParaFileDialog {
         id: importOpenDialog
         title: "Выбрать export-файл"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
         onAccepted: {
             panel.importFilePath = Backend.urlToLocalPath(selectedFile)

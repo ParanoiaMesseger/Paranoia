@@ -68,9 +68,14 @@ Rectangle {
             contentWidth: availableWidth
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            // Вертикальное центрирование: короткий контент по центру вьюпорта
+            // (не липнет к верху); высокий — обычный скролл (padding → 0).
+            topPadding: Math.max(0, (height - versionCol.implicitHeight) / 2)
 
             ColumnLayout {
-                width: versionScroll.availableWidth
+                id: versionCol
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Math.min(versionScroll.availableWidth - 32, 560)
                 spacing: 14
 
                 Item { Layout.preferredHeight: 20 }

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.10 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.11 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -387,10 +387,48 @@ if(PARANOIA_ENABLE_HUNSPELL)
                 message(STATUS "Paranoia spellcheck: found via find_library at ${PARANOIA_HUNSPELL_LIBRARY}")
             endif()
         endif()
+
+        # Runtime-only fallback: установлен ТОЛЬКО рантайм-пакет
+        # (libhunspell-1.7.so.0, без dev-symlink .so и без системного заголовка).
+        # Тогда линкуемся напрямую с версионированной .so.0 и берём завендоренный
+        # минимальный заголовок (deps/hunspell-fallback). Это и есть случай
+        # dev-машины с одним libhunspell-1.7-0 — спелчекер работает без apt install
+        # libhunspell-dev.
+        if(NOT PARANOIA_HAS_HUNSPELL)
+            set(_paranoia_saved_suffixes "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+            list(APPEND CMAKE_FIND_LIBRARY_SUFFIXES ".so.0" ".so.1")
+            find_library(PARANOIA_HUNSPELL_RUNTIME_LIB
+                NAMES hunspell-1.7 hunspell-1.6 hunspell)
+            set(CMAKE_FIND_LIBRARY_SUFFIXES "${_paranoia_saved_suffixes}")
+            set(_paranoia_hunspell_vendored_inc
+                "${CMAKE_CURRENT_SOURCE_DIR}/deps/hunspell-fallback")
+            if(PARANOIA_HUNSPELL_RUNTIME_LIB
+                    AND EXISTS "${_paranoia_hunspell_vendored_inc}/hunspell/hunspell.h")
+                add_library(paranoia_hunspell_runtime INTERFACE)
+                target_include_directories(paranoia_hunspell_runtime INTERFACE
+                    "${_paranoia_hunspell_vendored_inc}")
+                target_link_libraries(paranoia_hunspell_runtime INTERFACE
+                    "${PARANOIA_HUNSPELL_RUNTIME_LIB}")
+                set(PARANOIA_HAS_HUNSPELL 1)
+                set(PARANOIA_HUNSPELL_TARGET paranoia_hunspell_runtime)
+                message(STATUS "Paranoia spellcheck: runtime-only hunspell at "
+                    "${PARANOIA_HUNSPELL_RUNTIME_LIB} (vendored header)")
+            endif()
+        endif()
     endif()
 endif()
 
 message(STATUS "Paranoia spellcheck: HAS_HUNSPELL=${PARANOIA_HAS_HUNSPELL}")
+# Не даём спелчекеру «тихо» отключиться на десктоп-сборке: без hunspell поле
+# ввода не подчёркивает опечатки (SpellChecker деградирует в no-op). На
+# dev-машине обычно достаточно поставить dev-пакет, напр. `apt install
+# libhunspell-dev` (Debian/Ubuntu) или `brew install hunspell` (macOS).
+if(PARANOIA_ENABLE_HUNSPELL AND NOT PARANOIA_HAS_HUNSPELL
+        AND NOT PARANOIA_IS_IOS AND NOT ANDROID)
+    message(WARNING "Paranoia spellcheck: hunspell НЕ найден — подчёркивание "
+        "опечаток в поле ввода будет ОТКЛЮЧЕНО. Установите dev-пакет hunspell "
+        "(apt install libhunspell-dev / brew install hunspell) и пересоберите.")
+endif()
 
 set(CMAKE_AUTORCC ON)
 qt_standard_project_setup()
@@ -474,11 +512,15 @@ qt_add_qml_module(Paranoia
     src/spell/SpellChecker.cpp
     src/spell/SpellHighlighter.hpp
     src/spell/SpellHighlighter.cpp
+    src/backend/NativeFileDialog.hpp
+    src/backend/NativeFileDialog.cpp
     QML_FILES
     ui/Main.qml
     ui/Theme.qml
     ui/Reactions.qml
     ui/Components/AppIcon.qml
+    ui/Components/CenteredPane.qml
+    ui/Components/ParaFileDialog.qml
     ui/Components/EmojiPicker.qml
     ui/Components/CallButton.qml
     ui/Components/ParaButton.qml
@@ -490,6 +532,7 @@ qt_add_qml_module(Paranoia
     ui/Components/ParaHeader.qml
     ui/Components/ParaInput.qml
     ui/Components/PhotoViewer.qml
+    ui/Components/PhotoMosaic.qml
     ui/Components/ReplyPreview.qml
     ui/Components/Toggle.qml
     ${PARANOIA_OPTIONAL_QML_FILES}

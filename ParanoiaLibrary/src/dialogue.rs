@@ -26,6 +26,29 @@ use crate::{
 
 const FILE_PULL_CHUNKS_PER_REQUEST: u32 = 4;
 
+/// Размер чанка при загрузке эфемерного большого файла в blob-хранилище (один
+/// HTTP-запрос на чанк). Крупнее history-чанков — файлы большие, минимизируем
+/// число round-trip'ов.
+const BLOB_CHUNK_SIZE: usize = 512 * 1024;
+
+/// Лимиты файлов, отдаваемые сервером (blob `info`).
+#[derive(Debug, Clone, Copy)]
+pub struct BlobLimits {
+    /// Верхняя граница файла, идущего в историю диалога (байты).
+    pub max_history_file_size: u64,
+    /// Жёсткая верхняя граница размера файла вообще (байты).
+    pub large_file_max: u64,
+    /// Срок хранения эфемерного файла «в ожидании скачивания» (секунды).
+    pub ephemeral_retention_secs: u64,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Сколько подряд идущих живых seq тянуть одним bounded /pull в receive().
 /// Худший случай — 16 чанков по 192 KB ≈ 3 MB на один HTTPS-ответ.
 const RECEIVE_PULL_BATCH: u64 = 16;
@@ -92,6 +115,7 @@ impl Dialogue {
             filename.into(),
             mime_type.into(),
             data,
+            None,
         )
         .await
     }
@@ -122,8 +146,254 @@ impl Dialogue {
         } else {
             AttachmentKind::File
         };
-        self.send_path_chunked(kind, filename.into(), mime_type, path.as_ref(), on_progress)
+        self.send_path_chunked(kind, filename.into(), mime_type, path.as_ref(), None, on_progress)
             .await
+    }
+
+    /// Отправить файл с АВТО-выбором канала по размеру и лимитам сервера:
+    /// `<= max_history_file_size` — обычный чанкинг в историю; в диапазоне
+    /// `(max_history .. large_file_max]` — эфемерно (blob, вне истории);
+    /// `> large_file_max` — отказ (`file_too_large`). Один round-trip за лимитами.
+    pub async fn send_file_auto_with_progress<F>(
+        &self,
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        path: impl AsRef<Path>,
+        on_progress: F,
+    ) -> Result<Vec<Message>>
+    where
+        F: FnMut(u32, u32),
+    {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path).map_err(|_| anyhow::anyhow!("file_read_error"))?;
+        let total_size = metadata.len();
+        let limits = self.blob_limits().await?;
+        if total_size > limits.large_file_max {
+            anyhow::bail!("file_too_large");
+        }
+        let mime_type = mime_type.into();
+        if total_size > limits.max_history_file_size {
+            self.send_large_file_path_with_progress(filename, mime_type, path, on_progress)
+                .await
+        } else {
+            let kind = if mime_type.starts_with("image/") {
+                AttachmentKind::Image
+            } else {
+                AttachmentKind::File
+            };
+            self.send_path_chunked(kind, filename.into(), mime_type, path, None, on_progress)
+                .await
+        }
+    }
+
+    /// Отправить одно фото в составе фото-группы (мозаики): вложение помечается
+    /// `group_id`, UI группирует его с остальными под заголовком [`send_photo_group`].
+    /// Используется клиентом в цикле по выбранным фото (per-file прогресс).
+    pub async fn send_photo_grouped_with_progress<F>(
+        &self,
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        path: impl AsRef<Path>,
+        group_id: impl Into<String>,
+        on_progress: F,
+    ) -> Result<Vec<Message>>
+    where
+        F: FnMut(u32, u32),
+    {
+        // Фото-группа всегда из изображений — kind фиксируем Image.
+        self.send_path_chunked(
+            AttachmentKind::Image,
+            filename.into(),
+            mime_type.into(),
+            path.as_ref(),
+            Some(group_id.into()),
+            on_progress,
+        )
+        .await
+    }
+
+    /// Отправить сообщение-заголовок фото-группы: подпись (может быть пустой) +
+    /// `group_id`. Сами фото идут отдельными сообщениями через
+    /// [`send_photo_grouped_with_progress`] с тем же `group_id`.
+    pub async fn send_photo_group(
+        &self,
+        group_id: impl Into<String>,
+        caption: impl Into<String>,
+    ) -> Result<Message> {
+        self.send(MessageContent::PhotoGroup {
+            group_id: group_id.into(),
+            caption: caption.into(),
+        })
+        .await
+    }
+
+    // ── Эфемерные большие файлы (вне истории) ─────────────────────────────
+
+    /// Лимиты файлов с сервера (blob `info`, подпись ключом сессии).
+    pub async fn blob_limits(&self) -> Result<BlobLimits> {
+        let user = self.client_cfg.username.clone();
+        let nonce = Uuid::new_v4().to_string();
+        let canon = format!("blob.info|{user}|{nonce}");
+        let sig = crypto::encode_b64(&crypto::sign(&self.client_cfg.signing_key, canon.as_bytes()));
+        let body = serde_json::json!({ "op": "info", "user": user, "nonce": nonce, "sig": sig });
+        let resp = self.transport.blob(&body).await?;
+        if !resp
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "blob_info_failed: {}",
+                resp.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?")
+            );
+        }
+        let get = |k: &str, d: u64| resp.get(k).and_then(serde_json::Value::as_u64).unwrap_or(d);
+        Ok(BlobLimits {
+            max_history_file_size: get("max_history_file_size", 20 * 1024 * 1024),
+            large_file_max: get("large_file_max", 2 * 1024 * 1024 * 1024),
+            ephemeral_retention_secs: get("ephemeral_retention_secs", 24 * 60 * 60),
+        })
+    }
+
+    /// Отправить большой файл ЭФЕМЕРНО: тело по чанкам уходит в blob-хранилище
+    /// сервера (TTL), затем в историю пушится reference-сообщение (Image/File с
+    /// `ephemeral_file_id`), по которому получатель скачивает файл. `>large_file_max`
+    /// отклоняется.
+    pub async fn send_large_file_path_with_progress<F>(
+        &self,
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        path: impl AsRef<Path>,
+        mut on_progress: F,
+    ) -> Result<Vec<Message>>
+    where
+        F: FnMut(u32, u32),
+    {
+        let path = path.as_ref();
+        let filename = filename.into();
+        let mime_type = mime_type.into();
+        let user = self.client_cfg.username.clone();
+        let partner = self.partner().to_string();
+
+        let metadata = fs::metadata(path).map_err(|_| anyhow::anyhow!("file_read_error"))?;
+        if !metadata.is_file() {
+            anyhow::bail!("file_read_error");
+        }
+        let total_size = metadata.len();
+
+        let limits = self.blob_limits().await?;
+        if total_size > limits.large_file_max {
+            anyhow::bail!("file_too_large");
+        }
+
+        let file_id = Uuid::new_v4().to_string();
+        let total_chunks = total_size.div_ceil(BLOB_CHUNK_SIZE as u64).max(1) as u32;
+
+        let mut reader =
+            BufReader::new(File::open(path).map_err(|_| anyhow::anyhow!("file_read_error"))?);
+        let mut index: u32 = 0;
+        let mut remaining = total_size;
+        while remaining > 0 {
+            let this = std::cmp::min(remaining, BLOB_CHUNK_SIZE as u64) as usize;
+            let mut buf = vec![0u8; this];
+            reader
+                .read_exact(&mut buf)
+                .map_err(|_| anyhow::anyhow!("file_read_error"))?;
+            let payload = crypto::encode_b64(&buf);
+            let nonce = Uuid::new_v4().to_string();
+            let canon = format!(
+                "blob.put|{user}|{partner}|{file_id}|{index}|{total_chunks}|{total_size}|{nonce}|{payload}"
+            );
+            let sig =
+                crypto::encode_b64(&crypto::sign(&self.client_cfg.signing_key, canon.as_bytes()));
+            let body = serde_json::json!({
+                "op": "put", "user": user, "peer": partner, "file_id": file_id,
+                "chunk_index": index, "total_chunks": total_chunks, "total_size": total_size,
+                "nonce": nonce, "sig": sig, "payload": payload,
+            });
+            let resp = self.transport.blob(&body).await?;
+            if !resp
+                .get("success")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                anyhow::bail!(
+                    "blob_put_failed: {}",
+                    resp.get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?")
+                );
+            }
+            index += 1;
+            remaining -= this as u64;
+            on_progress(index, total_chunks);
+        }
+
+        let kind = if mime_type.starts_with("image/") {
+            AttachmentKind::Image
+        } else {
+            AttachmentKind::File
+        };
+        let expires_at = now_unix() + limits.ephemeral_retention_secs;
+        let attachment = FileAttachment {
+            filename,
+            mime_type,
+            size: total_size as usize,
+            data: Vec::new(),
+            transfer_id: None,
+            // У отправителя файл локально доступен по этому пути.
+            cache_path: Some(path.to_string_lossy().into_owned()),
+            chunk_count: total_chunks,
+            body_from_seq: 0,
+            body_to_seq: 0,
+            downloaded: true,
+            group_id: None,
+            ephemeral_file_id: Some(file_id),
+            ephemeral_expires_at: Some(expires_at),
+        };
+        let msg = self.send(attachment_content(kind, attachment)).await?;
+        Ok(vec![msg])
+    }
+
+    /// Скачать эфемерный файл по `file_id` (loop blob `get`) и собрать байты.
+    /// Возвращает ошибку `ephemeral_expired`, если TTL на сервере истёк.
+    pub async fn download_ephemeral_file(&self, file_id: &str, chunk_count: u32) -> Result<Vec<u8>> {
+        let user = self.client_cfg.username.clone();
+        let partner = self.partner().to_string();
+        let mut out = Vec::new();
+        for index in 0..chunk_count {
+            let nonce = Uuid::new_v4().to_string();
+            let canon = format!("blob.get|{user}|{partner}|{file_id}|{index}|{nonce}");
+            let sig =
+                crypto::encode_b64(&crypto::sign(&self.client_cfg.signing_key, canon.as_bytes()));
+            let body = serde_json::json!({
+                "op": "get", "user": user, "peer": partner, "file_id": file_id,
+                "chunk_index": index, "nonce": nonce, "sig": sig,
+            });
+            let resp = self.transport.blob(&body).await?;
+            if !resp
+                .get("success")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                if resp
+                    .get("expired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    anyhow::bail!("ephemeral_expired");
+                }
+                anyhow::bail!("blob_get_failed");
+            }
+            let payload = resp
+                .get("payload")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("blob_get_no_payload"))?;
+            out.extend_from_slice(&crypto::decode_b64(payload)?);
+        }
+        Ok(out)
     }
 
     pub async fn send_image(
@@ -136,6 +406,7 @@ impl Dialogue {
             filename.into(),
             "image/jpeg".into(),
             data,
+            None,
         )
         .await
     }
@@ -146,6 +417,7 @@ impl Dialogue {
             "voice.ogg".into(),
             "audio/ogg".into(),
             data,
+            None,
         )
         .await
     }
@@ -315,6 +587,47 @@ impl Dialogue {
         self.transport.notify(&core_notify).await
     }
 
+    /// Кол-во НЕпрочитанных МНОЙ сообщений: как [`notify_count`], но базой берёт
+    /// `max(локальный last_pulled_seq, мой server-side read-seq)`. Сервер хранит
+    /// мой read-seq в receipt_state(me) и обновляет его при pull на ЛЮБОМ
+    /// устройстве — поэтому, если я уже прочитал сообщение на другом устройстве,
+    /// `own_seq` выше и notify не вернёт его (нет лишнего уведомления).
+    pub async fn notify_unread_count(&self) -> Result<u64> {
+        let username = &self.client_cfg.username;
+        let partner = self.partner();
+        let local_seq = self.store.get_last_pulled_seq(&self.key)?;
+        // Best-effort: при ошибке/старом сервере own_seq = 0 → база = локальная.
+        let own_seq = self.own_read_seq().await.unwrap_or(0);
+        let seq = local_seq.max(own_seq);
+
+        let msg = format!("{username}{partner}{seq}");
+        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
+        let core_notify = CoreNotify {
+            sender: username.clone(),
+            partner: partner.to_string(),
+            seq,
+            sig,
+        };
+        self.transport.notify(&core_notify).await
+    }
+
+    /// Мой собственный read-seq в этом диалоге по данным сервера (receipt_state(me),
+    /// обновляется при pull на любом устройстве). Через тот же arrived-эндпоинт.
+    async fn own_read_seq(&self) -> Result<u64> {
+        let username = &self.client_cfg.username;
+        let partner = self.partner();
+        let dialogue_id = crypto::make_dialogue_id(username, partner);
+        let msg = format!("arrived:get:{username}:{partner}:{dialogue_id}");
+        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
+        let core = CoreArrivedGet {
+            sender: username.clone(),
+            partner: partner.to_string(),
+            dialogue_id,
+            sig,
+        };
+        Ok(self.transport.arrived_get(&core).await?.own_last_seq)
+    }
+
     pub async fn refresh_arrived_status(&self) -> Result<usize> {
         let username = &self.client_cfg.username;
         if matches!(
@@ -459,7 +772,7 @@ impl Dialogue {
     /// `attachment-cache/<msg_id>.enc`.
     pub async fn cache_attachment_bytes(&self, message_id: &str) -> Result<Vec<u8>> {
         let Some(message) = self.store.get_message_by_id(&self.key, message_id)? else {
-            anyhow::bail!("attachment_not_found");
+            anyhow::bail!("attachment_not_found:{message_id}");
         };
         let file = match &message.content {
             MessageContent::File(file)
@@ -481,6 +794,23 @@ impl Dialogue {
         // 2) Inline data в самом сообщении (мелкие/локальные).
         if !file.data.is_empty() {
             return Ok(file.data.clone());
+        }
+
+        // 2.5) Локальный файл ОТПРАВИТЕЛЯ (cache_path) — читаем напрямую, НЕ качаем
+        //      с сервера. Критично при быстрой отправке мозаики (15 фото): чанки
+        //      ещё могут не долететь на сервер → скачивание падало бы
+        //      attachment_incomplete и превью крутилось бы вечно. У получателя
+        //      cache_path обнулён (strip_remote_local_attachment_state) — он качает.
+        if let Some(src) = readable_path(file) {
+            if let Ok(plaintext) = fs::read(&src) {
+                // Кэшируем зашифрованно (как ветка скачивания) — стабильное превью
+                // даже если исходник позже удалят.
+                let sealed =
+                    crate::local_vault::encrypt_attachment(message_id.as_bytes(), &plaintext)?;
+                ensure_parent_dir(&enc_path)?;
+                write_bytes_atomic(&enc_path, &sealed)?;
+                return Ok(plaintext);
+            }
         }
 
         // 3) Скачать с сервера прямо в RAM (никаких plaintext-файлов на диске).
@@ -628,6 +958,7 @@ impl Dialogue {
         filename: String,
         mime_type: String,
         data: Vec<u8>,
+        group_id: Option<String>,
     ) -> Result<Vec<Message>> {
         if self.notify_count().await.unwrap_or(0) > 0 {
             self.receive().await?;
@@ -658,6 +989,7 @@ impl Dialogue {
             mime_type: mime_type.clone(),
             total_size,
             chunks: total,
+            group_id: group_id.clone(),
         };
         self.push_packet(header_seq, &transfer_id, now, header)
             .await?;
@@ -701,6 +1033,9 @@ impl Dialogue {
                     body_from_seq,
                     body_to_seq,
                     downloaded: true,
+                    group_id,
+                    ephemeral_file_id: None,
+                    ephemeral_expires_at: None,
                 },
             ),
             timestamp: now,
@@ -718,6 +1053,7 @@ impl Dialogue {
         filename: String,
         mime_type: String,
         path: &Path,
+        group_id: Option<String>,
         mut on_progress: F,
     ) -> Result<Vec<Message>>
     where
@@ -756,6 +1092,7 @@ impl Dialogue {
             mime_type: mime_type.clone(),
             total_size,
             chunks: total,
+            group_id: group_id.clone(),
         };
         self.push_packet(header_seq, &transfer_id, now, header)
             .await?;
@@ -807,6 +1144,9 @@ impl Dialogue {
                     body_from_seq,
                     body_to_seq,
                     downloaded: true,
+                    group_id,
+                    ephemeral_file_id: None,
+                    ephemeral_expires_at: None,
                 },
             ),
             timestamp: now,
@@ -852,6 +1192,24 @@ impl Dialogue {
                 file.cache_path = Some(cache_path);
                 file.data.clear();
             }
+            file.downloaded = true;
+            message.content = attachment_content(kind, file);
+            self.store.save_message(&message)?;
+            return Ok(());
+        }
+
+        // Эфемерный большой файл: тело не в истории, а в blob-хранилище сервера
+        // (по file_id, с TTL). Скачиваем loop blob `get`, собираем, пишем в target.
+        if let Some(file_id) = file.ephemeral_file_id.clone() {
+            let bytes = self
+                .download_ephemeral_file(&file_id, file.chunk_count)
+                .await?;
+            ensure_parent_dir(path)?;
+            write_bytes_atomic(path, &bytes)?;
+            if let Some(cache_path) = cache_path {
+                file.cache_path = Some(cache_path);
+            }
+            file.data.clear();
             file.downloaded = true;
             message.content = attachment_content(kind, file);
             self.store.save_message(&message)?;
@@ -1065,6 +1423,7 @@ impl Dialogue {
                 mime_type,
                 total_size,
                 chunks,
+                group_id,
             } => {
                 let body_to_seq = seq
                     .checked_add(*chunks as u64)
@@ -1088,6 +1447,9 @@ impl Dialogue {
                             body_from_seq: if *chunks == 0 { 0 } else { seq + 1 },
                             body_to_seq: if *chunks == 0 { 0 } else { body_to_seq },
                             downloaded: *chunks == 0,
+                            group_id: group_id.clone(),
+                            ephemeral_file_id: None,
+                            ephemeral_expires_at: None,
                         },
                     ),
                     timestamp: ts,
@@ -1152,6 +1514,11 @@ impl Dialogue {
                             body_from_seq: 0,
                             body_to_seq: 0,
                             downloaded: true,
+                            // Этот путь срабатывает только при отсутствии ранее
+                            // принятого FileHeader (без него group_id неизвестен).
+                            group_id: None,
+                            ephemeral_file_id: None,
+                            ephemeral_expires_at: None,
                         }),
                         timestamp: assembled.timestamp,
                         status: MessageStatus::Delivered,
@@ -1332,6 +1699,9 @@ mod tests {
             body_from_seq: 2,
             body_to_seq: 2,
             downloaded: true,
+            group_id: None,
+            ephemeral_file_id: None,
+            ephemeral_expires_at: None,
         });
 
         strip_remote_local_attachment_state(&mut content);

@@ -58,6 +58,18 @@ impl ClientCover for SchemaClientCover {
         })
     }
 
+    fn wrap_kind(&self, kind: &str, inner: &[u8]) -> Option<Value> {
+        // Только если профиль реально содержит этот вид — иначе пусть транспорт
+        // шлёт плоско (None).
+        self.profile.kinds.get(kind)?;
+        let mut rng = rand::thread_rng();
+        paranoia_cover::wrap(&self.profile, kind, inner, &mut rng).ok()
+    }
+
+    fn unwrap_kind(&self, kind: &str, body: &Value) -> Option<Vec<u8>> {
+        paranoia_cover::unwrap(&self.profile, kind, body).ok()
+    }
+
     fn wrap_push(&self, core: &CorePush) -> Result<Value> {
         self.wrap_core(
             kind::PUSH,

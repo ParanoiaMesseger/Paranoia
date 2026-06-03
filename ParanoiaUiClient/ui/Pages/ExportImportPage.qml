@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import ParanoiaUiClient
 
 Rectangle {
@@ -64,10 +63,10 @@ Rectangle {
         }
     }
 
-    FileDialog {
+    ParaFileDialog {
         id: exportSaveDialog
         title: "Сохранить export-файл"
-        fileMode: FileDialog.SaveFile
+        mode: "save"
         defaultSuffix: "json"
         nameFilters: ["Paranoia export (*.json)", "JSON (*.json)"]
         onAccepted: {
@@ -112,6 +111,9 @@ Rectangle {
             id: tabBar
             Layout.fillWidth: true
             Layout.topMargin: 12
+            // Клик по вкладке ↔ свайп: синхронизируем с SwipeView без binding-loop
+            // (гард не даёт пинг-понгу зациклиться).
+            onCurrentIndexChanged: if (swipeView.currentIndex !== currentIndex) swipeView.currentIndex = currentIndex
             background: Rectangle {
                 color: Theme.bgDark
             }
@@ -144,10 +146,13 @@ Rectangle {
             }
         }
 
-        StackLayout {
+        SwipeView {
+            id: swipeView
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: tabBar.currentIndex
+            // Свайп влево/вправо переключает вкладки; обратная синхронизация в
+            // TabBar (без declarative-биндинга, чтобы свайп «прилипал»).
+            onCurrentIndexChanged: if (tabBar.currentIndex !== currentIndex) tabBar.currentIndex = currentIndex
 
             // ── ЭКСПОРТ ───────────────────────────────────────
             ScrollView {
@@ -157,9 +162,13 @@ Rectangle {
                 clip: true
                 contentWidth: availableWidth
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                // Вертикальное центрирование короткого контента (не липнет к верху).
+                topPadding: Math.max(0, (height - exportCol.implicitHeight) / 2)
 
                 ColumnLayout {
-                    width: exportScroll.availableWidth
+                    id: exportCol
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: Math.min(exportScroll.availableWidth - 32, 560)
                     spacing: 12
 
                     Item {
@@ -390,9 +399,13 @@ Rectangle {
                 clip: true
                 contentWidth: availableWidth
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                // Вертикальное центрирование короткого контента (не липнет к верху).
+                topPadding: Math.max(0, (height - importCol.implicitHeight) / 2)
 
                 ColumnLayout {
-                    width: importScroll.availableWidth
+                    id: importCol
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: Math.min(importScroll.availableWidth - 32, 560)
                     spacing: 12
 
                     Item { Layout.preferredHeight: 8 }

@@ -20,7 +20,37 @@
 #include <QDebug>
 #include <QDir>
 #include <QUuid>
+#include <QTimer>
+#include <QImage>
+#include <QBuffer>
 #include <algorithm>
+
+namespace {
+// Готовим байты для RAM-кэша превью (EncryptedImageProvider). Оригиналы с
+// телефона (3-5 МБ × десятки фото) переполняли LRU-кэш (64 МБ) → провайдер
+// вытеснял уже отрисованные плитки, parseMessages снова видел contains()==false,
+// плитка перезапрашивала превью → setBytes → loadHistory → recompose → вытеснение
+// → БЕСКОНЕЧНЫЙ цикл («гирлянда»/мерцание/«ломается превью в целом»). Ужимаем до
+// ~2048px (~150-400 КБ) — все фото диалога влезают, вытеснения нет, цикл сходится.
+// Полноэкранный просмотрщик использует тот же id: 2048px достаточно для экрана.
+QByteArray makePreviewBytes(const QByteArray &orig)
+{
+    if (orig.isEmpty()) return orig;
+    QImage img;
+    if (!img.loadFromData(orig)) return orig; // не декодировалось — кладём как есть
+    constexpr int kMaxDim = 2048;
+    if (img.width() <= kMaxDim && img.height() <= kMaxDim && orig.size() <= 512 * 1024)
+        return orig; // уже компактное
+    const QImage scaled = (img.width() > kMaxDim || img.height() > kMaxDim)
+                              ? img.scaled(kMaxDim, kMaxDim, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                              : img;
+    QByteArray out;
+    QBuffer buf(&out);
+    buf.open(QIODevice::WriteOnly);
+    if (!scaled.save(&buf, "JPEG", 85) || out.isEmpty()) return orig;
+    return out;
+}
+} // namespace
 
 #if defined(Q_OS_ANDROID)
 #include <QCoreApplication>
@@ -274,6 +304,9 @@ bool ChatBackend::readReceiptsEnabled() const
 void ChatBackend::openChat(const QString &peer)
 {
     m_activePeer = peer;
+    // Новый сеанс диалога — даём провалившимся ранее превью ещё один шанс
+    // (вдруг тело вложения уже долетело/докачалось).
+    m_failedPreviewIds.clear();
     emit activePeerChanged(peer);
     emit readReceiptsEnabledChanged();
     auto session = SessionStore::instance()->activeSession();
@@ -529,7 +562,9 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
                 err = "client_not_ready";
             } else {
                 const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                json = session->ffi->send_file_json_keyring_with_progress(
+                // Авто-выбор канала по размеру (история / эфемерно / отказ) —
+                // порог и лимиты резолвит lib (см. send_file_auto).
+                json = session->ffi->send_file_auto_json_keyring_with_progress(
                     serverId, peerId, keyringJson, path, mimeType,
                     &paranoia_chat_progress_trampoline, ctx.get());
                 if (json.isEmpty()) err = ParanoiaFFI::last_error();
@@ -545,6 +580,8 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
                 self->decrementFilesInFlight();
                 if (err == "file_read_error")
                     emit self->sendError("Не удалось прочитать файл.");
+                else if (err == "file_too_large")
+                    emit self->sendError("Файл слишком большой — превышает лимит сервера.");
                 else if (err == "server_unavailable")
                     emit self->sendError("Сервер недоступен. Проверьте соединение.");
                 else
@@ -564,6 +601,137 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
             }
         });
     });
+}
+
+void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QString &caption)
+{
+    if (m_activePeer.isEmpty()) {
+        emit sendError("Нет активного диалога.");
+        return;
+    }
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) {
+        emit sendError("Нет активной сессии.");
+        return;
+    }
+    auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) {
+        emit sendError("Диалог не найден.");
+        return;
+    }
+    requestAndroidFileAccessIfNeeded();
+
+    const QString groupId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    // Локальное описание одного фото группы. source — file:// для оптимистичного
+    // превью (минуя EncryptedImageProvider — байты ещё свои, на диске).
+    struct GroupPhoto
+    {
+        QString path;
+        QString name;
+        QString mime;
+        QString key;
+        bool isContent = false;
+        QString source;
+    };
+    QList<GroupPhoto> photos;
+    QVariantList optimistic;
+    int idx = 0;
+    for (const QString &raw : fileUrlsOrPaths) {
+        const QString src = raw.trimmed();
+        if (src.isEmpty()) continue;
+        const bool isContent = isContentUri(src);
+        const QString path   = isContent ? src : Utils::normalizeLocalFilePath(src);
+        QString name         = QFileInfo(isContent ? src : path).fileName();
+        if (name.isEmpty()) name = QStringLiteral("photo.jpg");
+        QString mime =
+            isContent ? QStringLiteral("image/jpeg") : QMimeDatabase().mimeTypeForFile(QFileInfo(path)).name();
+        if (!mime.startsWith(QStringLiteral("image/"))) mime = QStringLiteral("image/jpeg");
+        const QString key = groupId + QChar(':') + QString::number(idx);
+        const QString source = isContent ? src : (QStringLiteral("file://") + path);
+        photos.append(GroupPhoto{path, name, mime, key, isContent, source});
+        optimistic.append(QVariantMap{{"key", key}, {"source", source}, {"name", name}});
+        ++idx;
+    }
+    if (photos.isEmpty()) {
+        emit sendError("Не выбрано ни одного фото.");
+        return;
+    }
+
+    // Сразу показываем оптимистичную мозаику (с локальными превью и прогрессом).
+    emit photoGroupStarted(groupId, caption, optimistic);
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    const QString peerId       = peerServerId.isEmpty() ? peer : peerServerId;
+
+    incrementFilesInFlight();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, session, peer, serverId, peerId, keyringJson, groupId, caption, photos]() {
+            if (!self) return;
+            // 1. Заголовок группы (подпись + group_id) — отдельным сообщением.
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                if (session->ffi) {
+                    const QString hj = session->ffi->send_photo_group_json_keyring(serverId, peerId, keyringJson,
+                                                                                   groupId, caption);
+                    if (!hj.isEmpty()) {
+                        QMetaObject::invokeMethod(self, [self, peer, hj]() {
+                            if (self) self->appendMessages(peer, self->parseMessages(hj));
+                        });
+                    }
+                }
+            }
+            // 2. Каждое фото — последовательно (порядок мозаики), с прогрессом по
+            //    своему key через общий progress-trampoline.
+            for (const auto &gp : photos) {
+                if (!self) return;
+                QString path = gp.path;
+#if defined(Q_OS_ANDROID)
+                if (gp.isContent) path = copyAndroidContentUriToCache(gp.path);
+#endif
+                QString json;
+                QString err;
+                const QFileInfo info(path);
+                if (path.isEmpty() || !info.exists() || !info.isFile() || !info.isReadable())
+                    err = QStringLiteral("file_read_error");
+                std::unique_ptr<ProgressCtx> ctx(new ProgressCtx{self.data(), gp.key});
+                {
+                    QMutexLocker locker(&session->ffiMutex);
+                    if (!err.isEmpty()) {
+                        // keep classified error
+                    } else if (!session->ffi) {
+                        err = QStringLiteral("client_not_ready");
+                    } else {
+                        json = session->ffi->send_photo_grouped_file_json_keyring_with_progress(
+                            serverId, peerId, keyringJson, path, gp.mime, groupId,
+                            &paranoia_chat_progress_trampoline, ctx.get());
+                        if (json.isEmpty()) err = ParanoiaFFI::last_error();
+                    }
+                }
+                if (json.isEmpty()) {
+                    QMetaObject::invokeMethod(self, [self, err]() {
+                        if (self) emit self->sendError(QStringLiteral("Ошибка отправки фото: ") + err);
+                    });
+                    continue;
+                }
+                QMetaObject::invokeMethod(self, [self, peer, json]() {
+                    if (self) self->appendMessages(peer, self->parseMessages(json));
+                });
+            }
+            QMetaObject::invokeMethod(self, [self, peer]() {
+                if (!self) return;
+                self->decrementFilesInFlight();
+                if (peer == self->m_activePeer) {
+                    self->fetchMessages();
+                    self->refreshArrivedStatus();
+                    self->scheduleActiveChatPoll(0);
+                }
+            });
+        });
 }
 
 void ChatBackend::incrementFilesInFlight()
@@ -655,6 +823,12 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
     });
 }
 
+void ChatBackend::emitCachedMessages()
+{
+    if (m_activePeer.isEmpty()) return;
+    emit messagesReceived(m_activePeer, m_messageCache.value(m_activePeer));
+}
+
 void ChatBackend::ensureImagePreview(const QString &messageId)
 {
     if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
@@ -673,6 +847,8 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
         break;
     }
     if (!imageMessage || hasPreview) return;
+    // Вложение, которого нет в сторе — не долбим FFI на каждом recompose.
+    if (m_failedPreviewIds.contains(messageId)) return;
 
     const QString requestKey = m_activePeer + QChar('\n') + messageId;
     if (m_previewInFlightIds.contains(requestKey)) return;
@@ -698,15 +874,33 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
                     if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
                 }
             }
-            QMetaObject::invokeMethod(self, [self, peer, requestKey, messageId, bytes, err]() {
+            // Декод+даунскейл на воркер-потоке (не на GUI): не блокируем UI.
+            const QByteArray previewBytes = bytes.isEmpty() ? QByteArray() : makePreviewBytes(bytes);
+            QMetaObject::invokeMethod(self, [self, peer, requestKey, messageId, previewBytes, err]() {
                 if (!self) return;
                 self->m_previewInFlightIds.remove(requestKey);
-                if (!bytes.isEmpty() && self->m_imageProvider) {
-                    self->m_imageProvider->setBytes(messageId, bytes);
-                    if (peer == self->m_activePeer) self->loadHistory(peer);
+                if (!previewBytes.isEmpty() && self->m_imageProvider) {
+                    self->m_imageProvider->setBytes(messageId, previewBytes);
+                    // Коалесинг: десятки готовностей подряд → ОДИН refresh истории
+                    // (иначе loadHistory→recompose на каждое фото = мерцание ленты).
+                    if (peer == self->m_activePeer && !self->m_previewRefreshPending) {
+                        self->m_previewRefreshPending = true;
+                        QTimer::singleShot(60, self, [self, peer]() {
+                            self->m_previewRefreshPending = false;
+                            if (peer == self->m_activePeer) self->loadHistory(peer);
+                        });
+                    }
                     return;
                 }
-                if (!err.isEmpty()) qWarning().noquote() << "Image preview cache failed:" << err;
+                if (!err.isEmpty()) {
+                    // ЛЮБАЯ неудача (not_found / incomplete / not_downloaded) —
+                    // не запрашиваем повторно до прихода новых данных
+                    // (pulledNewMessages чистит set). Иначе при отправке собеседником
+                    // десятки ещё-не-долетевших превью качаются в цикле под общим
+                    // ffiMutex → получатель «зависает».
+                    self->m_failedPreviewIds.insert(messageId);
+                    qWarning().noquote() << "Image preview cache failed:" << err << "msgId=" << messageId;
+                }
             });
         });
 }
@@ -1058,6 +1252,11 @@ void ChatBackend::fetchMessages()
                 // в notifications-сервисе, чтобы он не нотифицировал нас
                 // про уже прочитанные.
                 emit self->pulledNewMessages();
+                // Пришли новые данные (возможно, дослали недостающие чанки) —
+                // даём ранее провалившимся превью ещё попытку. До этого момента
+                // НЕ ретраим их на каждом recompose (иначе получатель «зависал»:
+                // десятки incomplete-превью качались под общим ffiMutex).
+                self->m_failedPreviewIds.clear();
             }
             if (self->m_receiveAgainAfterCurrent) {
                 self->m_receiveAgainAfterCurrent = false;
@@ -1122,6 +1321,11 @@ void ChatBackend::prefetchAllDialogs()
                 // Snapshot для сервиса перезаписать новым seq, чтобы он
                 // не нотифицировал про уже подтянутые сообщения.
                 emit self->pulledNewMessages();
+                // Пришли новые данные (возможно, дослали недостающие чанки) —
+                // даём ранее провалившимся превью ещё попытку. До этого момента
+                // НЕ ретраим их на каждом recompose (иначе получатель «зависал»:
+                // десятки incomplete-превью качались под общим ffiMutex).
+                self->m_failedPreviewIds.clear();
             }
         });
     });
@@ -1190,9 +1394,22 @@ void ChatBackend::consumePickedAttachment()
         "(Landroid/content/Context;)Ljava/lang/String;", context.object<jobject>());
     clearPendingAndroidException();
     if (!result.isValid()) return;
-    const QString uri = result.toString();
-    if (uri.isEmpty()) return;
-    sendFile(uri);
+    const QString joined = result.toString();
+    if (joined.isEmpty()) return;
+    // Формат: первая строка — тип ("img"/"vid"), далее URI (мультивыбор фото).
+    QStringList parts = joined.split(QChar('\n'), Qt::SkipEmptyParts);
+    if (parts.isEmpty()) return;
+    const bool isImage = (parts.first() == QStringLiteral("img"));
+    parts.removeFirst();
+    if (parts.isEmpty()) return;
+    if (isImage) {
+        // Фото — через QML (подпись из поля ввода, мозаика-группа при >1; та же
+        // логика, что мультивыбор на десктопе — sendSelectedPhotos).
+        emit attachmentsPicked(parts);
+    } else {
+        // Видео/прочее — обычной отправкой по одному.
+        sendFile(parts.first());
+    }
 #endif
 }
 
@@ -1564,11 +1781,26 @@ QVariantList ChatBackend::parseMessages(const QString &json) const
         msg["transfer_id"]          = obj.value("transfer_id").toString();
         msg["body_from_seq"]        = obj.value("body_from_seq").toVariant().toULongLong();
         msg["body_to_seq"]          = obj.value("body_to_seq").toVariant().toULongLong();
-        // cache_path в QML больше не используется — все превью идут через
-        // image://secure/<id>. Не отдаём наружу.
         msg["preview_source"]       = previewSource;
+        // Локальный исходник для СВОИХ отправленных фото (cache_path есть только
+        // у отправителя; у получателя обнулён strip'ом). Используем file:// напрямую
+        // → плитка показывается мгновенно, без перехода через image://secure и без
+        // скачивания/ensureImagePreview, и не мигает при коммите оптимистичной.
+        const QString ownCachePath = obj.value(QStringLiteral("cache_path")).toString();
+        msg["local_preview"] = (isImage && obj["sender"].toString() == myId && !ownCachePath.isEmpty())
+                                   ? (QStringLiteral("file://") + ownCachePath)
+                                   : QString();
+        // Тег фото-группы (мозаики): есть и на image-вложениях, и на заголовке.
+        msg["group_id"]             = obj.value(QStringLiteral("group_id")).toString();
+        // Эфемерный большой файл (тело в blob, скачивание по TTL).
+        msg["ephemeral_file_id"]    = obj.value(QStringLiteral("ephemeral_file_id")).toString();
+        msg["ephemeral_expires_at"] = obj.value(QStringLiteral("ephemeral_expires_at")).toVariant().toLongLong();
         if (kind == "text")
             msg["text"] = obj["text"].toString();
+        else if (kind == "photo_group") {
+            msg["caption"] = obj.value(QStringLiteral("caption")).toString();
+            msg["text"]    = obj.value(QStringLiteral("caption")).toString();
+        }
         else if (kind == "file" || kind == "image" || kind == "voice")
             msg["text"] = obj["filename"].toString(obj["text"].toString("Файл"));
         else if (kind == "reaction") {
