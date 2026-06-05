@@ -832,6 +832,249 @@ pub extern "C" fn paranoia_send_file_json_keyring_with_progress(
     })
 }
 
+/// Отправить сообщение-заголовок фото-группы (мозаики): `group_id` + подпись
+/// (`caption` может быть пустой). Сами фото идут отдельными вызовами
+/// [`paranoia_send_photo_grouped_file_json_keyring_with_progress`] с тем же
+/// `group_id`. Возвращает JSON-массив с одним сообщением или NULL при ошибке.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_photo_group_json_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    group_id: *const c_char,
+    caption: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("send_error", || {
+        clear_last_error();
+        let group_id = ffi_try!(cstr_arg(group_id), invalid_argument_ptr());
+        let caption = cstr_arg(caption).unwrap_or_default();
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.send_photo_group(group_id, caption)) {
+                Ok(msg) => message_to_c_string(&msg),
+                Err(e) => {
+                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
+/// То же, что [`paranoia_send_file_json_keyring_with_progress`], но помечает
+/// вложение тегом `group_id` (фото отправляется в составе мозаики). Вид
+/// фиксируется как изображение. Возвращает JSON-массив сообщений или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_photo_grouped_file_json_keyring_with_progress(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    file_path: *const c_char,
+    mime_type: *const c_char,
+    group_id: *const c_char,
+    progress: Option<ProgressCallback>,
+    user_data: *mut std::ffi::c_void,
+) -> *mut c_char {
+    let user_data_addr = user_data as usize;
+    ffi_catch_ptr("send_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(file_path), invalid_argument_ptr());
+        let group_id = ffi_try!(cstr_arg(group_id), invalid_argument_ptr());
+        let mime_type = cstr_arg(mime_type).unwrap_or_default();
+        let filename = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        let mime_type = if mime_type.trim().is_empty() {
+            "image/jpeg".to_string()
+        } else {
+            mime_type
+        };
+
+        let on_progress = move |chunk_index: u32, total: u32| {
+            if let Some(cb) = progress {
+                cb(chunk_index, total, user_data_addr as *mut std::ffi::c_void);
+            }
+        };
+
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.send_photo_grouped_with_progress(
+                filename,
+                mime_type,
+                std::path::Path::new(&path),
+                group_id,
+                on_progress,
+            )) {
+                Ok(msgs) => messages_to_c_string(&msgs),
+                Err(e) => {
+                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
+/// Лимиты файлов с сервера (blob `info`): JSON `{max_history_file_size,
+/// large_file_max, ephemeral_retention_secs}` (байты/секунды) или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_blob_limits_json_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("blob_error", || {
+        clear_last_error();
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.blob_limits()) {
+                Ok(l) => {
+                    let v = serde_json::json!({
+                        "max_history_file_size": l.max_history_file_size,
+                        "large_file_max": l.large_file_max,
+                        "ephemeral_retention_secs": l.ephemeral_retention_secs,
+                    });
+                    json_value_to_c_string(v)
+                }
+                Err(e) => {
+                    set_last_error(&anyhow_error_chain(&e));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
+/// Отправить БОЛЬШОЙ файл эфемерно (вне истории, через blob-хранилище с TTL).
+/// Тело уходит чанками в blob, в историю пушится reference-сообщение. Прогресс —
+/// как у send_file_with_progress. Возвращает JSON-массив сообщений или NULL
+/// (`file_too_large`, если файл больше `large_file_max`).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_large_file_json_keyring_with_progress(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    file_path: *const c_char,
+    mime_type: *const c_char,
+    progress: Option<ProgressCallback>,
+    user_data: *mut std::ffi::c_void,
+) -> *mut c_char {
+    let user_data_addr = user_data as usize;
+    ffi_catch_ptr("send_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(file_path), invalid_argument_ptr());
+        let mime_type = cstr_arg(mime_type).unwrap_or_default();
+        let filename = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        let mime_type = if mime_type.trim().is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            mime_type
+        };
+        let on_progress = move |chunk_index: u32, total: u32| {
+            if let Some(cb) = progress {
+                cb(chunk_index, total, user_data_addr as *mut std::ffi::c_void);
+            }
+        };
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.send_large_file_path_with_progress(
+                filename,
+                mime_type,
+                std::path::Path::new(&path),
+                on_progress,
+            )) {
+                Ok(msgs) => messages_to_c_string(&msgs),
+                Err(e) => {
+                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
+/// Отправить файл с авто-выбором канала по размеру: история / эфемерно / отказ
+/// (`file_too_large`). C++-сторона зовёт ТОЛЬКО эту функцию для обычной отправки
+/// файла — порог и лимиты резолвит lib. Прогресс — как у send_file_with_progress.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_send_file_auto_json_keyring_with_progress(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    file_path: *const c_char,
+    mime_type: *const c_char,
+    progress: Option<ProgressCallback>,
+    user_data: *mut std::ffi::c_void,
+) -> *mut c_char {
+    let user_data_addr = user_data as usize;
+    ffi_catch_ptr("send_error", || {
+        clear_last_error();
+        let path = ffi_try!(cstr_arg(file_path), invalid_argument_ptr());
+        let mime_type = cstr_arg(mime_type).unwrap_or_default();
+        let filename = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        let mime_type = if mime_type.trim().is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            mime_type
+        };
+        let on_progress = move |chunk_index: u32, total: u32| {
+            if let Some(cb) = progress {
+                cb(chunk_index, total, user_data_addr as *mut std::ffi::c_void);
+            }
+        };
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.send_file_auto_with_progress(
+                filename,
+                mime_type,
+                std::path::Path::new(&path),
+                on_progress,
+            )) {
+                Ok(msgs) => messages_to_c_string(&msgs),
+                Err(e) => {
+                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
 /// Получить новые сообщения с сервера, выбирая ключ по start_seq из keyring JSON.
 /// Возвращает JSON-массив или NULL при ошибке. Освободить через paranoia_free_string.
 #[unsafe(no_mangle)]
@@ -890,6 +1133,45 @@ pub extern "C" fn paranoia_notify_count_keyring(
             keyring_json,
             -1,
             |h, dialogue| match h.rt.block_on(dialogue.notify_count()) {
+                Ok(count) => {
+                    unsafe { *out_count = count };
+                    0
+                }
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "notify_error",
+                    ));
+                    -1
+                }
+            },
+        )
+    })
+}
+
+/// Как [`paranoia_notify_count_keyring`], но НЕ считает сообщения, уже прочитанные
+/// мной на другом устройстве (базой берёт max(локальный seq, мой read-seq с
+/// сервера через arrived). Для сервиса уведомлений — не уведомлять о прочитанном.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_notify_unread_count_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    out_count: *mut u64,
+) -> i32 {
+    ffi_catch_i32("notify_error", || {
+        clear_last_error();
+        if out_count.is_null() {
+            return invalid_argument_i32();
+        }
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| match h.rt.block_on(dialogue.notify_unread_count()) {
                 Ok(count) => {
                     unsafe { *out_count = count };
                     0
@@ -1949,6 +2231,25 @@ fn message_to_json(m: &Message) -> serde_json::Value {
                 serde_json::json!(file.body_from_seq),
             );
             obj.insert("body_to_seq".into(), serde_json::json!(file.body_to_seq));
+            // Тег фото-группы (мозаики) — UI группирует вложения с общим group_id.
+            obj.insert("group_id".into(), serde_json::json!(file.group_id));
+            // Эфемерный большой файл: тело в blob-хранилище (по file_id), не в
+            // истории; скачивание ветвится на blob. expires_at — для «доступно до …».
+            obj.insert(
+                "ephemeral_file_id".into(),
+                serde_json::json!(file.ephemeral_file_id),
+            );
+            obj.insert(
+                "ephemeral_expires_at".into(),
+                serde_json::json!(file.ephemeral_expires_at),
+            );
+        }
+        MessageContent::PhotoGroup { group_id, caption } => {
+            obj.insert("kind".into(), serde_json::json!("photo_group"));
+            obj.insert("group_id".into(), serde_json::json!(group_id));
+            obj.insert("caption".into(), serde_json::json!(caption));
+            // text дублирует подпись — единообразно с прочими «текстовыми» видами.
+            obj.insert("text".into(), serde_json::json!(caption));
         }
         MessageContent::FileHeader {
             filename,

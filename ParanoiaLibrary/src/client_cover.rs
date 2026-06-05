@@ -21,6 +21,18 @@ pub trait ClientCover: Send + Sync + 'static {
         None
     }
 
+    /// Generic-маскировка произвольного вида (напр. `blob`): запечатать `inner`
+    /// по схеме вида профиля. `None` — профиль не активен или не содержит вида
+    /// (транспорт шлёт запрос плоско). Переопределяет только schema-cover.
+    fn wrap_kind(&self, _kind: &str, _inner: &[u8]) -> Option<Value> {
+        None
+    }
+
+    /// Обратное к [`wrap_kind`]: развернуть ответ вида `kind` во внутренние байты.
+    fn unwrap_kind(&self, _kind: &str, _body: &Value) -> Option<Vec<u8>> {
+        None
+    }
+
     fn wrap_push(&self, core: &CorePush) -> Result<Value>;
     fn wrap_pull(&self, core: &CorePull) -> Result<Value>;
     fn wrap_map(&self, core: &CoreMap) -> Result<Value>;

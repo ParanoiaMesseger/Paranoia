@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use super::admin::{self, AdminEnvelope};
+use super::blob::{self, BlobRequest};
 use super::reg::{self, RegRequest};
 
 fn cover_fail(msg: &str) -> Json<Value> {
@@ -85,4 +86,26 @@ pub async fn reg_gateway(
     let resp = reg::handle(State(Arc::clone(&state)), Json(req)).await;
     let value = serde_json::to_value(&resp.0).unwrap_or_else(|_| json!({}));
     seal_resp(&state, "reg_resp", &value)
+}
+
+/// `POST <profile.blob.path>` — замаскированный blob-запрос (эфемерные большие
+/// файлы). Разворачивает → `BlobRequest` → существующий blob-хендлер →
+/// запечатывает ответ видом `blob_resp`.
+pub async fn blob_gateway(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let Some(profile) = state.masking_profile.clone() else {
+        return cover_fail("masking profile not active");
+    };
+    let inner = match paranoia_cover::unwrap(&profile, "blob", &body) {
+        Ok(b) => b,
+        Err(_) => return cover_fail("bad cover"),
+    };
+    let req: BlobRequest = match serde_json::from_slice(&inner) {
+        Ok(r) => r,
+        Err(_) => return cover_fail("bad blob request"),
+    };
+    let resp = blob::do_blob(&state, req).await;
+    seal_resp(&state, "blob_resp", &resp)
 }

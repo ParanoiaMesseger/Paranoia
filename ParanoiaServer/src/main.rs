@@ -52,6 +52,8 @@ pub struct AppState {
     /// Активный masking-профиль (для cover admin/reg-трафика через шлюз). `None`
     /// → admin/reg идут плоско по фиксированным путям (как раньше).
     pub masking_profile: Option<Arc<MaskingProfile>>,
+    /// Anti-replay для blob-эндпоинта эфемерных файлов (LRU виденных nonce'ов).
+    pub blob_nonces: tokio::sync::Mutex<routes::blob::NonceGuard>,
 }
 
 #[tokio::main]
@@ -171,7 +173,25 @@ async fn main() -> anyhow::Result<()> {
         cover,
         call_signals,
         masking_profile: masking_profile.clone(),
+        blob_nonces: tokio::sync::Mutex::new(routes::blob::NonceGuard::new(100_000)),
     });
+
+    // Reaper эфемерных больших файлов: раз в минуту физически удаляет блобы,
+    // чей TTL (`ephemeral_retention_secs`) истёк. Падение задачи не валит сервер.
+    {
+        let store = Arc::clone(&state.store);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                match store.ephemeral_reap() {
+                    Ok(n) if n > 0 => info!("ephemeral reaper: removed {n} expired file(s)"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("ephemeral reaper error: {e}"),
+                }
+            }
+        });
+    }
 
     // Cover-эндпоинты: пути/методы из профиля (или встроенные). /reg, /arrived и
     // admin-роуты пока на фиксированных путях.
@@ -195,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
             nginx::Route { path: "/arrived".into(), exact: true },
             nginx::Route { path: sig_path.clone(), exact: true },
             nginx::Route { path: poll_path.clone(), exact: true },
+            nginx::Route { path: "/blob".into(), exact: true },
             nginx::Route { path: "/admin/".into(), exact: false },
         ];
         nginx::update(ncfg, &routes, port, nginx_reload_command.as_deref());
@@ -213,6 +234,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(&sig_path, on(sig_m, routes::call_signal::handle))
         .route(&poll_path, on(poll_m, routes::call_poll::handle))
+        // Плоский эндпоинт эфемерных больших файлов (как /reg — covered-вариант
+        // добавляется ниже, если профиль задаёт вид `blob`).
+        .route("/blob", put(routes::blob::handle))
         .merge(routes::admin::router());
 
     // Cover-шлюз для admin/reg: если профиль задаёт эти виды — маскированные
@@ -232,6 +256,13 @@ async fn main() -> anyhow::Result<()> {
                 on(method_filter(&spec.method), routes::cover_gateway::reg_gateway),
             );
             info!("reg cover-gateway at {}", spec.path);
+        }
+        if let Some(spec) = profile.kinds.get("blob") {
+            app = app.route(
+                &spec.path,
+                on(method_filter(&spec.method), routes::cover_gateway::blob_gateway),
+            );
+            info!("blob cover-gateway at {}", spec.path);
         }
     }
 

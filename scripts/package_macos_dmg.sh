@@ -46,11 +46,22 @@ VOLNAME="${VOLNAME:-Paranoia${VERSION:+ $VERSION}}"
 
 echo "package_macos_dmg: app=$APP out=$OUT volname=$VOLNAME"
 
-# 1. Ad-hoc переподпись (см. шапку про killed: 9 после macdeployqt).
-#    --force перезаписывает инвалидированные подписи, --deep проходит по
-#    вложенным фреймворкам/плагинам/dylib внутри bundle.
-echo "package_macos_dmg: ad-hoc codesign ..."
-codesign --force --deep --sign - --timestamp=none "$APP"
+# 1. Подпись .app. macdeployqt правит install_name → подписи инвалидируются
+#    (на Apple Silicon → "killed: 9" до main()), поэтому переподписываем ВСЕГДА.
+#    По умолчанию ad-hoc (--sign -) — достаточно для локального запуска. Если
+#    задан MACOS_SIGN_IDENTITY (имя сертификата Developer ID Application — только
+#    платный Apple Developer аккаунт) — подписываем им + hardened runtime
+#    (обязателен для нотаризации). Опц. MACOS_ENTITLEMENTS — путь к .entitlements.
+if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+  echo "package_macos_dmg: codesign Developer ID ($MACOS_SIGN_IDENTITY) + hardened runtime"
+  ENTITLEMENTS_ARG=()
+  [ -n "${MACOS_ENTITLEMENTS:-}" ] && ENTITLEMENTS_ARG=(--entitlements "$MACOS_ENTITLEMENTS")
+  codesign --force --deep --options runtime --timestamp \
+    "${ENTITLEMENTS_ARG[@]}" --sign "$MACOS_SIGN_IDENTITY" "$APP"
+else
+  echo "package_macos_dmg: ad-hoc codesign (без Developer ID — у скачавших будет Gatekeeper-карантин)"
+  codesign --force --deep --sign - --timestamp=none "$APP"
+fi
 codesign --verify --deep --strict "$APP" \
   && echo "package_macos_dmg: codesign verify OK" \
   || { echo "package_macos_dmg: codesign verify FAILED" >&2; exit 1; }
@@ -74,5 +85,28 @@ hdiutil create \
   "$OUT"
 
 test -f "$OUT" || { echo "package_macos_dmg: dmg was not created: $OUT" >&2; exit 1; }
+
+# 4. Нотаризация (опционально — нужен Developer ID + платный Apple-аккаунт).
+#    Включается, если в окружении заданы креды (CI-секреты). Иначе пропускаем —
+#    остаётся ad-hoc dmg (запуск после снятия карантина, см. macos_local_install.sh).
+#    Вариант 1: notarytool keychain-profile (`xcrun notarytool store-credentials`).
+#    Вариант 2: тройка Apple ID / Team ID / app-specific password.
+if [ -n "${MACOS_NOTARY_PROFILE:-}" ]; then
+  echo "package_macos_dmg: notarize via keychain profile '$MACOS_NOTARY_PROFILE' (ждём вердикт Apple)…"
+  xcrun notarytool submit "$OUT" --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$OUT"
+  echo "package_macos_dmg: notarized + stapled"
+elif [ -n "${MACOS_NOTARY_APPLE_ID:-}" ] && [ -n "${MACOS_NOTARY_TEAM_ID:-}" ] && [ -n "${MACOS_NOTARY_PASSWORD:-}" ]; then
+  echo "package_macos_dmg: notarize via Apple ID $MACOS_NOTARY_APPLE_ID (team $MACOS_NOTARY_TEAM_ID)…"
+  xcrun notarytool submit "$OUT" \
+    --apple-id "$MACOS_NOTARY_APPLE_ID" \
+    --team-id "$MACOS_NOTARY_TEAM_ID" \
+    --password "$MACOS_NOTARY_PASSWORD" --wait
+  xcrun stapler staple "$OUT"
+  echo "package_macos_dmg: notarized + stapled"
+else
+  echo "package_macos_dmg: нотаризация пропущена (нет MACOS_NOTARY_* / MACOS_SIGN_IDENTITY) — ad-hoc dmg"
+fi
+
 echo "package_macos_dmg: done -> $OUT"
 ls -lh "$OUT"

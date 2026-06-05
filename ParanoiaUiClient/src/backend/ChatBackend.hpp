@@ -36,9 +36,17 @@ public:
                                    const QString &replyText);
     Q_INVOKABLE void sendReaction(const QString &targetId, const QString &emoji);
     Q_INVOKABLE void sendFile(const QString &fileUrlOrPath);
+    // Отправить несколько фото как группу (мозаику) с общей подписью `caption`
+    // (может быть пустой). Каждое фото — отдельное image-сообщение с общим
+    // group_id; UI рендерит их мозаикой. Файлы крупнее лимита истории сюда
+    // передавать нельзя (вызывающая сторона должна отфильтровать).
+    Q_INVOKABLE void sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QString &caption);
     Q_INVOKABLE void fetchMessages();
     Q_INVOKABLE void saveAttachment(const QString &messageId, const QString &targetUrlOrPath);
     Q_INVOKABLE void ensureImagePreview(const QString &messageId);
+    /// Синхронно перерисовать модель из ТЕКУЩЕГО кэша (без FFI-раунда). Нужно
+    /// для мгновенного показа оптимистичной мозаики при старте отправки.
+    Q_INVOKABLE void emitCachedMessages();
     Q_INVOKABLE void deleteMessagesUntil(quint64 cutSeq);
     /// Удалить выделенные сообщения сразу на сервере и в локальной БД.
     /// `messageIds` — id'шники сообщений из модели чата. Для прикреплённых
@@ -83,6 +91,15 @@ signals:
     // отдельный sendFile-вызов (см. m_sendInFlightKeys), chunkIndex 1-based.
     // Если total <= chunkIndex — отправка завершена.
     void fileProgress(const QString &transferKey, quint32 chunkIndex, quint32 total);
+    // Старт отправки фото-группы: UI сразу рисует оптимистичную мозаику. `photos`
+    // — список QVariantMap{key, source(локальный file://), name}. Прогресс по
+    // каждому фото приходит через fileProgress(key, ...); по завершении реальные
+    // сообщения с тем же groupId заменяют оптимистичные плитки.
+    void photoGroupStarted(const QString &groupId, const QString &caption, const QVariantList &photos);
+    // Мобильный нативный пикер фото вернул выбор (1+ URI). QML берёт подпись из
+    // поля ввода и роутит как мультивыбор десктопа (sendSelectedPhotos):
+    // одно фото — обычной отправкой, несколько — мозаикой-группой.
+    void attachmentsPicked(const QStringList &uris);
     void dialogsChanged();
     void serverHistoryCleared(const QString &peer);
     void serverHistoryError(const QString &msg);
@@ -118,6 +135,12 @@ private:
     QTimer *m_activePollTimer;
     QSet<QString> m_sendInFlightKeys;
     QSet<QString> m_previewInFlightIds;
+    // Превью, для которых extract провалился безвозвратно (attachment_not_found):
+    // не запрашиваем повторно, иначе при каждом recompose снова дёргаем FFI.
+    QSet<QString> m_failedPreviewIds;
+    // Коалесинг обновления истории после готовности превью: десятки фото грузятся
+    // лавиной, без дебаунса каждый setBytes → loadHistory → recompose (мерцание).
+    bool m_previewRefreshPending = false;
     QMap<QString, qint64> m_recentSendAtMs;
     bool m_receiveInFlight          = false;
     bool m_receiveAgainAfterCurrent = false;

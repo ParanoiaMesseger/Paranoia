@@ -51,10 +51,37 @@ pub struct Config {
     /// только пишет файл и логирует «перезагрузите вручную».
     #[serde(default)]
     pub nginx_reload_command: Option<String>,
+    /// Верхняя граница файла, который кладётся В ИСТОРИЮ диалога (байты). Файлы
+    /// `<= max_history_file_size` шлются обычным чанкингом и хранятся постоянно.
+    /// По умолчанию 20 МиБ.
+    #[serde(default = "default_max_history_file_size")]
+    pub max_history_file_size: u64,
+    /// Жёсткая верхняя граница размера файла вообще (байты). Файлы в диапазоне
+    /// `(max_history_file_size .. large_file_max]` передаются ЭФЕМЕРНО (вне
+    /// истории, с TTL); файлы больше `large_file_max` отклоняются на клиенте.
+    /// По умолчанию 2 ГиБ.
+    #[serde(default = "default_large_file_max")]
+    pub large_file_max: u64,
+    /// Срок временного хранения эфемерных больших файлов «в ожидании скачивания»
+    /// (секунды). По истечении reaper физически удаляет блобы. По умолчанию 24 ч.
+    #[serde(default = "default_ephemeral_retention_secs")]
+    pub ephemeral_retention_secs: u64,
 }
 
 fn default_stun_bind() -> Option<String> {
     Some("0.0.0.0:3478".to_string())
+}
+
+fn default_max_history_file_size() -> u64 {
+    20 * 1024 * 1024
+}
+
+fn default_large_file_max() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+
+fn default_ephemeral_retention_secs() -> u64 {
+    24 * 60 * 60
 }
 
 impl Config {
@@ -125,6 +152,9 @@ impl Default for Config {
             masking_profile_path: None,
             nginx_config_path: None,
             nginx_reload_command: None,
+            max_history_file_size: default_max_history_file_size(),
+            large_file_max: default_large_file_max(),
+            ephemeral_retention_secs: default_ephemeral_retention_secs(),
         }
     }
 }

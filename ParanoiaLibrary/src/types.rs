@@ -33,6 +33,21 @@ pub struct FileAttachment {
     pub body_to_seq: u64,
     #[serde(default)]
     pub downloaded: bool,
+    /// Идентификатор фото-группы (мозаики). `Some` — вложение отправлено в составе
+    /// группы из нескольких фото с общей подписью; UI рендерит такие вложения
+    /// мозаикой под сообщением-заголовком `PhotoGroup` с тем же `group_id`.
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// `Some` → большой файл, переданный ЭФЕМЕРНО (вне истории): тело лежит во
+    /// временном blob-хранилище сервера под этим `file_id`, а не в seq-истории.
+    /// Скачивание идёт через blob-эндпоинт (см. [`crate::transport::Transport::blob`]),
+    /// а не history-pull. `body_from_seq/to_seq` для таких вложений не используются.
+    #[serde(default)]
+    pub ephemeral_file_id: Option<String>,
+    /// Unix-время (сек), до которого эфемерный файл доступен для скачивания (TTL
+    /// сервера). Для UI «доступно до …».
+    #[serde(default)]
+    pub ephemeral_expires_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +70,13 @@ pub enum MessageContent {
     File(FileAttachment),
     Image(FileAttachment),
     Voice(FileAttachment),
+    /// Заголовок фото-группы (мозаики): подпись (может быть пустой) + id группы.
+    /// Сами фото идут отдельными `Image`-сообщениями с тем же `group_id`. Сервер
+    /// о группировке не знает — это чисто клиентская семантика рендеринга.
+    PhotoGroup {
+        group_id: String,
+        caption: String,
+    },
     /// Заголовок файла. За ним сразу идут `chunks` body-пакетов FileChunk.
     FileHeader {
         transfer_id: String,
@@ -63,6 +85,10 @@ pub enum MessageContent {
         mime_type: String,
         total_size: usize,
         chunks: u32,
+        /// id фото-группы (если вложение отправлено мозаикой) — единственный
+        /// per-фото метаданный, доходящий до получателя по проводу.
+        #[serde(default)]
+        group_id: Option<String>,
     },
     /// Один чанк файла — сервер не знает что это
     FileChunk {

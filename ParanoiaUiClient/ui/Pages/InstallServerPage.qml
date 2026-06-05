@@ -58,17 +58,17 @@ Rectangle {
         }
 
         Flickable {
+            id: formFlick
             Layout.fillWidth:  true
             Layout.fillHeight: true
-            contentHeight:     innerCol.implicitHeight + 32
+            contentHeight:     Math.max(formFlick.height, innerCol.implicitHeight + 48)
             clip:              true
 
             ColumnLayout {
                 id:           innerCol
-                width:        parent.width
-                anchors.left: parent.left
-                anchors.right:parent.right
-                anchors.margins: 24
+                width:        Math.min(parent.width - 48, 560)
+                anchors.horizontalCenter: parent.horizontalCenter
+                y:            Math.max(24, (formFlick.height - implicitHeight) / 2)
                 spacing:      16
 
                 Item { Layout.preferredHeight: 8 }

@@ -117,19 +117,23 @@ Rectangle {
         }
 
         Flickable {
+            id: pinFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: contentCol.implicitHeight + 48
+            // Контент-область не ниже вьюпорта — чтобы можно было центрировать
+            // короткий контент; на узком экране (мобилка) растёт под скролл.
+            contentHeight: Math.max(pinFlick.height, contentCol.implicitHeight + root.contentMargin * 2)
             boundsBehavior: Flickable.StopAtBounds
             clip: true
 
             ColumnLayout {
                 id: contentCol
-                width: parent.width
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: root.contentMargin
+                // Центрируем по горизонтали и ограничиваем ширину; по ВЕРТИКАЛИ —
+                // по центру вьюпорта (тянуться вверх неудобно). Если контент выше
+                // экрана — прижимаемся к верху с отступом и скроллим.
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Math.max(root.contentMargin, (pinFlick.height - implicitHeight) / 2)
+                width: Math.min(parent.width - root.contentMargin * 2, 460)
                 spacing: 18
 
                 ParaInput {

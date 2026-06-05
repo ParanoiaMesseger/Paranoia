@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "paranoia-easy-cli"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "base64",
@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "paranoia-lib"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "argon2",

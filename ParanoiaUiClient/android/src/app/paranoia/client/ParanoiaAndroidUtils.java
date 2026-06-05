@@ -52,6 +52,10 @@ public final class ParanoiaAndroidUtils {
             // выбор фото без необходимости READ_MEDIA_IMAGES permission.
             intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
             intent.setType("image/*");
+            // Мультивыбор фото (для отправки мозаикой-каруселью). Лимит — min(10,
+            // системный максимум); >1 включает множественный выбор в пикере.
+            int max = Math.max(2, Math.min(10, MediaStore.getPickImagesMaxLimit()));
+            intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, max);
         } else {
             // Универсальный путь: ACTION_PICK с MediaStore CONTENT_URI — у всех
             // OEM открывается «Галерея» / Photos, а не файловый менеджер.
@@ -60,17 +64,20 @@ public final class ParanoiaAndroidUtils {
                     : MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
             intent = new Intent(Intent.ACTION_PICK, base);
             intent.setType(wantImage ? "image/*" : "video/*");
+            // Best-effort мультивыбор фото на <33 (часть OEM-галерей понимает).
+            if (wantImage) intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         }
         try {
             activity.startActivityForResult(intent,
                 wantImage ? REQUEST_PICK_IMAGE : REQUEST_PICK_VIDEO);
         } catch (Exception e) {
             Log.w(TAG, "Cannot launch media picker", e);
-            // Fallback: универсальный GET_CONTENT
+            // Fallback: универсальный GET_CONTENT (с мультивыбором для фото).
             try {
                 Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
                 fallback.setType(wantImage ? "image/*" : "video/*");
                 fallback.addCategory(Intent.CATEGORY_OPENABLE);
+                if (wantImage) fallback.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 activity.startActivityForResult(fallback,
                     wantImage ? REQUEST_PICK_IMAGE : REQUEST_PICK_VIDEO);
             } catch (Exception ignored) {}
@@ -82,6 +89,19 @@ public final class ParanoiaAndroidUtils {
         SharedPreferences prefs = context.getApplicationContext()
                 .getSharedPreferences(PICKER_PREFS, Context.MODE_PRIVATE);
         prefs.edit().putString(PICKER_PREF_URI, uri == null ? "" : uri).apply();
+    }
+
+    // Несколько выбранных вложений — храним тип ("img"/"vid") первой строкой,
+    // затем список URI, всё склеено через '\n'. C++ (consumePickedAttachment)
+    // разбивает: фото роутит через QML (подпись из поля ввода, мозаика при >1),
+    // видео — обычной отправкой по одному.
+    public static synchronized void storePickedAttachments(Context context, java.util.List<String> uris,
+                                                           boolean isImage) {
+        if (context == null || uris == null) return;
+        String joined = (isImage ? "img\n" : "vid\n") + android.text.TextUtils.join("\n", uris);
+        SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(PICKER_PREFS, Context.MODE_PRIVATE);
+        prefs.edit().putString(PICKER_PREF_URI, joined).apply();
     }
 
     public static synchronized String takePickedAttachment(Context context) {

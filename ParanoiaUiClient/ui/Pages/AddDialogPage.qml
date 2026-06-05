@@ -21,19 +21,21 @@ Rectangle {
         }
 
         Flickable {
+            id: formFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: contentCol.implicitHeight
+            contentHeight: Math.max(formFlick.height, contentCol.implicitHeight + 40)
             clip: true
 
             ColumnLayout {
                 id: contentCol
-                width: parent.width
+                // По горизонтали — по центру с ограничением ширины; по вертикали —
+                // по центру вьюпорта (ручной ввод не должен липнуть к верху).
+                // Контент выше экрана — от верха со скроллом.
+                width: Math.min(parent.width - 40, 460)
                 spacing: 16
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: 20
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Math.max(20, (formFlick.height - implicitHeight) / 2)
 
                 ParaInput {
                     id: newPeerInput

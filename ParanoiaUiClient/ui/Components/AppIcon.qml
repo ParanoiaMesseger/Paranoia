@@ -212,6 +212,15 @@ Canvas {
             return
         }
 
+        if (name === "chevronRight") {
+            ctx.beginPath()
+            ctx.moveTo(8.5, 5)
+            ctx.lineTo(15.5, 12)
+            ctx.lineTo(8.5, 19)
+            ctx.stroke()
+            return
+        }
+
         if (name === "arrowLeft") {
             ctx.beginPath()
             ctx.moveTo(19, 12)

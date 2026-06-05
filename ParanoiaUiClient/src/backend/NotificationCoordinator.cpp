@@ -259,7 +259,7 @@ void NotificationCoordinator::pollNotifications(PollMode mode)
             {
                 QMutexLocker locker(&target.session->ffiMutex);
                 if (!target.session->ffi) continue;
-                const int rc = target.session->ffi->notify_count_keyring(target.session->serverId, target.peerServerId,
+                const int rc = target.session->ffi->notify_unread_count_keyring(target.session->serverId, target.peerServerId,
                                                                          target.keyringJson, count);
                 if (rc != 0) {
                     anyFailed = true;
@@ -471,7 +471,7 @@ void NotificationCoordinator::runBackgroundPollFromService()
         {
             QMutexLocker locker(&target.session->ffiMutex);
             if (!target.session->ffi) continue;
-            rc = target.session->ffi->notify_count_keyring(target.session->serverId, target.peerServerId,
+            rc = target.session->ffi->notify_unread_count_keyring(target.session->serverId, target.peerServerId,
                                                            target.keyringJson, count);
         }
         if (rc != 0) {

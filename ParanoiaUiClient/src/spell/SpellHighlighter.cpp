@@ -3,6 +3,7 @@
 #include "SpellChecker.hpp"
 
 #include <QColor>
+#include <QDebug>
 #include <QQuickTextDocument>
 #include <QRegularExpression>
 #include <QSyntaxHighlighter>
@@ -49,10 +50,14 @@ public:
 protected:
     void highlightBlock(const QString &text) override
     {
+        // QQuickTextEdit НЕ рендерит underline-decoration из QSyntaxHighlighter,
+        // поэтому видимое подчёркивание рисует QML-оверлей (см. misspelledRanges +
+        // Canvas в ChatPage). Здесь формат всё же ставим — на случай платформ, где
+        // он рендерится, и чтобы документ нёс корректную разметку; вреда нет.
         if (!m_enabled || !m_checker.available()) return;
 
         QTextCharFormat errorFormat;
-        errorFormat.setUnderlineStyle(QTextCharFormat::SpellCheckUnderline);
+        errorFormat.setUnderlineStyle(QTextCharFormat::WaveUnderline);
         errorFormat.setUnderlineColor(QColor(QStringLiteral("#FF2738")));
 
         auto match = wordPattern().globalMatch(text);
@@ -138,6 +143,30 @@ QVariantMap SpellHighlighter::misspelledAt(int position, int maxSuggestions) con
         return result;
     }
     return {};
+}
+
+QVariantList SpellHighlighter::misspelledRanges() const
+{
+    QVariantList ranges;
+    if (!m_enabled || !m_highlighter || !m_textDocument) return ranges;
+    QTextDocument *doc = m_textDocument->textDocument();
+    if (!doc) return ranges;
+
+    const QString text = doc->toPlainText();
+    auto match = wordPattern().globalMatch(text);
+    while (match.hasNext()) {
+        const auto wordMatch = match.next();
+        const int start      = wordMatch.capturedStart();
+        const QString word   = wordMatch.captured();
+        if (start > 0 && (text[start - 1] == QLatin1Char('@') || text[start - 1] == QLatin1Char('#'))) continue;
+        if (word == QStringLiteral("http") || word == QStringLiteral("https")) continue;
+        if (!m_highlighter->isMisspelled(word)) continue;
+        QVariantMap r;
+        r[QStringLiteral("start")]  = start;
+        r[QStringLiteral("length")] = word.size();
+        ranges.append(r);
+    }
+    return ranges;
 }
 
 void SpellHighlighter::rebuildHighlighter()

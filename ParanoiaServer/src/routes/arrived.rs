@@ -66,12 +66,24 @@ pub async fn handle_get(
         return Json(fail(e));
     }
 
+    // Собственный read-seq запрашивающего (receipt_state(me, dialogue)). Нужен
+    // сервису уведомлений: «прочитано ли это сообщение мной на ДРУГОМ устройстве»
+    // — receipt_state(me) обновляется при pull на любом устройстве (см.
+    // routes/pull.rs::update_last_seq). Отдаём ВСЕГДА (это позиция самого
+    // запрашивающего, не утечка), независимо от его receipts_enabled.
+    let own_last_seq = state
+        .store
+        .receipt_state(&auth.username, &query.dialogue_id)
+        .map(|r| r.last_seq)
+        .unwrap_or(0);
+
     match state
         .store
         .receipt_state(&query.partner, &query.dialogue_id)
     {
         Ok(receipt) => Json(json!({
             "partner_last_seq": if receipt.receipts_enabled { json!(receipt.last_seq) } else { Value::Null },
+            "own_last_seq": own_last_seq,
             "ts": if receipt.updated_at == 0 { now_unix_ts() } else { receipt.updated_at },
         })),
         Err(e) => Json(fail(format!("{e}"))),

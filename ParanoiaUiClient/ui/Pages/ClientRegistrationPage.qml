@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
-import QtQuick.Dialogs
 import ParanoiaUiClient
 
 // Регистрация клиента. Поддерживает три источника параметров:
@@ -43,7 +42,7 @@ Rectangle {
     readonly property bool chooseVisible: !isCorporate && !manualMode && !imported
     // Раздел ввода адреса/имени/входа (частный/коммерческий/ручной).
     readonly property bool entryVisible: !isCorporate && !generating && (manualMode || imported)
-    readonly property bool cameraQrScan: MultimediaAvailable &&
+    readonly property bool cameraQrScan: MultimediaAvailable && CameraAvailable &&
         (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
 
     function tariffLabel(t) {
@@ -106,17 +105,17 @@ Rectangle {
     }
 
     // ── Источники профиля подключения ────────────────────────────────────────
-    FileDialog {
+    ParaFileDialog {
         id: paramsFileDialog
         title: "Выбрать профиль подключения"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Профиль подключения (*.json)", "JSON (*.json)", "Все файлы (*)"]
         onAccepted: root.applyParsed(Backend.parseConnectionBundle(Backend.urlToLocalPath(selectedFile)))
     }
-    FileDialog {
+    ParaFileDialog {
         id: paramsImageDialog
         title: "Выбрать изображение QR"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
         onAccepted: {
             const decoded = QrCodeUtils.decodeFromImage(Backend.urlToLocalPath(selectedFile))
@@ -124,10 +123,10 @@ Rectangle {
             root.applyBundleText(decoded.text)
         }
     }
-    FileDialog {
+    ParaFileDialog {
         id: corpBundleDialog
         title: "Выбрать корпоративный бандл"
-        fileMode: FileDialog.OpenFile
+        mode: "open"
         nameFilters: ["Paranoia bundle (*.json)", "JSON (*.json)", "Все файлы (*)"]
         onAccepted: {
             const res = Backend.importProfile(Backend.urlToLocalPath(selectedFile))
@@ -164,17 +163,19 @@ Rectangle {
         }
 
         Flickable {
+            id: regFlick
             Layout.fillWidth:  true
             Layout.fillHeight: true
-            contentHeight:     content.implicitHeight + 32
+            contentHeight:     Math.max(regFlick.height, content.implicitHeight + 32)
             clip:              true
 
             ColumnLayout {
                 id:             content
-                width:          parent.width
-                anchors.margins: 24
-                anchors.left:   parent.left
-                anchors.right:  parent.right
+                // По горизонтали — по центру с ограничением ширины; по вертикали —
+                // по центру вьюпорта (не липнуть к верху). Высокий контент — от верха.
+                anchors.horizontalCenter: parent.horizontalCenter
+                y:              Math.max(16, (regFlick.height - implicitHeight) / 2)
+                width:          Math.min(parent.width - 32, 520)
                 spacing:        16
 
                 Item { Layout.preferredHeight: 8 }

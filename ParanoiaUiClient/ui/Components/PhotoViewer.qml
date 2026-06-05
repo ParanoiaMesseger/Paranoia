@@ -17,19 +17,45 @@ Rectangle {
     readonly property real maxZoom: 5.0
     readonly property real doubleTapZoom: 2.5
 
+    // Галерея фото-вложений диалога: массив объектов {source, id, filename}
+    // и индекс текущего. Листание возможно, когда элементов больше одного.
+    property var items: []
+    property int index: -1
+    readonly property bool hasPrev: index > 0
+    readonly property bool hasNext: index >= 0 && index < items.length - 1
+    readonly property bool canSwipe: items.length > 1 && zoom <= 1.0001
+
     signal saveRequested(string messageId, string filename)
 
+    // Одиночное фото (обратная совместимость) — оборачиваем в галерею из 1 кадра.
     function open(path, id, name) {
+        openGallery([{ source: path,
+                       id: id || "",
+                       filename: name && name.length > 0 ? name : "attachment.bin" }], 0)
+    }
+
+    // Открыть галерею: list — массив {source, id, filename}, idx — стартовый кадр.
+    function openGallery(list, idx) {
+        items = list || []
+        visible = true
+        applyIndex(idx)
+        forceActiveFocus()
+    }
+
+    function applyIndex(idx) {
         zoomTransition.stop()
-        source = path
-        messageId = id || ""
-        filename = name && name.length > 0 ? name : "attachment.bin"
+        index = items.length > 0 ? Math.max(0, Math.min(items.length - 1, idx)) : -1
+        const it = (index >= 0) ? items[index] : null
+        source = it ? (it.source || "") : ""
+        messageId = it ? (it.id || "") : ""
+        filename = (it && it.filename && it.filename.length > 0) ? it.filename : "attachment.bin"
         zoom = 1.0
         photoFlick.contentX = 0
         photoFlick.contentY = 0
-        visible = true
-        forceActiveFocus()
     }
+
+    function showNext() { if (hasNext) applyIndex(index + 1) }
+    function showPrev() { if (hasPrev) applyIndex(index - 1) }
 
     function close() {
         zoomTransition.stop()
@@ -37,6 +63,8 @@ Rectangle {
         source = ""
         messageId = ""
         filename = "attachment.bin"
+        items = []
+        index = -1
         zoom = 1.0
         photoFlick.contentX = 0
         photoFlick.contentY = 0
@@ -116,6 +144,8 @@ Rectangle {
     }
 
     Keys.onEscapePressed: close()
+    Keys.onLeftPressed: showPrev()
+    Keys.onRightPressed: showNext()
 
     ParallelAnimation {
         id: zoomTransition
@@ -195,6 +225,80 @@ Rectangle {
         gesturePolicy: TapHandler.ReleaseWithinBounds
         onDoubleTapped: function(eventPoint) {
             root.toggleZoomAt(eventPoint.position.x, eventPoint.position.y)
+        }
+    }
+
+    // Горизонтальный свайп — листание галереи. Активен только без зума (когда
+    // photoFlick не перехватывает одно касание для панорамирования).
+    DragHandler {
+        target: null
+        enabled: root.canSwipe
+        xAxis.enabled: true
+        yAxis.enabled: false
+        onActiveChanged: {
+            if (!active) {
+                if (activeTranslation.x <= -60) root.showNext()
+                else if (activeTranslation.x >= 60) root.showPrev()
+            }
+        }
+    }
+
+    // ── Стрелки листания (десктоп/тач) ───────────────────────────────────
+    Rectangle {
+        id: prevButton
+        visible: root.hasPrev
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: 14
+        width: 44; height: 44; radius: 22
+        color: prevArea.containsMouse ? Theme.bgCard : Theme.bgInput
+        opacity: 0.92
+        border.width: 1; border.color: Theme.border
+        AppIcon {
+            anchors.centerIn: parent; width: 20; height: 20
+            name: "chevronLeft"; iconColor: Theme.textPrimary; strokeWidth: 2.2
+        }
+        MouseArea {
+            id: prevArea; anchors.fill: parent; hoverEnabled: true
+            onClicked: root.showPrev()
+        }
+    }
+
+    Rectangle {
+        id: nextButton
+        visible: root.hasNext
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.rightMargin: 14
+        width: 44; height: 44; radius: 22
+        color: nextArea.containsMouse ? Theme.bgCard : Theme.bgInput
+        opacity: 0.92
+        border.width: 1; border.color: Theme.border
+        AppIcon {
+            anchors.centerIn: parent; width: 20; height: 20
+            name: "chevronRight"; iconColor: Theme.textPrimary; strokeWidth: 2.2
+        }
+        MouseArea {
+            id: nextArea; anchors.fill: parent; hoverEnabled: true
+            onClicked: root.showNext()
+        }
+    }
+
+    // Счётчик «i / n».
+    Rectangle {
+        visible: root.items.length > 1
+        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottomMargin: 18
+        width: counterText.implicitWidth + 24; height: 30; radius: 15
+        color: Theme.bgInput; opacity: 0.92
+        border.width: 1; border.color: Theme.border
+        Text {
+            id: counterText
+            anchors.centerIn: parent
+            text: (root.index + 1) + " / " + root.items.length
+            color: Theme.textPrimary; font.family: Theme.fontFamily
+            font.pixelSize: Theme.fontSm
         }
     }
 

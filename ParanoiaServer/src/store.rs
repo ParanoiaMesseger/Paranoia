@@ -247,19 +247,24 @@ impl PacketStore {
         self.db.write(batch).context("RocksDB write batch failed")
     }
 
-    /// Перечислить все диалоги в хранилище как `(dialogue_id, last_seq)`.
+    /// Перечислить все диалоги в хранилище как `(dialogue_id, last_seq, total_bytes)`.
+    ///
+    /// `total_bytes` — суммарный размер value всех пакетов диалога на диске
+    /// (compression выключен, см. `open`, поэтому это байты «как лежат»). Значение
+    /// и так материализуется итератором, так что подсчёт практически бесплатен.
     ///
     /// Служебные ключи `receipt:*` пропускаются. Ключи RocksDB отсортированы
     /// лексикографически, а `dialogue_id` имеет фиксированную длину (hex SHA256)
     /// с zero-padded seq, поэтому все пакеты одного диалога идут подряд.
-    pub fn list_dialogues(&self) -> Result<Vec<(String, u64)>> {
-        let mut result: Vec<(String, u64)> = Vec::new();
+    pub fn list_dialogues(&self) -> Result<Vec<(String, u64, u64)>> {
+        let mut result: Vec<(String, u64, u64)> = Vec::new();
         let mut current_id: Option<String> = None;
         let mut current_last: u64 = 0;
+        let mut current_bytes: u64 = 0;
 
         let iter = self.db.iterator(IteratorMode::Start);
         for item in iter {
-            let (key_bytes, _) = item.context("RocksDB iterator error")?;
+            let (key_bytes, val_bytes) = item.context("RocksDB iterator error")?;
             let key_str = std::str::from_utf8(&key_bytes).context("Non-UTF8 key in RocksDB")?;
             if key_str.starts_with("receipt:") {
                 continue;
@@ -270,23 +275,26 @@ impl PacketStore {
             let Ok(seq) = seq_str.parse::<u64>() else {
                 continue;
             };
+            let val_len = val_bytes.len() as u64;
             match current_id.as_deref() {
                 Some(cur) if cur == id => {
                     if seq > current_last {
                         current_last = seq;
                     }
+                    current_bytes = current_bytes.saturating_add(val_len);
                 }
                 _ => {
                     if let Some(prev) = current_id.take() {
-                        result.push((prev, current_last));
+                        result.push((prev, current_last, current_bytes));
                     }
                     current_id = Some(id.to_string());
                     current_last = seq;
+                    current_bytes = val_len;
                 }
             }
         }
         if let Some(prev) = current_id.take() {
-            result.push((prev, current_last));
+            result.push((prev, current_last, current_bytes));
         }
         Ok(result)
     }
@@ -338,6 +346,133 @@ impl PacketStore {
             .put(key, value)
             .context("RocksDB put receipt failed")
     }
+
+    // ── Эфемерное хранилище больших файлов ────────────────────────────────
+    //
+    // Большие файлы (в диапазоне (max_history_file_size .. large_file_max])
+    // НЕ попадают в историю диалога: они лежат в отдельном пространстве ключей
+    // `eph:<dialogue_id>:<file_id>:<chunk>` с метазаписью `ephmeta:<did>:<fid>`,
+    // несущей срок жизни `expires_at`. Reaper физически удаляет просроченные.
+    // Сервер видит только шифр-блобы (E2E), про содержимое ничего не знает.
+
+    /// Сохранить один чанк эфемерного файла и (пере)записать метазапись с TTL.
+    /// `retention_secs` — срок «ожидания скачивания» из конфига сервера.
+    pub fn ephemeral_put_chunk(
+        &self,
+        dialogue_id: &str,
+        file_id: &str,
+        chunk_index: u32,
+        total_chunks: u32,
+        total_size: u64,
+        data: &[u8],
+        retention_secs: u64,
+    ) -> Result<()> {
+        let chunk_key = make_eph_chunk_key(dialogue_id, file_id, chunk_index);
+        self.db
+            .put(&chunk_key, data)
+            .context("RocksDB put ephemeral chunk failed")?;
+        let meta = EphemeralMeta {
+            chunk_count: total_chunks,
+            total_size,
+            expires_at: now_unix_ts().saturating_add(retention_secs),
+        };
+        let meta_key = make_eph_meta_key(dialogue_id, file_id);
+        self.db
+            .put(&meta_key, serde_json::to_vec(&meta)?)
+            .context("RocksDB put ephemeral meta failed")
+    }
+
+    /// Метазапись эфемерного файла (если есть и не просрочена).
+    pub fn ephemeral_meta(&self, dialogue_id: &str, file_id: &str) -> Result<Option<EphemeralMeta>> {
+        let key = make_eph_meta_key(dialogue_id, file_id);
+        let Some(value) = self.db.get(&key)? else {
+            return Ok(None);
+        };
+        let meta: EphemeralMeta = serde_json::from_slice(&value).context("Bad ephemeral meta")?;
+        if meta.expires_at <= now_unix_ts() {
+            return Ok(None);
+        }
+        Ok(Some(meta))
+    }
+
+    /// Получить один чанк эфемерного файла (если файл существует и не просрочен).
+    pub fn ephemeral_get_chunk(
+        &self,
+        dialogue_id: &str,
+        file_id: &str,
+        chunk_index: u32,
+    ) -> Result<Option<Vec<u8>>> {
+        if self.ephemeral_meta(dialogue_id, file_id)?.is_none() {
+            return Ok(None);
+        }
+        let key = make_eph_chunk_key(dialogue_id, file_id, chunk_index);
+        Ok(self.db.get(&key)?)
+    }
+
+    /// Удалить все просроченные эфемерные файлы (метазапись + все чанки).
+    /// Возвращает число удалённых файлов. Вызывается фоновым reaper'ом.
+    pub fn ephemeral_reap(&self) -> Result<u64> {
+        let now = now_unix_ts();
+        let mut expired: Vec<String> = Vec::new(); // "<did>:<fid>"
+        let iter = self.db.iterator(IteratorMode::From(
+            EPH_META_PREFIX.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
+        for item in iter {
+            let (key_bytes, val_bytes) = item.context("RocksDB iterator error")?;
+            let key_str = std::str::from_utf8(&key_bytes).context("Non-UTF8 key")?;
+            let Some(suffix) = key_str.strip_prefix(EPH_META_PREFIX) else {
+                break; // вышли за пределы ephmeta: — ключи отсортированы
+            };
+            let expires_at = serde_json::from_slice::<EphemeralMeta>(&val_bytes)
+                .map(|m| m.expires_at)
+                .unwrap_or(0);
+            if expires_at <= now {
+                expired.push(suffix.to_string());
+            }
+        }
+
+        let mut removed = 0u64;
+        for did_fid in expired {
+            let mut batch = WriteBatch::default();
+            batch.delete(format!("{EPH_META_PREFIX}{did_fid}").as_bytes());
+            // Все чанки файла: префикс `eph:<did>:<fid>:`.
+            let chunk_prefix = format!("{EPH_CHUNK_PREFIX}{did_fid}:");
+            let iter = self.db.iterator(IteratorMode::From(
+                chunk_prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
+            for item in iter {
+                let (key_bytes, _) = item.context("RocksDB iterator error")?;
+                let key_str = std::str::from_utf8(&key_bytes).context("Non-UTF8 key")?;
+                if !key_str.starts_with(&chunk_prefix) {
+                    break;
+                }
+                batch.delete(key_bytes);
+            }
+            self.db.write(batch).context("RocksDB ephemeral reap failed")?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EphemeralMeta {
+    pub chunk_count: u32,
+    pub total_size: u64,
+    pub expires_at: u64,
+}
+
+const EPH_CHUNK_PREFIX: &str = "eph:";
+const EPH_META_PREFIX: &str = "ephmeta:";
+
+fn make_eph_chunk_key(dialogue_id: &str, file_id: &str, chunk_index: u32) -> String {
+    format!("{EPH_CHUNK_PREFIX}{dialogue_id}:{file_id}:{chunk_index:020}")
+}
+
+fn make_eph_meta_key(dialogue_id: &str, file_id: &str) -> String {
+    format!("{EPH_META_PREFIX}{dialogue_id}:{file_id}")
 }
 
 fn make_key(dialogue_id: &str, seq: u64) -> String {
@@ -400,6 +535,42 @@ mod tests {
         for &seq in seqs {
             store.push(dialogue, seq, &[0xAB]).expect("push");
         }
+    }
+
+    #[test]
+    fn ephemeral_roundtrip_and_ttl() {
+        let (_tmp, store) = open_store();
+        let did = "a".repeat(64);
+        let fid = "f00dfeed";
+        // Свежий файл (TTL час): мета и чанк доступны.
+        store
+            .ephemeral_put_chunk(&did, fid, 0, 2, 1000, b"chunk-zero", 3600)
+            .expect("put");
+        store
+            .ephemeral_put_chunk(&did, fid, 1, 2, 1000, b"chunk-one", 3600)
+            .expect("put");
+        let meta = store.ephemeral_meta(&did, fid).unwrap().expect("meta");
+        assert_eq!(meta.chunk_count, 2);
+        assert_eq!(meta.total_size, 1000);
+        assert_eq!(
+            store.ephemeral_get_chunk(&did, fid, 0).unwrap().as_deref(),
+            Some(&b"chunk-zero"[..])
+        );
+
+        // Эфемерные ключи не попадают в перечисление диалогов (не история).
+        assert!(store.list_dialogues().unwrap().is_empty());
+
+        // Просроченный файл (TTL=0): мета/чанки уже недоступны, reaper их удаляет.
+        let did2 = "b".repeat(64);
+        store
+            .ephemeral_put_chunk(&did2, "dead", 0, 1, 4, b"gone", 0)
+            .expect("put");
+        assert!(store.ephemeral_meta(&did2, "dead").unwrap().is_none());
+        assert!(store.ephemeral_get_chunk(&did2, "dead", 0).unwrap().is_none());
+        let removed = store.ephemeral_reap().unwrap();
+        assert_eq!(removed, 1, "reaper удаляет один просроченный файл");
+        // Не-просроченный файл reaper не трогает.
+        assert!(store.ephemeral_meta(&did, fid).unwrap().is_some());
     }
 
     #[test]
@@ -600,7 +771,8 @@ mod tests {
 
         let mut got = store.list_dialogues().unwrap();
         got.sort();
-        assert_eq!(got, vec![(a.clone(), 7), (b.clone(), 5)]);
+        // По 1 байту (0xAB) на пакет: у `a` — 4 пакета, у `b` — 2.
+        assert_eq!(got, vec![(a.clone(), 7, 4), (b.clone(), 5, 2)]);
     }
 
     #[test]

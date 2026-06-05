@@ -85,6 +85,8 @@ pub struct CoreArrivedSet {
 #[derive(Debug, Clone)]
 pub struct ArrivedResponse {
     pub partner_last_seq: Option<u64>,
+    /// Собственный read-seq запрашивающего (receipt_state(me) на сервере).
+    pub own_last_seq: u64,
     pub ts: u64,
 }
 
@@ -307,6 +309,25 @@ impl Transport {
         cover.unwrap_call_poll_response(&resp)
     }
 
+    /// Отправить blob-запрос (эфемерные большие файлы) и вернуть развёрнутый
+    /// JSON-ответ. Если активный профиль содержит вид `blob` — запрос идёт
+    /// замаскированным на профильный путь (ответ разворачивается как `blob_resp`);
+    /// иначе — плоско на `/blob`.
+    pub async fn blob(&self, body: &Value) -> Result<Value> {
+        let cover = self.current_cover();
+        let inner = serde_json::to_vec(body)?;
+        match cover.wrap_kind("blob", &inner) {
+            Some(covered) => {
+                let resp = self.cover_send(&cover, "blob", "/blob", &covered).await?;
+                match cover.unwrap_kind("blob_resp", &resp) {
+                    Some(plain) => Ok(serde_json::from_slice(&plain)?),
+                    None => Ok(resp),
+                }
+            }
+            None => self.put_json("/blob", body).await,
+        }
+    }
+
     pub async fn arrived_get(&self, core: &CoreArrivedGet) -> Result<ArrivedResponse> {
         let auth = self
             .masking
@@ -331,8 +352,12 @@ impl Transport {
             ),
         };
         let ts = resp.get("ts").and_then(Value::as_u64).unwrap_or(0);
+        // own_last_seq — мой собственный read-seq на сервере (обновляется при pull
+        // на любом устройстве). Старый сервер поля не отдаёт → 0 (нейтрально).
+        let own_last_seq = resp.get("own_last_seq").and_then(Value::as_u64).unwrap_or(0);
         Ok(ArrivedResponse {
             partner_last_seq,
+            own_last_seq,
             ts,
         })
     }

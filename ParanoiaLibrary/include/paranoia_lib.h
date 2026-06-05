@@ -106,6 +106,36 @@ char *paranoia_send_file_json_keyring_with_progress(ParanoiaHandle *h, CSTR user
                                                     CSTR keyring_json, CSTR file_path, CSTR mime_type,
                                                     paranoia_progress_callback progress, void *user_data);
 
+// ── Фото-группы (мозаика из нескольких фото с общей подписью)
+// Заголовок группы: group_id + caption (может быть пустой). Сами фото шлются
+// отдельными вызовами grouped-with-progress с тем же group_id.
+char *paranoia_send_photo_group_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
+                                             CSTR group_id, CSTR caption);
+
+// Одно фото в составе группы: как send_file_with_progress, но с тегом group_id
+// (вид фиксируется как изображение).
+char *paranoia_send_photo_grouped_file_json_keyring_with_progress(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
+                                                                  CSTR keyring_json, CSTR file_path, CSTR mime_type,
+                                                                  CSTR group_id, paranoia_progress_callback progress,
+                                                                  void *user_data);
+
+// ── Эфемерные большие файлы (вне истории, blob-хранилище с TTL)
+// Лимиты файлов с сервера: JSON {max_history_file_size, large_file_max,
+// ephemeral_retention_secs} (байты/секунды) или NULL.
+char *paranoia_blob_limits_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json);
+
+// Отправить большой файл эфемерно (тело в blob, в историю — reference-сообщение).
+// NULL при ошибке (last_error="file_too_large", если больше large_file_max).
+char *paranoia_send_large_file_json_keyring_with_progress(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
+                                                          CSTR keyring_json, CSTR file_path, CSTR mime_type,
+                                                          paranoia_progress_callback progress, void *user_data);
+
+// Авто-выбор канала по размеру (история / эфемерно / отказ). C++ зовёт ЭТУ
+// функцию для обычной отправки файла — порог резолвит lib.
+char *paranoia_send_file_auto_json_keyring_with_progress(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
+                                                         CSTR keyring_json, CSTR file_path, CSTR mime_type,
+                                                         paranoia_progress_callback progress, void *user_data);
+
 // Получить новые сообщения с сервера.
 // Возвращает JSON-массив или NULL при сетевой ошибке.
 // Пустой массив [] — нет новых сообщений.
@@ -116,6 +146,11 @@ char *paranoia_receive_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR
 // Проверить количество новых сообщений без загрузки payload.
 // Возвращает 0 при успехе и пишет результат в out_count.
 int paranoia_notify_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, uint64_t *out_count);
+
+// Как notify_count, но без учёта сообщений, уже прочитанных мной на другом
+// устройстве (база = max(локальный seq, мой read-seq с сервера через arrived).
+int paranoia_notify_unread_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
+                                         uint64_t *out_count);
 
 // Полностью stateless проверка notify_count для notifications-сервиса. Не
 // открывает SQLCipher и не трогает vault. Все нужные параметры передаются

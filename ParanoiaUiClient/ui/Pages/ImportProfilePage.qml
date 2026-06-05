@@ -23,14 +23,19 @@ Rectangle {
         }
 
         ScrollView {
+            id: importScroll
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentWidth: availableWidth
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            // Вертикальное центрирование короткого контента (не липнет к верху).
+            topPadding: Math.max(0, (height - importCol.implicitHeight) / 2)
 
             ColumnLayout {
-                width: parent.width
+                id: importCol
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Math.min(parent.width - 32, 560)
                 spacing: 16
 
                 Item { Layout.preferredHeight: 8 }

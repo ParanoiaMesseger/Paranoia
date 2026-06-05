@@ -154,17 +154,17 @@ Rectangle {
         }
 
         Flickable {
+            id: formFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
-            contentHeight: contentCol.implicitHeight + 32
+            contentHeight: Math.max(formFlick.height, contentCol.implicitHeight + 48)
             clip: true
 
             ColumnLayout {
                 id: contentCol
-                width: parent.width
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.margins: 24
+                width: Math.min(parent.width - 48, 560)
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Math.max(24, (formFlick.height - implicitHeight) / 2)
                 spacing: 16
 
                 Item { Layout.preferredHeight: 8 }
@@ -355,16 +355,12 @@ Rectangle {
                 }
 
                 // ── Резервные TURN-серверы (только для клиентских профилей) ──
-                Item { Layout.preferredHeight: 16; visible: root.targetType === "client" }
-
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 1
                     color: Theme.border
                     visible: root.targetType === "client"
                 }
-
-                Item { Layout.preferredHeight: 8; visible: root.targetType === "client" }
 
                 Text {
                     Layout.fillWidth: true

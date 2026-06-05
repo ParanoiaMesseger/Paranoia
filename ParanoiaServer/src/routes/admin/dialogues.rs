@@ -21,7 +21,9 @@ pub async fn list(
             let count = list.len();
             let dialogues: Vec<Value> = list
                 .into_iter()
-                .map(|(id, last)| json!({ "dialogue_id": id, "last_seq": last }))
+                .map(|(id, last, bytes)| {
+                    json!({ "dialogue_id": id, "last_seq": last, "total_bytes": bytes })
+                })
                 .collect();
             Json(json!({ "success": true, "count": count, "dialogues": dialogues }))
         }
@@ -55,7 +57,7 @@ pub async fn prune(
     };
 
     let mut pruned: Vec<String> = Vec::new();
-    for (id, _last) in all {
+    for (id, _last, _bytes) in all {
         if valid.contains(&id) {
             continue;
         }

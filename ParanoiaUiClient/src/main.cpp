@@ -31,6 +31,13 @@
 #include "backend/VersionInfoBackend.hpp"
 #include "platform/PlatformNotifications.hpp"
 #include "spell/SpellChecker.hpp"
+#if defined(DESKTOP_OS)
+#include "backend/NativeFileDialog.hpp"
+#endif
+#if PARANOIA_HAS_QT_MULTIMEDIA
+#include <QCameraDevice>
+#include <QMediaDevices>
+#endif
 #include <QPixmapCache>
 
 #if PARANOIA_HAS_VOIP
@@ -67,6 +74,13 @@ int main(int argc, char *argv[])
 #endif
 #if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
     QGuiApplication::setDesktopFileName(QStringLiteral("app.paranoia.client"));
+    // Файловый диалог на GNOME: по умолчанию Qt идёт через xdg-desktop-portal
+    // (D-Bus → отдельный процесс GTK-chooser с миниатюрами/GVfs/recent) — открытие
+    // ощутимо тормозит, особенно первое. Прямая тема gtk3 даёт нативный GTK-диалог
+    // в самом процессе, без портала → открывается мгновенно. Ставим, только если
+    // пользователь не задал тему сам (иначе уважаем его выбор).
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORMTHEME"))
+        qputenv("QT_QPA_PLATFORMTHEME", QByteArrayLiteral("gtk3"));
 #endif
 
 #if PARANOIA_DESKTOP_TRAY
@@ -152,8 +166,23 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("Chat", &chatBackend);
     engine.rootContext()->setContextProperty("Notifications", &notifications);
     engine.rootContext()->setContextProperty("VersionInfo", &versionInfoBackend);
+#if defined(DESKTOP_OS)
+    // Нативный системный файловый диалог (QtWidgets QFileDialog) — QML-обёртки Qt
+    // на macOS 26 не выводят панель на экран. См. NativeFileDialog.hpp / ParaFileDialog.qml.
+    NativeFileDialog nativeFileDialog;
+    engine.rootContext()->setContextProperty("FileDialogs", &nativeFileDialog);
+#endif
     engine.rootContext()->setContextProperty("VirtualKeyboardAvailable", PARANOIA_HAS_QT_VIRTUAL_KEYBOARD != 0);
     engine.rootContext()->setContextProperty("MultimediaAvailable", PARANOIA_HAS_QT_MULTIMEDIA != 0);
+    // Реально ли есть камера в системе (для выбора «сканировать QR камерой» vs
+    // «считать QR из файла»). На macOS без камеры (напр. Mac mini) сканер падал
+    // с «нет камеры» без фоллбэка на файл — см. cameraQrScan в QR-страницах.
+#if PARANOIA_HAS_QT_MULTIMEDIA
+    const bool cameraAvailable = !QMediaDevices::videoInputs().isEmpty();
+#else
+    const bool cameraAvailable = false;
+#endif
+    engine.rootContext()->setContextProperty("CameraAvailable", cameraAvailable);
     engine.rootContext()->setContextProperty("VoIPAvailable", PARANOIA_HAS_VOIP != 0);
     engine.rootContext()->setContextProperty("VideoAvailable", PARANOIA_HAS_VIDEO != 0);
     engine.rootContext()->setContextProperty("DesktopTrayEnabled", DesktopTray::desktopTrayEnabled());
