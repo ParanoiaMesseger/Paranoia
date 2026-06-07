@@ -53,20 +53,20 @@ Rectangle {
                     root.errorText = ""
                     break
                 case 1:
-                    root.errorText = "Неверный PIN"
+                    root.errorText = qsTr("Неверный PIN")
                     root.pin = ""
                     pinInput.text = ""
                     root.refreshLockout()
                     break
                 case 2:
-                    root.errorText = "Слишком много неверных попыток — подождите"
+                    root.errorText = qsTr("Слишком много неверных попыток — подождите")
                     root.refreshLockout()
                     break
                 case 3:
-                    root.errorText = "PIN ещё не установлен"
+                    root.errorText = qsTr("PIN ещё не установлен")
                     break
                 default:
-                    root.errorText = "Внутренняя ошибка"
+                    root.errorText = qsTr("Внутренняя ошибка")
             }
         }
     }
@@ -96,9 +96,9 @@ Rectangle {
 
     function fmtLockout(secs) {
         if (secs <= 0) return ""
-        if (secs < 60) return secs + " сек"
-        if (secs < 3600) return Math.ceil(secs / 60) + " мин"
-        return Math.ceil(secs / 3600) + " ч"
+        if (secs < 60) return qsTr("%1 сек").arg(secs)
+        if (secs < 3600) return qsTr("%1 мин").arg(Math.ceil(secs / 60))
+        return qsTr("%1 ч").arg(Math.ceil(secs / 3600))
     }
 
     onPinChanged: {
@@ -112,7 +112,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Введите PIN-код"
+            title: qsTr("Введите PIN-код")
             showBack: false
         }
 
@@ -139,9 +139,12 @@ Rectangle {
                 ParaInput {
                     id: pinInput
                     Layout.fillWidth: true
-                    label: "PIN-код"
-                    placeholder: "Минимум " + root.minDigits + " цифры"
+                    label: qsTr("PIN-код")
+                    placeholder: qsTr("Минимум %1 цифры").arg(root.minDigits)
                     echoMode: TextInput.Password
+                    // На мобильных гасим виртуальную клавиатуру Qt — ввод PIN
+                    // идёт только через собственный экранный keypad ниже.
+                    readOnly: Qt.platform.os === "android" || Qt.platform.os === "ios"
                     hasError: root.errorText.length > 0
                     errorText: root.errorText
                     enabled: !root.busy && root.lockoutSeconds === 0
@@ -180,7 +183,7 @@ Rectangle {
 
                     Text {
                         anchors.centerIn: parent
-                        text: "Подождите ещё " + root.fmtLockout(root.lockoutSeconds)
+                        text: qsTr("Подождите ещё %1").arg(root.fmtLockout(root.lockoutSeconds))
                         color: Theme.error
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.fontSm
@@ -244,7 +247,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: root.busy ? "Проверка..." : "Разблокировать"
+                    text: root.busy ? qsTr("Проверка...") : qsTr("Разблокировать")
                     enabled: !root.busy && root.lockoutSeconds === 0 && root.pin.length >= root.minDigits
                     onClicked: root.confirmPin()
                 }

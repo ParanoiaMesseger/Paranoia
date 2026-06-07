@@ -31,17 +31,17 @@ Rectangle {
 
     // Список шагов установки
     readonly property var steps: [
-        "Генерация ключей администратора",
-        "Подключение по SSH",
-        "Создание /opt/Paranoia и конфигурации",
-        "Установка nginx",
-        "Получение TLS-сертификата",
-        "Настройка nginx → Paranoia",
-        "Загрузка paranoia-server",
-        "Регистрация systemd-сервиса",
-        "Запуск сервера",
-        "Проверка соединения",
-        "Добавление сервера в список"
+        qsTr("Генерация ключей администратора"),
+        qsTr("Подключение по SSH"),
+        qsTr("Создание /opt/Paranoia и конфигурации"),
+        qsTr("Установка nginx"),
+        qsTr("Получение TLS-сертификата"),
+        qsTr("Настройка nginx → Paranoia"),
+        qsTr("Загрузка paranoia-server"),
+        qsTr("Регистрация systemd-сервиса"),
+        qsTr("Запуск сервера"),
+        qsTr("Проверка соединения"),
+        qsTr("Добавление сервера в список")
     ]
 
     property var stepStatuses: Array(steps.length).fill(0)
@@ -53,7 +53,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title:            "Установить свой сервер"
+            title:            qsTr("Установить свой сервер")
             onBackClicked:    root.back()
         }
 
@@ -77,21 +77,21 @@ Rectangle {
                 ParaInput {
                     id:          domainInput
                     Layout.fillWidth: true
-                    label:       "Домен (для TLS)"
+                    label:       qsTr("Домен (для TLS)")
                     placeholder: "example.com"
                 }
 
                 ParaInput {
                     id:          ipInput
                     Layout.fillWidth: true
-                    label:       "IP-адрес"
+                    label:       qsTr("IP-адрес")
                     placeholder: "192.168.1.1"
                 }
 
                 ParaInput {
                     id:          usernameInput
                     Layout.fillWidth: true
-                    label:       "SSH-пользователь"
+                    label:       qsTr("SSH-пользователь")
                     placeholder: "root"
                     text:        "root"
                 }
@@ -99,7 +99,7 @@ Rectangle {
                 ParaInput {
                     id:          passwordInput
                     Layout.fillWidth: true
-                    label:       "SSH-пароль"
+                    label:       qsTr("SSH-пароль")
                     placeholder: "••••••••"
                     echoMode:    TextInput.Password
                 }
@@ -107,7 +107,7 @@ Rectangle {
                 ParaInput {
                     id:          portInput
                     Layout.fillWidth: true
-                    label:       "Порт сервера Paranoia"
+                    label:       qsTr("Порт сервера Paranoia")
                     placeholder: "1455"
                     text:        "1455"
                 }
@@ -165,7 +165,7 @@ Rectangle {
                 // ── Кнопка ───────────────────────────────────
                 ParaButton {
                     Layout.fillWidth: true
-                    text:             root.isInstalling ? "Установка…" : "Установить"
+                    text:             root.isInstalling ? qsTr("Установка…") : qsTr("Установить")
                     enabled:          !root.isInstalling
                     onClicked: {
                         root.isInstalling = true

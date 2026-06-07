@@ -8,6 +8,10 @@ import QtQuick.Layouts
 
 KeyboardLayout {
     inputMode: InputEngine.InputMode.Latin
+    // inputMethod НЕ задаём: движок берёт дефолтный HunspellInputMethod (когда
+    // qtvkb собран с hunspell — см. rebuild_qtvkb_hunspell.sh), который и даёт
+    // строку подсказок слов. Явно задать нельзя: HunspellInputMethod не
+    // QML-инстанцируемый тип (createQml@ static iOS → "is not a type").
     keyWeight: 160
     readonly property real normalKeyWidth: normalKey.width
     readonly property real functionKeyWidth: mapFromItem(normalKey, normalKey.width / 2, 0).x

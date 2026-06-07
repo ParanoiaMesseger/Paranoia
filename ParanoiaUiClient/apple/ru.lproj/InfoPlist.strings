@@ -1,0 +1,10 @@
+/* Paranoia — localized Info.plist values, Russian (source language).
+   Identity with the base ios/Info.plist.in & macos/Info.plist.in values, so
+   Russian-locale users always get Russian regardless of dev region. */
+
+"CFBundleDisplayName" = "Paranoia";
+"NSCameraUsageDescription" = "Камера нужна для сканирования QR-кодов обмена ключами и видеозвонков.";
+"NSMicrophoneUsageDescription" = "Микрофон нужен для голосовых и видеозвонков.";
+"NSLocalNetworkUsageDescription" = "Доступ к локальной сети нужен для P2P-звонков и работы STUN/TURN в той же Wi-Fi-сети.";
+"NSPhotoLibraryUsageDescription" = "Доступ к фотогалерее нужен, чтобы прикреплять изображения к сообщениям.";
+"NSPhotoLibraryAddUsageDescription" = "Доступ к фотогалерее нужен, чтобы сохранять полученные изображения.";

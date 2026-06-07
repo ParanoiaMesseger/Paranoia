@@ -47,8 +47,8 @@ Rectangle {
 
     function reserveDomainsText(domains) {
         if (!domains || domains.length === 0)
-            return "Администратор"
-        return "Резерв: " + domains.join(", ")
+            return qsTr("Администратор")
+        return qsTr("Резерв: %1").arg(domains.join(", "))
     }
 
     function contentIndexForTab(tabIndex) {
@@ -142,7 +142,7 @@ Rectangle {
                     Layout.alignment: Qt.AlignVCenter
                     spacing: 2
                     Text {
-                        text: "Поделиться в чат — выберите получателя"
+                        text: qsTr("Поделиться в чат — выберите получателя")
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontSm
                         font.family: Theme.fontFamily
@@ -157,7 +157,7 @@ Rectangle {
                                        ? root.shareTargetText.substring(0, 70) + "…"
                                        : root.shareTargetText
                             if (root.shareTargetFiles && root.shareTargetFiles.length > 0)
-                                return "Файлов: " + root.shareTargetFiles.length
+                                return qsTr("Файлов: %1").arg(root.shareTargetFiles.length)
                             return ""
                         }
                         color: Theme.textSecondary
@@ -280,7 +280,7 @@ Rectangle {
             background: Rectangle { color: Theme.bgDark }
 
             Repeater {
-                model: root.hasAdminAccess ? ["Чаты", "Админ", "+"] : ["Чаты", "+"]
+                model: root.hasAdminAccess ? [qsTr("Чаты"), qsTr("Админ"), "+"] : [qsTr("Чаты"), "+"]
 
                 TabButton {
                     required property string modelData
@@ -330,17 +330,17 @@ Rectangle {
 
                     Text {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        text:           "Нет клиентского профиля"
+                        text:           qsTr("Нет клиентского профиля")
                         color:          Theme.textSecondary
                         font.pixelSize: Theme.fontMd
                         font.family:    Theme.fontFamily
                     }
                     ParaButton {
-                        text:      "Импортировать профиль"
+                        text:      qsTr("Импортировать профиль")
                         onClicked: root.openImport()
                     }
                     ParaButton {
-                        text:      "Регистрация клиентом"
+                        text:      qsTr("Регистрация клиентом")
                         secondary: true
                         onClicked: root.registerClient()
                     }
@@ -436,7 +436,7 @@ Rectangle {
                             Text {
                                 id: sessionBadgeText
                                 anchors.centerIn: parent
-                                text:  root.sessionsData.length + " серв."
+                                text:  qsTr("%1 серв.").arg(root.sessionsData.length)
                                 color: Theme.textPrimary
                                 font.pixelSize: 9
                                 font.family:    Theme.monoFamily
@@ -460,7 +460,7 @@ Rectangle {
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "Резерв"
+                                text: qsTr("Резерв")
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontXs
                                 font.family: Theme.fontFamily
@@ -540,7 +540,7 @@ Rectangle {
                                     anchors.fill: parent
                                     verticalAlignment: Text.AlignVCenter
                                     visible: dialogSearchField.text.length === 0
-                                    text: "Поиск по имени…"
+                                    text: qsTr("Поиск по имени…")
                                     color: Theme.textHint
                                     font: dialogSearchField.font
                                     elide: Text.ElideRight
@@ -659,7 +659,7 @@ Rectangle {
                                     Text {
                                         text: {
                                             if (!modelData.hasKey) return "KEY MISSING // SIGNAL BLOCKED"
-                                            return modelData.lastMsg ? String(modelData.lastMsg).replace(/\s+/g, " ") : "Нет сообщений"
+                                            return modelData.lastMsg ? String(modelData.lastMsg).replace(/\s+/g, " ") : qsTr("Нет сообщений")
                                         }
                                         color: !modelData.hasKey ? Theme.error : Theme.textSecondary
                                         font.pixelSize: Theme.fontSm
@@ -754,14 +754,14 @@ Rectangle {
                                 spacing: 8
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
-                                    text:           "Нет диалогов"
+                                    text:           qsTr("Нет диалогов")
                                     color:          Theme.textSecondary
                                     font.pixelSize: Theme.fontMd
                                     font.family:    Theme.fontFamily
                                 }
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
-                                    text:           "Нажмите + для добавления"
+                                    text:           qsTr("Нажмите + для добавления")
                                     color:          Theme.textHint
                                     font.pixelSize: Theme.fontSm
                                     font.family:    Theme.fontFamily
@@ -797,7 +797,7 @@ Rectangle {
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text:  "Добавить диалог"
+                                text:  qsTr("Добавить диалог")
                                 color: Theme.accent
                                 font.pixelSize: Theme.fontSm
                                 font.family:    Theme.fontFamily
@@ -826,13 +826,13 @@ Rectangle {
 
                     Text {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        text:           "Нет администрируемых серверов"
+                        text:           qsTr("Нет администрируемых серверов")
                         color:          Theme.textSecondary
                         font.pixelSize: Theme.fontMd
                         font.family:    Theme.fontFamily
                     }
                     ParaButton {
-                        text:      "Установить сервер"
+                        text:      qsTr("Установить сервер")
                         onClicked: root.installNewServer()
                     }
                 }
@@ -877,7 +877,7 @@ Rectangle {
                             }
 
                             ParaButton {
-                                text:           "Резерв"
+                                text:           qsTr("Резерв")
                                 secondary:      true
                                 implicitWidth:  86
                                 implicitHeight: 36
@@ -885,7 +885,7 @@ Rectangle {
                             }
 
                             ParaButton {
-                                text:           "Пользователь"
+                                text:           qsTr("Пользователь")
                                 implicitWidth:  122
                                 implicitHeight: 36
                                 onClicked:      root.openRegisterUser(modelData.domain)
@@ -912,7 +912,7 @@ Rectangle {
 
                     Text {
                         Layout.alignment: Qt.AlignHCenter
-                        text:             "Добавить профиль или сервер"
+                        text:             qsTr("Добавить профиль или сервер")
                         color:            Theme.textPrimary
                         font.pixelSize:   Theme.fontLg
                         font.family:      Theme.fontFamily
@@ -923,41 +923,41 @@ Rectangle {
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Импорт"
+                        text:             qsTr("Импорт")
                         onClicked:        root.openImport()
                     }
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Регистрация"
+                        text:             qsTr("Регистрация")
                         secondary:        true
                         onClicked:        root.registerClient()
                     }
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Установить свой сервер"
+                        text:             qsTr("Установить свой сервер")
                         secondary:        true
                         onClicked:        root.installNewServer()
                     }
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Маскировка трафика"
+                        text:             qsTr("Маскировка трафика")
                         secondary:        true
                         onClicked:        root.openMasking()
                     }
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Сменить PIN-код"
+                        text:             qsTr("Сменить PIN-код")
                         secondary:        true
                         onClicked:        root.openChangePin()
                     }
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text:             "Версия приложения"
+                        text:             qsTr("Версия приложения")
                         secondary:        true
                         onClicked:        root.openVersionInfo()
                     }
@@ -1003,7 +1003,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Обновить ключ диалога"
+                    text: qsTr("Обновить ключ диалога")
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1032,7 +1032,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Очистить диалог"
+                    text: qsTr("Очистить диалог")
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1069,7 +1069,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Удалить диалог"
+                    text: qsTr("Удалить диалог")
                     color: Theme.error
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1115,7 +1115,7 @@ Rectangle {
             }
             Text {
                 Layout.fillWidth: true
-                text: "Для начала переписки оба участника должны ввести одинаковый общий секрет. Обновите ключ через меню диалога (⋮)."
+                text: qsTr("Для начала переписки оба участника должны ввести одинаковый общий секрет. Обновите ключ через меню диалога (⋮).")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family:    Theme.fontFamily
@@ -1123,7 +1123,7 @@ Rectangle {
             }
             ParaButton {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Понятно"
+                text: qsTr("Понятно")
                 onClicked: noKeyWarning.close()
             }
         }
@@ -1148,7 +1148,7 @@ Rectangle {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text:  "Очистить диалог"
+                text:  qsTr("Очистить диалог")
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontLg
                 font.family:    Theme.fontFamily
@@ -1165,7 +1165,7 @@ Rectangle {
 
             Text {
                 Layout.fillWidth: true
-                text: "Вся история (тексты и файлы) удалится и с сервера, и на этом устройстве. На втором устройстве/у собеседника история исчезнет при следующей синхронизации. Ключ диалога сохраняется — можно продолжить переписку."
+                text: qsTr("Вся история (тексты и файлы) удалится и с сервера, и на этом устройстве. На втором устройстве/у собеседника история исчезнет при следующей синхронизации. Ключ диалога сохраняется — можно продолжить переписку.")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family:    Theme.fontFamily
@@ -1178,7 +1178,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Очистить"
+                    text: qsTr("Очистить")
                     onClicked: {
                         Backend.clearDialogHistory(clearDialogTarget.text)
                         clearDialogPopup.close()
@@ -1187,7 +1187,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Отмена"
+                    text: qsTr("Отмена")
                     secondary: true
                     onClicked: clearDialogPopup.close()
                 }
@@ -1215,7 +1215,7 @@ Rectangle {
 
             Text {
                 width: parent.width
-                text:  "Серверы"
+                text:  qsTr("Серверы")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family:    Theme.fontFamily
@@ -1320,7 +1320,7 @@ Rectangle {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text:  "Удалить диалог"
+                text:  qsTr("Удалить диалог")
                 color: Theme.error
                 font.pixelSize: Theme.fontLg
                 font.family:    Theme.fontFamily
@@ -1337,7 +1337,7 @@ Rectangle {
 
             Text {
                 Layout.fillWidth: true
-                text: "Удалить диалог, локальную историю и ключ с этого устройства. На сервере зашифрованные данные останутся."
+                text: qsTr("Удалить диалог, локальную историю и ключ с этого устройства. На сервере зашифрованные данные останутся.")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family:    Theme.fontFamily
@@ -1350,7 +1350,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Удалить"
+                    text: qsTr("Удалить")
                     onClicked: {
                         let peer = deleteDialogTarget.text
                         Backend.deleteDialogLocal(peer)
@@ -1361,7 +1361,7 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Отмена"
+                    text: qsTr("Отмена")
                     secondary: true
                     onClicked: deleteDialogPopup.close()
                 }

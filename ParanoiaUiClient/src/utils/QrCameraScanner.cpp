@@ -102,26 +102,26 @@ void QrCameraScanner::start()
             if (permission.status() == Qt::PermissionStatus::Granted) {
                 self->start();
             } else {
-                self->setError("Нет доступа к камере.");
+                self->setError(QrCameraScanner::tr("Нет доступа к камере."));
             }
         });
         return;
     }
     if (status == Qt::PermissionStatus::Denied) {
         emit supportedChanged();
-        setError("Нет доступа к камере.");
+        setError(QrCameraScanner::tr("Нет доступа к камере."));
         return;
     }
 #endif
 
     if (!supported()) {
-        setError("Камера не найдена или недоступна.");
+        setError(QrCameraScanner::tr("Камера не найдена или недоступна."));
         return;
     }
 
     ensureCamera();
     if (!m_camera) {
-        setError("Камера не найдена или недоступна.");
+        setError(QrCameraScanner::tr("Камера не найдена или недоступна."));
         return;
     }
     clearError();
@@ -133,7 +133,7 @@ void QrCameraScanner::start()
     }
     m_camera->start();
 #else
-    setError("Сканирование камерой не включено в этой сборке.");
+    setError(QrCameraScanner::tr("Сканирование камерой не включено в этой сборке."));
 #endif
 }
 
@@ -181,7 +181,7 @@ void QrCameraScanner::ensureCamera()
     applyVideoOutput();
 
     connect(m_camera.get(), &QCamera::errorOccurred, this, [this](QCamera::Error error, const QString &errorString) {
-        if (error != QCamera::NoError) setError(errorString.isEmpty() ? "Ошибка камеры." : errorString);
+        if (error != QCamera::NoError) setError(errorString.isEmpty() ? QrCameraScanner::tr("Ошибка камеры.") : errorString);
     });
 }
 

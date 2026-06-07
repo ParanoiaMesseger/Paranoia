@@ -441,7 +441,10 @@ fn spawn_server(server_bin: &str, config_path: &Path) -> Child {
 
 async fn wait_for_server(server_url: &str) {
     let client = reqwest::Client::new();
-    for _ in 0..100 {
+    // 600 × 50 мс = 30 с. На загруженном CI-раннере процессы-серверы всех
+    // параллельных тестов стартуют почти одновременно, и холодный запуск
+    // (spawn + открытие SQLite) под нагрузкой не укладывается в прежние 5 с.
+    for _ in 0..600 {
         if client
             .put(format!("{server_url}/pull"))
             .send()

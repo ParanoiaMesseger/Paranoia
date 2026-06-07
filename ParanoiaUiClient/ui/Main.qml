@@ -190,7 +190,11 @@ ApplicationWindow {
             if (!appWindow.virtualKeyboardEnabled)
                 return 0;
             if (Qt.inputMethod.visible)
-                return Qt.inputMethod.keyboardRectangle.height;
+                // Высота реальной панели VKB (virtualKeyboardLoader), а НЕ
+                // Qt.inputMethod.keyboardRectangle: на iOS keyboardRectangle
+                // занижает высоту (без строки кандидатов) → контент/тулбар
+                // налезали на верх клавиатуры. Лоадер сосед в координатах окна.
+                return virtualKeyboardLoader.height + editKeyToolbar.height;
             return 0;
         }
 
@@ -258,6 +262,26 @@ ApplicationWindow {
         z: 9999
         active: appWindow.virtualKeyboardEnabled
         source: active ? "Components/VirtualKeyboardPanel.qml" : ""
+    }
+
+    // Панель навигации/редактирования прямо над виртуальной клавиатурой.
+    // Позиционируется по верхней кромке клавиатуры; видна только когда
+    // клавиатура показана. На десктопе virtualKeyboardEnabled=false → скрыта.
+    EditKeyToolbar {
+        id: editKeyToolbar
+        anchors.left: parent.left
+        anchors.right: parent.right
+        z: 9999
+        visible: appWindow.virtualKeyboardEnabled && Qt.inputMethod.visible
+        // По верхней кромке РЕАЛЬНОЙ панели VKB (virtualKeyboardLoader.y), а не
+        // Qt.inputMethod.keyboardRectangle.y (на iOS он занижен на высоту строки
+        // кандидатов → панель налезала на верхний ряд клавиш). Оба — дети
+        // appWindow, координаты совпадают; loader.y включает строку кандидатов.
+        y: visible ? virtualKeyboardLoader.y - height : parent.height
+
+        Behavior on y {
+            NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+        }
     }
 
     Component {

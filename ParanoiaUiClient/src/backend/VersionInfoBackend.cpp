@@ -16,10 +16,9 @@
 
 namespace
 {
-    constexpr auto kGitLabBaseUrl  = "https://github.com";
-    constexpr auto kReleasePageUrl = "https://github.com/ParanoiaMesseger/Paranoia/-/releases";
+    constexpr auto kReleasePageUrl = "https://github.com/ParanoiaMesseger/Paranoia/releases";
     constexpr auto kLatestReleaseApiUrl =
-        "https://github.com/api/v4/projects/ParanoiaMesseger%2FParanoia/releases/permalink/latest";
+        "https://api.github.com/repos/ParanoiaMesseger/Paranoia/releases/latest";
 
     QString normalizedVersionTag(QString tag)
     {
@@ -56,25 +55,17 @@ namespace
 #endif
     }
 
-    QString absoluteGitLabUrl(const QString &rawUrl)
-    {
-        const QUrl url(rawUrl.trimmed());
-        if (!url.isValid()) return {};
-        if (url.isRelative()) return QUrl(QString::fromLatin1(kGitLabBaseUrl)).resolved(url).toString();
-        return url.toString();
-    }
-
     QString selectDownloadUrl(const QJsonObject &release)
     {
-        const QJsonArray links =
-            release.value(QStringLiteral("assets")).toObject().value(QStringLiteral("links")).toArray();
+        // GitHub Releases API: assets — массив объектов с name и browser_download_url
+        // (абсолютные ссылки, в отличие от относительных links у GitLab).
+        const QJsonArray assets          = release.value(QStringLiteral("assets")).toArray();
         const QStringList preferredNames = preferredUpdateAssetNames();
         QString fallback;
-        for (const auto &linkValue : links) {
-            const QJsonObject link = linkValue.toObject();
-            const QString name     = link.value(QStringLiteral("name")).toString();
-            const QString url      = absoluteGitLabUrl(
-                link.value(QStringLiteral("direct_asset_url")).toString(link.value(QStringLiteral("url")).toString()));
+        for (const auto &assetValue : assets) {
+            const QJsonObject asset = assetValue.toObject();
+            const QString name      = asset.value(QStringLiteral("name")).toString();
+            const QString url       = asset.value(QStringLiteral("browser_download_url")).toString().trimmed();
             if (url.isEmpty()) continue;
             if (fallback.isEmpty()) fallback = url;
             for (const auto &preferred : preferredNames) {
@@ -109,13 +100,16 @@ void VersionInfoBackend::checkForUpdates()
     if (m_updateCheckInProgress || !m_updateNetwork) return;
     m_updateCheckInProgress = true;
     m_updateAvailable       = false;
-    m_updateStatus          = QStringLiteral("Проверка обновлений…");
+    m_updateStatus          = tr("Проверка обновлений…");
     m_downloadUrl.clear();
     emit updateCheckChanged();
 
     QNetworkRequest request{QUrl(QString::fromLatin1(kLatestReleaseApiUrl))};
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       QStringLiteral("Paranoia/%1").arg(QCoreApplication::applicationVersion()));
+    // GitHub API требует User-Agent (выставлен выше) и рекомендует эти заголовки.
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
     auto *reply = m_updateNetwork->get(request);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -124,7 +118,7 @@ void VersionInfoBackend::checkForUpdates()
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (reply->error() != QNetworkReply::NoError || (httpStatus != 0 && (httpStatus < 200 || httpStatus >= 300))) {
             m_updateAvailable = false;
-            m_updateStatus = QStringLiteral("Не удалось проверить обновления. Откройте страницу релизов вручную.");
+            m_updateStatus = VersionInfoBackend::tr("Не удалось проверить обновления. Откройте страницу релизов вручную.");
             m_downloadUrl = QString::fromLatin1(kReleasePageUrl);
             emit updateCheckChanged();
             return;
@@ -134,7 +128,7 @@ void VersionInfoBackend::checkForUpdates()
         const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll(), &parseError);
         if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
             m_updateAvailable = false;
-            m_updateStatus = QStringLiteral("GitLab вернул некорректный ответ о релизе.");
+            m_updateStatus = VersionInfoBackend::tr("Сервер вернул некорректный ответ о релизе.");
             m_downloadUrl  = QString::fromLatin1(kReleasePageUrl);
             emit updateCheckChanged();
             return;
@@ -144,7 +138,7 @@ void VersionInfoBackend::checkForUpdates()
         m_latestVersion           = release.value(QStringLiteral("tag_name")).toString();
         if (m_latestVersion.isEmpty()) {
             m_updateAvailable = false;
-            m_updateStatus    = QStringLiteral("В последнем релизе не указана версия.");
+            m_updateStatus    = VersionInfoBackend::tr("В последнем релизе не указана версия.");
             m_downloadUrl     = QString::fromLatin1(kReleasePageUrl);
             emit updateCheckChanged();
             return;
@@ -154,8 +148,8 @@ void VersionInfoBackend::checkForUpdates()
         m_downloadUrl     = m_updateAvailable ? selectDownloadUrl(release) : QString::fromLatin1(kReleasePageUrl);
         m_updateStatus =
             m_updateAvailable
-                ? QStringLiteral("Доступна новая версия %1.").arg(m_latestVersion)
-                : QStringLiteral("Установлена актуальная версия %1.").arg(QCoreApplication::applicationVersion());
+                ? VersionInfoBackend::tr("Доступна новая версия %1.").arg(m_latestVersion)
+                : VersionInfoBackend::tr("Установлена актуальная версия %1.").arg(QCoreApplication::applicationVersion());
         emit updateCheckChanged();
     });
 }

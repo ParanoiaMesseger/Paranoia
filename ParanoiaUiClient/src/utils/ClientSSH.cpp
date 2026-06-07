@@ -91,9 +91,9 @@ ClientSSH::~ClientSSH()
 
 bool ClientSSH::validateParams(const SshConnectionParams &p, QString &err)
 {
-    if (p.host.trimmed().isEmpty()) ERR("Host не задан");
-    if (p.username.trimmed().isEmpty()) ERR("Username не задан");
-    if (p.password.isEmpty()) ERR("Не указан ни пароль");
+    if (p.host.trimmed().isEmpty()) ERR(ClientSSH::tr("Host не задан"));
+    if (p.username.trimmed().isEmpty()) ERR(ClientSSH::tr("Username не задан"));
+    if (p.password.isEmpty()) ERR(ClientSSH::tr("Не указан ни пароль"));
     return true;
 }
 
@@ -102,17 +102,17 @@ bool ClientSSH::validateParams(const SshConnectionParams &p, QString &err)
 void ClientSSH::connectToHost(const SshConnectionParams &params)
 {
     QString err;
-    if (!validateParams(params, err)) ERR_CONNECT("Ошибка параметров: " + err);
+    if (!validateParams(params, err)) ERR_CONNECT(ClientSSH::tr("Ошибка параметров: ") + err);
     emit _connectRequested(params);
 }
 
 QByteArray ClientSSH::getScriptContent(const QString &path)
 {
-    if (path.trimmed().isEmpty()) BLOCK(emit scriptError("Путь к скрипту не задан"); return {};);
-    if (!QFileInfo::exists(path)) BLOCK(emit scriptError(QString("Скрипт не найден: %1").arg(path)); return {};);
+    if (path.trimmed().isEmpty()) BLOCK(emit scriptError(ClientSSH::tr("Путь к скрипту не задан")); return {};);
+    if (!QFileInfo::exists(path)) BLOCK(emit scriptError(ClientSSH::tr("Скрипт не найден: %1").arg(path)); return {};);
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-        BLOCK(emit scriptError(QString("Не удалось открыть скрипт: %1").arg(path)); return {};);
+        BLOCK(emit scriptError(ClientSSH::tr("Не удалось открыть скрипт: %1").arg(path)); return {};);
     return f.readAll();
 }
 
@@ -169,19 +169,19 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
     cleanup();
     qDebug() << "connectToHost : " << params.host;
 #if defined(_WIN32)
-    if (!winsockReady_) ERR_CONNECT("WinSock не инициализирован");
+    if (!winsockReady_) ERR_CONNECT(ClientSSH::tr("WinSock не инициализирован"));
 #endif
     addrinfo hints{}, *res = nullptr;
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     QString portStr   = QString::number(params.port);
     if (getaddrinfo(params.host.toUtf8(), portStr.toUtf8(), &hints, &res) != 0)
-        ERR_CONNECT(QString("Не удалось разрешить хост: %1").arg(params.host));
+        ERR_CONNECT(ClientSSH::tr("Не удалось разрешить хост: %1").arg(params.host));
     sock_ = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sock_ == invalidSocket) {
         const QString reason = socketErrorString();
         freeaddrinfo(res);
-        ERR_CONNECT(QString("Ошибка создания сокета: %1").arg(reason));
+        ERR_CONNECT(ClientSSH::tr("Ошибка создания сокета: %1").arg(reason));
     }
     setSocketTimeout(sock_, params.timeoutMs);
 #if defined(_WIN32)
@@ -214,7 +214,7 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
         char *msg;
         libssh2_session_last_error(sess, &msg, nullptr, 0);
         cleanup();
-        ERR_CONNECT(QString("Аутентификация не прошла: %1").arg(msg));
+        ERR_CONNECT(ClientSSH::tr("Аутентификация не прошла: %1").arg(msg));
     }
     qDebug() << "Connected";
     connected_ = true;
@@ -225,7 +225,7 @@ void SshWorker::runScript(QByteArray scriptContent)
 {
     std::cout << "RUN>" << scriptContent.toStdString();
     std::cout.flush();
-    if (!connected_ || !session_) ERR_SCRIPT("Нет активного SSH-соединения");
+    if (!connected_ || !session_) ERR_SCRIPT(ClientSSH::tr("Нет активного SSH-соединения"));
 
     auto *sess = static_cast<LIBSSH2_SESSION *>(session_);
 
@@ -240,7 +240,7 @@ void SshWorker::runScript(QByteArray scriptContent)
             }
             char *msg;
             libssh2_session_last_error(sess, &msg, nullptr, 0);
-            ERR_SCRIPT(QString("Не удалось открыть канал: %1").arg(msg));
+            ERR_SCRIPT(ClientSSH::tr("Не удалось открыть канал: %1").arg(msg));
         }
     }
 
@@ -269,7 +269,7 @@ void SshWorker::runScript(QByteArray scriptContent)
             char *msg;
             libssh2_session_last_error(sess, &msg, nullptr, 0);
             libssh2_channel_free(ch);
-            ERR_SCRIPT(QString("Ошибка записи stdin: %1").arg(msg));
+            ERR_SCRIPT(ClientSSH::tr("Ошибка записи stdin: %1").arg(msg));
         }
         sent += rc;
     }
@@ -294,7 +294,7 @@ void SshWorker::runScript(QByteArray scriptContent)
     int exitCode = libssh2_channel_get_exit_status(ch);
     libssh2_channel_free(ch);
 
-    if (exitCode != 0) emit scriptError(QString("Скрипт завершился с кодом %1").arg(exitCode));
+    if (exitCode != 0) emit scriptError(ClientSSH::tr("Скрипт завершился с кодом %1").arg(exitCode));
     emit scriptFinished(exitCode);
 }
 

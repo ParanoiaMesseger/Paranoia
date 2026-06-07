@@ -49,6 +49,18 @@ QtObject {
             }
         } else if (ctl.mode === "folder") {
             _folderDlg.open()
+        } else if (Qt.platform.os === "ios" && ctl.mode === "save") {
+            // iOS: QtQuick.Dialogs SaveFile не нативный (QIOSFileDialog::show()
+            // возвращает false для AcceptSave) → рисуется десктопный QML-fallback,
+            // не помещающийся на экран. Делаем сами: пишем во временный файл
+            // (вызывающий пишет в onAccepted), затем системный document picker
+            // (UIDocumentPickerViewController forExporting) выбирает назначение.
+            var nm = ctl.currentFile.toString()
+            if (nm.indexOf("/") >= 0) nm = nm.substring(nm.lastIndexOf("/") + 1)
+            var tmp = IosFileExport.prepareExportPath(nm)
+            ctl.selectedFile = "file://" + tmp
+            ctl.accepted()
+            IosFileExport.exportFile(tmp)
         } else {
             if (ctl.mode === "save" && ctl.currentFile.toString().length > 0)
                 _fileDlg.currentFile = ctl.currentFile

@@ -243,7 +243,7 @@ namespace paranoia::voip
     bool CallController::toggleVideo(bool on)
     {
         if (on && !CallEngine::videoSupported()) {
-            emit controllerError(QStringLiteral("Видео не собрано в этой версии"));
+            emit controllerError(CallController::tr("Видео не собрано в этой версии"));
             return false;
         }
         setWantVideo(on);
@@ -753,7 +753,7 @@ namespace paranoia::voip
             info.category = (idx == 0) ? CallPath::OurTurn : CallPath::BackupTurn;
         }
         // На случай если для сессии не был сконфигурирован свой TURN-сервер —
-        // используем тот, что прислал peer (он у нас тот же, paranoia.example.com).
+        // используем тот, что прислал peer (он у нас тот же, напр. paranoia.example.com).
         if (turn_server_.isEmpty()) turn_server_ = server;
         // Allocate уже стартует в prepare-flow, но если по какой-то причине не
         // запускался (например, мы получили peer TURN раньше своего allocate-
@@ -847,15 +847,15 @@ namespace paranoia::voip
     {
         switch (current_path_) {
             case CallPath::None: return QStringLiteral("—");
-            case CallPath::Lan: return QStringLiteral("Локальная сеть");
-            case CallPath::Stun: return QStringLiteral("Прямое (через интернет)");
+            case CallPath::Lan: return CallController::tr("Локальная сеть");
+            case CallPath::Stun: return CallController::tr("Прямое (через интернет)");
             case CallPath::OurTurn:
-                return active_turn_server_.isEmpty() ? QStringLiteral("TURN-relay")
-                                                     : QStringLiteral("TURN: %1").arg(active_turn_server_);
+                return active_turn_server_.isEmpty() ? CallController::tr("TURN-relay")
+                                                     : CallController::tr("TURN: %1").arg(active_turn_server_);
             case CallPath::BackupTurn:
                 return active_turn_server_.isEmpty()
-                           ? QStringLiteral("Резервный TURN-relay")
-                           : QStringLiteral("Резервный TURN: %1").arg(active_turn_server_);
+                           ? CallController::tr("Резервный TURN-relay")
+                           : CallController::tr("Резервный TURN: %1").arg(active_turn_server_);
         }
         return QStringLiteral("—");
     }

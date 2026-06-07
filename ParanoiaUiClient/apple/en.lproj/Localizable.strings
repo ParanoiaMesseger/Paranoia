@@ -1,0 +1,10 @@
+/* Paranoia — Apple (iOS/macOS) native strings, English.
+   Keys are the Russian source strings used in NSLocalizedString(...) inside
+   src/platform/PlatformNotifications_*.mm. Mirrors the Qt .ts pipeline:
+   source language is Russian, this file provides the English translation. */
+
+"Фоновые уведомления недоступны" = "Background notifications unavailable";
+"На iOS 25 и ниже Paranoia не может проверять новые сообщения в фоне. Уведомления работают только пока приложение открыто. Для фоновых уведомлений требуется iOS 26+." = "On iOS 25 and below, Paranoia cannot check for new messages in the background. Notifications work only while the app is open. Background notifications require iOS 26+.";
+"Понятно" = "Got it";
+"Проверка новых сообщений" = "Checking for new messages";
+"Новых сообщений: %llu" = "New messages: %llu";

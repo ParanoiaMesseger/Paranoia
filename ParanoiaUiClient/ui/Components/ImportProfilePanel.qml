@@ -18,9 +18,9 @@ ColumnLayout {
 
     ParaFileDialog {
         id: importOpenDialog
-        title: "Выбрать export-файл"
+        title: qsTr("Выбрать export-файл")
         mode: "open"
-        nameFilters: ["Paranoia export (*.json)", "JSON (*.json)", "Все файлы (*)"]
+        nameFilters: [qsTr("Paranoia export (*.json)"), qsTr("JSON (*.json)"), qsTr("Все файлы (*)")]
         onAccepted: {
             panel.importFilePath = Backend.urlToLocalPath(selectedFile)
             importFeedback.text = ""
@@ -28,25 +28,24 @@ ColumnLayout {
             const res = Backend.importProfile(panel.importFilePath.trim())
             if (res.ok) {
                 importFeedback.text =
-                    "✓ Импорт выполнен. Диалогов: " + res.importedDialogues +
-                    ", ключей: " + res.importedKeyEntries +
-                    ", профилей: " + (res.importedProfiles || 0) +
-                    ", admin-серверов: " + res.importedAdminServers
+                    qsTr("✓ Импорт выполнен. Диалогов: %1, ключей: %2, профилей: %3, admin-серверов: %4")
+                        .arg(res.importedDialogues).arg(res.importedKeyEntries)
+                        .arg(res.importedProfiles || 0).arg(res.importedAdminServers)
                 if (res.conflicts > 0)
-                    importFeedback.text += "\nКонфликтов keyring: " + res.conflicts + " (не перезаписаны)"
+                    importFeedback.text += qsTr("\nКонфликтов keyring: %1 (не перезаписаны)").arg(res.conflicts)
                 if (res.skippedEntries > 0)
-                    importFeedback.text += "\nПропущено записей: " + res.skippedEntries
+                    importFeedback.text += qsTr("\nПропущено записей: %1").arg(res.skippedEntries)
                 deleteFileBanner.visible = true
                 panel.profileImported()
             } else {
-                importFeedback.text = res.error || "Ошибка импорта."
+                importFeedback.text = res.error || qsTr("Ошибка импорта.")
             }
         }
     }
 
     Text {
         Layout.fillWidth: true
-        text: "Импортировать профиль из зашифрованного файла. Передайте ваш публичный ключ экспортирующему устройству — файл расшифровывается ключом этого устройства."
+        text: qsTr("Импортировать профиль из зашифрованного файла. Передайте ваш публичный ключ экспортирующему устройству — файл расшифровывается ключом этого устройства.")
         color: Theme.textSecondary
         font.pixelSize: Theme.fontSm
         font.family: Theme.fontFamily
@@ -55,7 +54,7 @@ ColumnLayout {
 
     CopyablePublicKeyBlock {
         Layout.fillWidth: true
-        title: "Ваш публичный ключ:"
+        title: qsTr("Ваш публичный ключ:")
         keyText: Backend.devicePubkey
         backgroundColor: Theme.bgSecondary
         titleColor: Theme.textPrimary
@@ -65,7 +64,7 @@ ColumnLayout {
 
     Text {
         Layout.fillWidth: true
-        text: "После успешного импорта рекомендуется удалить файл экспорта."
+        text: qsTr("После успешного импорта рекомендуется удалить файл экспорта.")
         color: Theme.textSecondary
         font.pixelSize: Theme.fontXs
         font.family: Theme.fontFamily
@@ -100,7 +99,7 @@ ColumnLayout {
 
             Text {
                 Layout.fillWidth: true
-                text: "Удалить файл экспорта?"
+                text: qsTr("Удалить файл экспорта?")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family: Theme.fontFamily
@@ -110,14 +109,14 @@ ColumnLayout {
             ParaButton {
                 Layout.fillWidth: true
                 implicitHeight: 36
-                text: "Удалить"
+                text: qsTr("Удалить")
                 onClicked: {
                     const path = panel.importFilePath.trim()
                     const res = Backend.deleteExportFile(path)
                     if (res.ok)
-                        importFeedback.text += "\nФайл экспорта удалён."
+                        importFeedback.text += qsTr("\nФайл экспорта удалён.")
                     else
-                        importFeedback.text += "\nУдалите файл вручную: " + path + " (" + (res.error || "ошибка") + ")"
+                        importFeedback.text += qsTr("\nУдалите файл вручную: %1 (%2)").arg(path).arg(res.error || qsTr("ошибка"))
                     deleteFileBanner.visible = false
                 }
             }
@@ -125,7 +124,7 @@ ColumnLayout {
             ParaButton {
                 Layout.fillWidth: true
                 implicitHeight: 36
-                text: "Нет"
+                text: qsTr("Нет")
                 secondary: true
                 onClicked: deleteFileBanner.visible = false
             }
@@ -134,7 +133,7 @@ ColumnLayout {
 
     ParaButton {
         Layout.fillWidth: true
-        text: "Импортировать"
+        text: qsTr("Импортировать")
         onClicked: importOpenDialog.open()
     }
 }

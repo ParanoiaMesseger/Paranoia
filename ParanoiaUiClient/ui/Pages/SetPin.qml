@@ -13,7 +13,7 @@ Rectangle {
     property string pin: ""
     property bool showBack: false
     /// Заголовок страницы — переопределяется, например, при reuse в ChangePin.
-    property string title: "Установите PIN-код"
+    property string title: qsTr("Установите PIN-код")
     /// Показывать панель с уровнем защищённости (комбинации/энтропия/время взлома).
     /// При confirm-шаге или при вводе старого PIN'а — скрываем.
     property bool showStrength: true
@@ -58,17 +58,17 @@ Rectangle {
     readonly property string levelLabel: {
         switch (level) {
         case 1:
-            return "Слишком короткий"
+            return qsTr("Слишком короткий")
         case 2:
-            return "Очень слабый"
+            return qsTr("Очень слабый")
         case 3:
-            return "Средний"
+            return qsTr("Средний")
         case 4:
-            return "Надёжный"
+            return qsTr("Надёжный")
         case 5:
-            return "Параноидальный"
+            return qsTr("Параноидальный")
         default:
-            return "введите PIN"
+            return qsTr("введите PIN")
         }
     }
 
@@ -89,9 +89,9 @@ Rectangle {
     }
 
     readonly property string confirmText: {
-        if (pin.length === 0) return "Подтвердить"
-        if (pin.length < minDigits) return "Минимум " + minDigits + " цифры"
-        return "Подтвердить PIN"
+        if (pin.length === 0) return qsTr("Подтвердить")
+        if (pin.length < minDigits) return qsTr("Минимум %1 цифры").arg(minDigits)
+        return qsTr("Подтвердить PIN")
     }
 
     signal back()
@@ -133,16 +133,16 @@ Rectangle {
 
     function fmtTime(secs) {
         if (secs <= 0) return "-"
-        if (secs < 60) return Math.round(secs) + " сек"
-        if (secs < 3600) return Math.round(secs / 60) + " мин"
-        if (secs < 86400) return (secs / 3600).toFixed(1) + " ч"
-        if (secs < 86400 * 365) return Math.round(secs / 86400) + " сут"
+        if (secs < 60) return qsTr("%1 сек").arg(Math.round(secs))
+        if (secs < 3600) return qsTr("%1 мин").arg(Math.round(secs / 60))
+        if (secs < 86400) return qsTr("%1 ч").arg((secs / 3600).toFixed(1))
+        if (secs < 86400 * 365) return qsTr("%1 сут").arg(Math.round(secs / 86400))
 
         var y = secs / (86400 * 365.25)
-        if (y < 1000) return Math.round(y) + " лет"
-        if (y < 1e6) return Math.round(y / 1000) + " тыс. лет"
-        if (y < 1e9) return Math.round(y / 1e6) + " млн. лет"
-        return "практически вечность"
+        if (y < 1000) return qsTr("%1 лет").arg(Math.round(y))
+        if (y < 1e6) return qsTr("%1 тыс. лет").arg(Math.round(y / 1000))
+        if (y < 1e9) return qsTr("%1 млн. лет").arg(Math.round(y / 1e6))
+        return qsTr("практически вечность")
     }
 
     function fmtCombo(n) {
@@ -188,9 +188,12 @@ Rectangle {
                 ParaInput {
                     id: pinInput
                     Layout.fillWidth: true
-                    label: "PIN-код"
-                    placeholder: "Минимум " + root.minDigits + " цифры"
+                    label: qsTr("PIN-код")
+                    placeholder: qsTr("Минимум %1 цифры").arg(root.minDigits)
                     echoMode: TextInput.Password
+                    // На мобильных гасим виртуальную клавиатуру Qt — ввод PIN
+                    // идёт только через собственный экранный keypad ниже.
+                    readOnly: Qt.platform.os === "android" || Qt.platform.os === "ios"
                     hasError: root.pin.length > 0 && root.pin.length < root.minDigits
                     errorText: ""
 
@@ -238,7 +241,7 @@ Rectangle {
                             Layout.fillWidth: true
 
                             Text {
-                                text: "Надёжность"
+                                text: qsTr("Надёжность")
                                 color: Theme.textSecondary
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.fontSm
@@ -301,7 +304,7 @@ Rectangle {
                                     spacing: 3
 
                                     Text {
-                                        text: "КОМБИНАЦИЙ"
+                                        text: qsTr("КОМБИНАЦИЙ")
                                         color: Theme.textHint
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 10
@@ -333,7 +336,7 @@ Rectangle {
                                     spacing: 3
 
                                     Text {
-                                        text: "ЭНТРОПИЯ"
+                                        text: qsTr("ЭНТРОПИЯ")
                                         color: Theme.textHint
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 10
@@ -342,7 +345,7 @@ Rectangle {
                                     }
 
                                     Text {
-                                        text: root.pin.length > 0 ? root.entropy.toFixed(1) + " бит" : "-"
+                                        text: root.pin.length > 0 ? qsTr("%1 бит").arg(root.entropy.toFixed(1)) : "-"
                                         color: root.levelColor
                                         font.family: Theme.monoFamily
                                         font.pixelSize: 14
@@ -378,7 +381,7 @@ Rectangle {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: "Время взлома (1 GPU, Argon2id)"
+                                        text: qsTr("Время взлома (1 GPU, Argon2id)")
                                         color: root.levelRgba(0.7)
                                         font.family: Theme.fontFamily
                                         font.pixelSize: Theme.fontXs
@@ -388,8 +391,8 @@ Rectangle {
                                     Text {
                                         Layout.fillWidth: true
                                         text: root.pin.length > 0
-                                            ? "В среднем: " + root.fmtTime(root.attackSecsAvg) + "  ·  Полный: " + root.fmtTime(root.attackSecsFull)
-                                            : "Введите PIN для оценки"
+                                            ? qsTr("В среднем: %1  ·  Полный: %2").arg(root.fmtTime(root.attackSecsAvg)).arg(root.fmtTime(root.attackSecsFull))
+                                            : qsTr("Введите PIN для оценки")
                                         color: Theme.textPrimary
                                         font.family: Theme.fontFamily
                                         font.pixelSize: 12

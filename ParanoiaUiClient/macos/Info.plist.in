@@ -4,6 +4,13 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
+    <!-- Базовый язык — русский; en.lproj/*.strings даёт английский
+         (apple/*.lproj + CMake-блок «Нативная локализация Apple»). -->
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>ru</string>
+        <string>en</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>Paranoia</string>
     <key>CFBundleExecutable</key>

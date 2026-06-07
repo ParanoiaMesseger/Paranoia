@@ -52,7 +52,7 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Версия приложения"
+                    text: qsTr("Версия приложения")
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontLg
                     font.family: Theme.fontFamily
@@ -97,7 +97,7 @@ Rectangle {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.leftMargin: 20
                     Layout.rightMargin: 20
-                    text: "Версия: " + Qt.application.version
+                    text: qsTr("Версия: ") + Qt.application.version
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontMd
                     font.family: Theme.fontFamily
@@ -107,7 +107,7 @@ Rectangle {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.leftMargin: 20
                     Layout.rightMargin: 20
-                    text: "Платформа: " + Qt.platform.os
+                    text: qsTr("Платформа: ") + Qt.platform.os
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -131,7 +131,7 @@ Rectangle {
                     Layout.leftMargin: 20
                     Layout.rightMargin: 20
                     Layout.topMargin: 10
-                    text: VersionInfo.updateCheckInProgress ? "Проверка…" : "Проверить обновления"
+                    text: VersionInfo.updateCheckInProgress ? qsTr("Проверка…") : qsTr("Проверить обновления")
                     enabled: !VersionInfo.updateCheckInProgress
                     secondary: true
                     onClicked: VersionInfo.checkForUpdates()
@@ -141,10 +141,31 @@ Rectangle {
                     Layout.fillWidth: true
                     Layout.leftMargin: 20
                     Layout.rightMargin: 20
-                    text: VersionInfo.updateAvailable ? "Скачать и установить" : "Открыть страницу релизов"
-                    onClicked: VersionInfo.updateAvailable && VersionInfo.downloadUrl.length > 0
-                               ? VersionInfo.openDownloadUrl()
-                               : VersionInfo.openReleasePage()
+                    text: qsTr("Скачать и установить")
+                    visible: VersionInfo.updateAvailable && VersionInfo.downloadUrl.length > 0
+                    onClicked: VersionInfo.openDownloadUrl()
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 20
+                    Layout.rightMargin: 20
+                    Layout.topMargin: 2
+                    spacing: 10
+
+                    ParaButton {
+                        Layout.fillWidth: true
+                        secondary: true
+                        text: qsTr("GitHub")
+                        onClicked: Qt.openUrlExternally("https://github.com/ParanoiaMesseger/Paranoia")
+                    }
+
+                    ParaButton {
+                        Layout.fillWidth: true
+                        secondary: true
+                        text: qsTr("Сайт Paranoia.run")
+                        onClicked: Qt.openUrlExternally("https://paranoia.run/")
+                    }
                 }
 
                 Item { Layout.preferredHeight: 20 }

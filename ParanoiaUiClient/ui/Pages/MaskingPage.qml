@@ -28,11 +28,11 @@ Rectangle {
 
     function stateText(s) {
         switch (s) {
-            case "checking": return "сверка с нодой…"
-            case "verified": return "сверено, без изменений ✓"
-            case "updated":  return "обновлено и применено ✓"
-            case "error":    return "ошибка сверки"
-            default:         return "встроенная маска"
+            case "checking": return qsTr("сверка с нодой…")
+            case "verified": return qsTr("сверено, без изменений ✓")
+            case "updated":  return qsTr("обновлено и применено ✓")
+            case "error":    return qsTr("ошибка сверки")
+            default:         return qsTr("встроенная маска")
         }
     }
     function stateColor(s) {
@@ -54,16 +54,16 @@ Rectangle {
 
     ParaFileDialog {
         id: profileFileDialog
-        title: "Выбрать профиль маскировки"
+        title: qsTr("Выбрать профиль маскировки")
         mode: "open"
-        nameFilters: ["Профиль маскировки (*.json)", "JSON (*.json)", "Все файлы (*)"]
+        nameFilters: [qsTr("Профиль маскировки (*.json)"), qsTr("JSON (*.json)"), qsTr("Все файлы (*)")]
         onAccepted: {
             const path = Backend.urlToLocalPath(selectedFile)
             root.pendingUnsignedPath = ""
             const res = Backend.applyMaskingFromFile(path, false)
             if (res.ok) {
                 root.feedbackError = false
-                root.feedback = "Профиль применён: " + (res.profileName || "")
+                root.feedback = qsTr("Профиль применён: %1").arg(res.profileName || "")
             } else if (res.unsigned) {
                 // Профиль без подписи — спросить подтверждение.
                 root.pendingUnsignedPath = path
@@ -71,7 +71,7 @@ Rectangle {
                 root.feedback = res.error
             } else {
                 root.feedbackError = true
-                root.feedback = res.error || "Ошибка применения"
+                root.feedback = res.error || qsTr("Ошибка применения")
             }
         }
     }
@@ -82,7 +82,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Маскировка трафика"
+            title: qsTr("Маскировка трафика")
             onBackClicked: root.back()
         }
 
@@ -119,7 +119,7 @@ Rectangle {
                         spacing: 6
 
                         Text {
-                            text: "Текущая маска"
+                            text: qsTr("Текущая маска")
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontMd
                             font.family: Theme.fontFamily
@@ -147,7 +147,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     visible: root.hasUrl
-                    text: "Маскировка раздаётся нодой и сверяется при каждом входе. При смене профиля на сервере он применяется автоматически."
+                    text: qsTr("Маскировка раздаётся нодой и сверяется при каждом входе. При смене профиля на сервере он применяется автоматически.")
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -157,7 +157,7 @@ Rectangle {
                 ParaButton {
                     Layout.fillWidth: true
                     visible: root.hasUrl
-                    text: root.state === "checking" ? "Обновление…" : "Обновить с ноды"
+                    text: root.state === "checking" ? qsTr("Обновление…") : qsTr("Обновить с ноды")
                     enabled: root.state !== "checking"
                     onClicked: {
                         root.feedback = ""
@@ -174,7 +174,7 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Note: Для selfhosted-сервера можно применить профиль из файла без проверки подписи."
+                    text: qsTr("Note: Для selfhosted-сервера можно применить профиль из файла без проверки подписи.")
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -184,7 +184,7 @@ Rectangle {
                 ParaButton {
                     Layout.fillWidth: true
                     secondary: true
-                    text: "Загрузить из файла"
+                    text: qsTr("Загрузить из файла")
                     onClicked: {
                         root.feedback = ""
                         root.pendingUnsignedPath = ""
@@ -210,7 +210,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Профиль без подписи. Применять только если вы доверяете источнику файла."
+                            text: qsTr("Профиль без подписи. Применять только если вы доверяете источнику файла.")
                             color: Theme.error
                             font.pixelSize: Theme.fontSm
                             font.family: Theme.fontFamily
@@ -219,20 +219,20 @@ Rectangle {
                         ParaButton {
                             Layout.fillWidth: true
                             implicitHeight: 36
-                            text: "Применить без проверки"
+                            text: qsTr("Применить без проверки")
                             onClicked: {
                                 const res = Backend.applyMaskingFromFile(root.pendingUnsignedPath, true)
                                 root.pendingUnsignedPath = ""
                                 root.feedbackError = !res.ok
-                                root.feedback = res.ok ? ("Профиль применён: " + (res.profileName || ""))
-                                                       : (res.error || "Ошибка применения")
+                                root.feedback = res.ok ? (qsTr("Профиль применён: %1").arg(res.profileName || ""))
+                                                       : (res.error || qsTr("Ошибка применения"))
                             }
                         }
                         ParaButton {
                             Layout.fillWidth: true
                             implicitHeight: 36
                             secondary: true
-                            text: "Отмена"
+                            text: qsTr("Отмена")
                             onClicked: { root.pendingUnsignedPath = ""; root.feedback = "" }
                         }
                     }
@@ -242,11 +242,11 @@ Rectangle {
                 ParaButton {
                     Layout.fillWidth: true
                     secondary: true
-                    text: "Вернуть встроенную маску"
+                    text: qsTr("Вернуть встроенную маску")
                     onClicked: {
                         const res = Backend.resetMasking()
                         root.feedbackError = !res.ok
-                        root.feedback = res.ok ? "Возвращена встроенная маска" : (res.error || "Ошибка")
+                        root.feedback = res.ok ? qsTr("Возвращена встроенная маска") : (res.error || qsTr("Ошибка"))
                     }
                 }
 

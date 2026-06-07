@@ -18,7 +18,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Обновить ключ диалога"
+            title: qsTr("Обновить ключ диалога")
             onBackClicked: root.back()
         }
 
@@ -49,7 +49,7 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Ручной ввод ключа отключён. Обновление ключа диалога выполняется только через защищённый обмен JSON/QR."
+                    text: qsTr("Ручной ввод ключа отключён. Обновление ключа диалога выполняется только через защищённый обмен JSON/QR.")
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family:    Theme.fontFamily
@@ -58,13 +58,13 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Начать обмен через QR/JSON"
+                    text: qsTr("Начать обмен через QR/JSON")
                     onClicked: root.openQrExchange(root.peer, true)
                 }
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Отмена"
+                    text: qsTr("Отмена")
                     secondary: true
                     onClicked: root.back()
                 }

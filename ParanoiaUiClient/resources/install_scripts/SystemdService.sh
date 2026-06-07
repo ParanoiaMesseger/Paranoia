@@ -37,7 +37,7 @@ sudo chmod +x /opt/Paranoia/unistall.sh
 
 sudo cat > "/etc/systemd/system/paranoia.service" << SERVICE_EOF
 [Unit]
-Description=Paranoia by paranoia-dev
+Description=Paranoia secure messenger server
 After=network.target
 
 [Service]

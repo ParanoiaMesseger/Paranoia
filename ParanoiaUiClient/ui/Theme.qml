@@ -15,6 +15,18 @@ QtObject {
     property Settings _settings: Settings {
         category: "theme"
         property bool darkMode: true
+        // false до первого запуска — тогда тему берём из системной.
+        property bool initialized: false
+    }
+
+    // Первый запуск: подстраиваем тему под системную (светлая/тёмная). При
+    // неизвестной системной схеме остаёмся на тёмной (дефолт приложения).
+    // Дальше уважаем ручной выбор пользователя (toggleTheme сохраняет в Settings).
+    Component.onCompleted: {
+        if (!_settings.initialized) {
+            _settings.darkMode = (Application.styleHints.colorScheme !== Qt.Light)
+            _settings.initialized = true
+        }
     }
 
     // ── Backgrounds ──────────────────────────────────────
@@ -49,6 +61,15 @@ QtObject {
     // ── Borders ──────────────────────────────────────────
     readonly property color separator: darkMode ? "#251015" : "#D4C0B2"
     readonly property color border:    darkMode ? "#3A1118" : "#C2A898"
+
+    // ── Code (подсветка кода в сообщениях) ───────────────
+    readonly property color codeBg:       darkMode ? "#140D10" : "#E2D2C6"
+    readonly property color codeBorder:   darkMode ? "#3A1118" : "#C2A898"
+    readonly property color codeText:     darkMode ? "#E8D6D9" : "#3A241A"
+    readonly property color codeKeyword:  darkMode ? "#FF7A85" : "#A11221"
+    readonly property color codeString:   darkMode ? "#7FB37A" : "#3E7A35"
+    readonly property color codeComment:  darkMode ? "#7A5C62" : "#9A8073"
+    readonly property color codeNumber:   darkMode ? "#E0A36A" : "#9C5A1E"
 
     // ── Radius ───────────────────────────────────────────
     readonly property int radiusSm: 3

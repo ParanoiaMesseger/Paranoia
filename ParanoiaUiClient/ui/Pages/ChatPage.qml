@@ -116,23 +116,13 @@ Rectangle {
         return Theme.messageMetaOutgoing
     }
 
-    function markdownText(raw) {
-        let text = raw || ""
-        text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, function(match, alt) {
-            return alt && alt.length > 0 ? "[" + alt + "]" : "[image]"
-        })
-        return text.replace(/<\/?[A-Za-z][^>\n]*>/g, function(tag) {
-            return tag.replace(/</g, "&lt;").replace(/>/g, "&gt;")
-        })
-    }
-
     function replySummary(raw) {
         let text = (raw || "").replace(/\s+/g, " ").trim()
         return text.length > 120 ? text.substring(0, 120) + "..." : text
     }
 
     function replyAuthor(isMe, senderName) {
-        if (isMe) return "Вы"
+        if (isMe) return qsTr("Вы")
         if (senderName && senderName.length > 0) return senderName
         return root.peer
     }
@@ -146,7 +136,7 @@ Rectangle {
     function formatFileSize(size) {
         let bytes = Number(size)
         if (!isFinite(bytes) || bytes < 0) return ""
-        const units = ["Б", "КБ", "МБ", "ГБ"]
+        const units = [qsTr("Б"), qsTr("КБ"), qsTr("МБ"), qsTr("ГБ")]
         let unit = 0
         while (bytes >= 1024 && unit < units.length - 1) {
             bytes /= 1024
@@ -218,7 +208,7 @@ Rectangle {
             return
         }
         Chat.ensureImagePreview(messageId)
-        errorText.text = "Загрузка превью фото…"
+        errorText.text = qsTr("Загрузка превью фото…")
         errorBar.visible = true
         errorTimer.restart()
     }
@@ -309,7 +299,7 @@ Rectangle {
                     tiles.push({ id: "", source: pg.photos[j].source, name: pg.photos[j].name,
                                  key: pg.photos[j].key, status: "sending" })
                 out.push({ kind: "photo_group", group_id: pgid, caption: pg.caption, text: pg.caption,
-                           id: "pending:" + pgid, sender: "", sender_name: "Вы", isMe: true,
+                           id: "pending:" + pgid, sender: "", sender_name: qsTr("Вы"), isMe: true,
                            status: "sending", ts: pg.ts, seq: 0, reactions_json: "[]", photos: tiles })
             }
         }
@@ -519,7 +509,7 @@ Rectangle {
     function replyTo(messageId, sender, author, text) {
         pendingReplyId = messageId || ""
         pendingReplySender = sender || ""
-        pendingReplyAuthor = author && author.length > 0 ? author : "Сообщение"
+        pendingReplyAuthor = author && author.length > 0 ? author : qsTr("Сообщение")
         pendingReplyText = replySummary(text)
         msgInput.forceActiveFocus()
     }
@@ -535,6 +525,8 @@ Rectangle {
         copyClipboard.text = text || ""
         copyClipboard.selectAll()
         copyClipboard.copy()
+        copyToast.opacity = 1
+        copyToastTimer.restart()
     }
 
     function hasValidDraftKey() {
@@ -766,13 +758,13 @@ Rectangle {
         }
         function onAttachmentSaved(path) {
             root.downloadingAttachmentId = ""
-            errorText.text = "Файл сохранён"
+            errorText.text = qsTr("Файл сохранён")
             errorBar.visible = true
             errorTimer.restart()
         }
         function onServerHistoryCleared(peer) {
             if (peer !== root.peer) return
-            errorText.text = "Сообщения удалены"
+            errorText.text = qsTr("Сообщения удалены")
             errorBar.visible = true
             errorTimer.restart()
         }
@@ -818,7 +810,7 @@ Rectangle {
             // Видимая обратная связь: даже если sendFile позже упадёт в
             // sendError, пользователь знает, что share-данные дошли до ChatPage.
             if (sent > 0) {
-                errorText.text = "Получено вложений: " + sent + " — идёт отправка"
+                errorText.text = qsTr("Получено вложений: %1 — идёт отправка").arg(sent)
                 errorBar.visible = true
                 errorTimer.restart()
             }
@@ -831,32 +823,32 @@ Rectangle {
 
     ParaFileDialog {
         id: attachDialog
-        title: "Выберите файл"
+        title: qsTr("Выберите файл")
         mode: "open"
         onAccepted: Chat.sendFile(selectedFile)
     }
 
     ParaFileDialog {
         id: photoDialog
-        title: "Выберите фото"
+        title: qsTr("Выберите фото")
         // Мультивыбор: несколько фото уходят одной мозаикой-группой с подписью.
         mode: "openMultiple"
-        nameFilters: ["Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)", "Все файлы (*)"]
+        nameFilters: [qsTr("Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)"), qsTr("Все файлы (*)")]
         onAccepted: root.sendSelectedPhotos(selectedFiles)
     }
 
     ParaFileDialog {
         id: videoDialog
-        title: "Выберите видео"
+        title: qsTr("Выберите видео")
         mode: "open"
-        nameFilters: ["Видео (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.3gp *.ogv)", "Все файлы (*)"]
+        nameFilters: [qsTr("Видео (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.3gp *.ogv)"), qsTr("Все файлы (*)")]
         onAccepted: Chat.sendFile(selectedFile)
     }
 
     ParaFileDialog {
         id: saveDialog
         mode: "folder"
-        title: "Выберите папку для сохранения"
+        title: qsTr("Выберите папку для сохранения")
         onAccepted: {
             root.downloadingAttachmentId = root.pendingDownloadId
             Chat.saveAttachment(root.pendingDownloadId, selectedFolder)
@@ -1000,7 +992,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Ответить"
+                    text: qsTr("Ответить")
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1029,7 +1021,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Скопировать"
+                    text: qsTr("Скопировать")
                     color: messageMenu.messageText.length > 0 ? Theme.textPrimary : Theme.textHint
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1059,7 +1051,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Сохранить фото"
+                    text: qsTr("Сохранить фото")
                     color: savePhotoMenuArea.enabled ? Theme.accentHover : Theme.textHint
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1094,7 +1086,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    text: "Удалить"
+                    text: qsTr("Удалить")
                     color: deleteMenuArea.enabled ? Theme.error : Theme.textHint
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1200,7 +1192,7 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.left: parent.left
                     anchors.leftMargin: 10
-                    text: "Орфография"
+                    text: qsTr("Орфография")
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -1230,7 +1222,7 @@ Rectangle {
             }
 
             Repeater {
-                model: ["Очистить", "Копировать", "Вставить"]
+                model: [qsTr("Очистить"), qsTr("Копировать"), qsTr("Вставить")]
                 delegate: Rectangle {
                     required property int index
                     required property string modelData
@@ -1356,9 +1348,9 @@ Rectangle {
 
             Repeater {
                 model: [
-                    { label: "Файл",   icon: "file"  },
-                    { label: "Фото",   icon: "image" },
-                    { label: "Видео",  icon: "video" }
+                    { label: qsTr("Файл"),   icon: "file"  },
+                    { label: qsTr("Фото"),   icon: "image" },
+                    { label: qsTr("Видео"),  icon: "video" }
                 ]
                 delegate: Rectangle {
                     required property int index
@@ -1463,7 +1455,7 @@ Rectangle {
 
                     Text {
                         Layout.fillWidth: true
-                        text: root.selectionCount + (root.selectionCount === 1 ? " сообщение" : " сообщений")
+                        text: root.selectionCount + (root.selectionCount === 1 ? qsTr(" сообщение") : qsTr(" сообщений"))
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontMd
                         font.family: Theme.fontFamily
@@ -1567,7 +1559,7 @@ Rectangle {
                         }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Уведомлять о прочтении"
+                            text: qsTr("Уведомлять о прочтении")
                             color: Theme.success
                             font.pixelSize: Theme.fontXs
                             font.family: Theme.fontFamily
@@ -1690,7 +1682,7 @@ Rectangle {
                             anchors.fill: parent
                             verticalAlignment: Text.AlignVCenter
                             visible: searchField.text.length === 0
-                            text: "Поиск по диалогу…"
+                            text: qsTr("Поиск по диалогу…")
                             color: Theme.textHint
                             font: searchField.font
                             elide: Text.ElideRight
@@ -1815,6 +1807,12 @@ Rectangle {
                 // действительно завершён, чтобы не сбрасываться во время скролла.
                 property bool stickToBottom: true
                 onHeightChanged: if (stickToBottom) Qt.callLater(positionViewAtEnd)
+                // Высота делегатов с MessageText (Loader/Repeater/измерители) досчитывается
+                // на несколько polish-проходов позже, чем у простого Text, поэтому
+                // одиночного positionViewAtEnd после отправки мало — view встаёт на
+                // «низ», который потом подрастает. Пока стоим у низа и нет жеста —
+                // переставляем в конец при каждом росте contentHeight.
+                onContentHeightChanged: if (stickToBottom && !moving) Qt.callLater(positionViewAtEnd)
                 onMovementEnded: stickToBottom = root.isListAtEnd()
                 onDraggingChanged: if (!dragging) stickToBottom = root.isListAtEnd()
 
@@ -2065,7 +2063,7 @@ Rectangle {
                         onClicked: root.scrollToMessageId(model.reply_to_id)
                     }
 
-                    Text {
+                    MessageText {
                         id: msgText
                         anchors.top: hasReply ? messageReplyPreview.bottom : (isMe ? parent.top : senderLabel.bottom)
                         anchors.topMargin: hasReply ? 6 : (isMe ? 10 : 2)
@@ -2074,15 +2072,11 @@ Rectangle {
                         anchors.leftMargin: 12
                         anchors.rightMargin: 12
                         visible: showMessageText
-                        text: showMessageText ? root.markdownText(model.text) : ""
-                        textFormat: Text.MarkdownText
-                        linkColor: Theme.accentHover
-                        onLinkActivated: function(link) { Qt.openUrlExternally(link) }
-                        color: isMe ? Theme.messageTextOutgoing : Theme.textPrimary
-                        font.pixelSize: Theme.fontMd
-                        font.family: Theme.fontFamily
-                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                        lineHeight: 1.3
+                        raw: showMessageText ? model.text : ""
+                        outgoing: isMe
+                        textColor: isMe ? Theme.messageTextOutgoing : Theme.textPrimary
+                        onLinkActivated: function(url) { Qt.openUrlExternally(url) }
+                        onCopyRequested: function(t) { root.copyMessageText(t) }
                     }
 
                     PhotoMosaic {
@@ -2150,7 +2144,7 @@ Rectangle {
                             }
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                text: "Загрузка превью"
+                                text: qsTr("Загрузка превью")
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontSm
                                 font.family: Theme.fontFamily
@@ -2262,9 +2256,9 @@ Rectangle {
                                 readonly property bool isEphemeral: (model.ephemeral_file_id || "").length > 0
                                 width: parent.width
                                 text: isDownloading
-                                      ? "Сохранение…"
+                                      ? qsTr("Сохранение…")
                                       : root.formatFileSize(model.size)
-                                        + (isEphemeral ? " · временный, до " + root.formatEphemeralExpiry(model.ephemeral_expires_at) : "")
+                                        + (isEphemeral ? qsTr(" · временный, до %1").arg(root.formatEphemeralExpiry(model.ephemeral_expires_at)) : "")
                                 color: isEphemeral ? Theme.accentHover : Theme.textSecondary
                                 font.pixelSize: Theme.fontXs
                                 font.family: Theme.fontFamily
@@ -2365,7 +2359,7 @@ Rectangle {
                 anchors.top: messagesBusy.bottom
                 anchors.topMargin: 8
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "Загрузка сообщений…"
+                text: qsTr("Загрузка сообщений…")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family: Theme.fontFamily
@@ -2375,12 +2369,57 @@ Rectangle {
 
             Text {
                 anchors.centerIn: parent
-                text: "Сообщений пока нет"
+                text: qsTr("Сообщений пока нет")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family: Theme.fontFamily
                 visible: root.messagesLoaded && !Chat.messagesLoading && msgModel.count === 0
                 z: 2
+            }
+
+            // Тост «Скопировано» — обратная связь при копировании текста сообщения
+            // (inline-код/блок кода/пункт меню), особенно нужен на ПК, где клик по
+            // inline-копированию иначе незаметен.
+            Rectangle {
+                id: copyToast
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 18
+                z: 10
+                radius: Theme.radiusMd
+                color: Theme.bgCard
+                border.color: Theme.border
+                border.width: 1
+                implicitWidth: copyToastRow.implicitWidth + 28
+                implicitHeight: 36
+                width: implicitWidth
+                height: implicitHeight
+                opacity: 0
+                visible: opacity > 0
+
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                Row {
+                    id: copyToastRow
+                    anchors.centerIn: parent
+                    spacing: 8
+                    AppIcon {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 16; height: 16
+                        name: "check"
+                        iconColor: Theme.success
+                        strokeWidth: 2.4
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Скопировано")
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.fontSm
+                    }
+                }
+
+                Timer { id: copyToastTimer; interval: 1400; onTriggered: copyToast.opacity = 0 }
             }
 
             Rectangle {
@@ -2422,7 +2461,7 @@ Rectangle {
 
                 ToolTip.visible: scrollToBottomArea.containsMouse
                 ToolTip.delay: 500
-                ToolTip.text: "Вниз"
+                ToolTip.text: qsTr("Вниз")
             }
         }
 
@@ -2538,15 +2577,15 @@ Rectangle {
                 text: {
                     if (!sendIndicator.hasProgress)
                         return Chat.filesInFlight === 1
-                               ? "Отправка вложения…"
-                               : "Отправка вложений: " + Chat.filesInFlight + "…"
+                               ? qsTr("Отправка вложения…")
+                               : qsTr("Отправка вложений: %1…").arg(Chat.filesInFlight)
                     const pct = Math.round(sendIndicator.progressFraction * 100)
                     const filesPart = Chat.filesInFlight > 1
-                        ? " (файлов: " + Chat.filesInFlight + ")"
+                        ? qsTr(" (файлов: %1)").arg(Chat.filesInFlight)
                         : ""
-                    return "Отправка: " + sendIndicator.doneChunks
-                           + "/" + sendIndicator.totalChunks
-                           + " блоков (" + pct + "%)" + filesPart
+                    return qsTr("Отправка: %1/%2 блоков (%3%)%4")
+                           .arg(sendIndicator.doneChunks).arg(sendIndicator.totalChunks)
+                           .arg(pct).arg(filesPart)
                 }
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
@@ -2686,7 +2725,7 @@ Rectangle {
 
                         TextArea {
                             id: msgInput
-                            placeholderText: "Сообщение…"
+                            placeholderText: qsTr("Сообщение…")
                             placeholderTextColor: Theme.textHint
                             wrapMode: TextEdit.Wrap
                             selectByMouse: true
@@ -2813,6 +2852,11 @@ Rectangle {
                             // Длинное нажатие на мобильных
                             onPressAndHold: function(event) {
                                 if (!isMobileOs) return
+                                // Если это было листание поля (скролл многострочного
+                                // ввода), а не удержание — меню не открываем.
+                                if (msgInputScroll.contentItem.moving
+                                        || msgInputScroll.contentItem.dragging)
+                                    return
                                 populateSpellContext(event.x, event.y)
                                 anchorInputMenu(event.x, event.y)
                                 inputMenu.open()
@@ -2920,7 +2964,7 @@ Rectangle {
     EmojiPicker {
         id: inputEmojiPicker
         anchors.centerIn: Overlay.overlay
-        heading: "Эмодзи"
+        heading: qsTr("Эмодзи")
         closeOnPick: false   // можно вставить несколько подряд
         onPicked: function(emoji) {
             msgInput.insert(msgInput.cursorPosition, emoji)
@@ -2947,7 +2991,7 @@ Rectangle {
 
             Text {
                 Layout.fillWidth: true
-                text: "Быстрые реакции"
+                text: qsTr("Быстрые реакции")
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontLg
                 font.family: Theme.fontFamily
@@ -2955,7 +2999,7 @@ Rectangle {
             }
             Text {
                 Layout.fillWidth: true
-                text: "Нажмите на реакцию, чтобы убрать её из списка."
+                text: qsTr("Нажмите на реакцию, чтобы убрать её из списка.")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family: Theme.fontFamily
@@ -2997,18 +3041,18 @@ Rectangle {
                 spacing: 12
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Добавить"
+                    text: qsTr("Добавить")
                     onClicked: reactionEmojiPicker.open()
                 }
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Сбросить"
+                    text: qsTr("Сбросить")
                     secondary: true
                     onClicked: Reactions.reset()
                 }
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Готово"
+                    text: qsTr("Готово")
                     secondary: true
                     onClicked: reactionsConfig.close()
                 }
@@ -3020,7 +3064,7 @@ Rectangle {
     EmojiPicker {
         id: reactionEmojiPicker
         anchors.centerIn: Overlay.overlay
-        heading: "Добавить реакцию"
+        heading: qsTr("Добавить реакцию")
         closeOnPick: true
         onPicked: function(emoji) { Reactions.add(emoji) }
     }
@@ -3043,7 +3087,7 @@ Rectangle {
             spacing: 16
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Удалить сообщения?"
+                text: qsTr("Удалить сообщения?")
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontLg
                 font.family: Theme.fontFamily
@@ -3051,7 +3095,7 @@ Rectangle {
             }
             Text {
                 Layout.fillWidth: true
-                text: "Выбранные сообщения (включая прикреплённые файлы) будут удалены и с сервера, и у собеседника при следующей синхронизации."
+                text: qsTr("Выбранные сообщения (включая прикреплённые файлы) будут удалены и с сервера, и у собеседника при следующей синхронизации.")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family: Theme.fontFamily
@@ -3062,7 +3106,7 @@ Rectangle {
                 spacing: 12
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Удалить"
+                    text: qsTr("Удалить")
                     onClicked: {
                         deleteSelectionConfirm.close()
                         root.confirmDeleteSelection()
@@ -3070,7 +3114,7 @@ Rectangle {
                 }
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Отмена"
+                    text: qsTr("Отмена")
                     secondary: true
                     onClicked: deleteSelectionConfirm.close()
                 }
@@ -3099,7 +3143,7 @@ Rectangle {
             spacing: 16
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Удалить файл с сервера?"
+                text: qsTr("Удалить файл с сервера?")
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontLg
                 font.family: Theme.fontFamily
@@ -3107,7 +3151,7 @@ Rectangle {
             }
             Text {
                 Layout.fillWidth: true
-                text: "Файл скачан и сохранён локально. Если он больше не нужен на сервере — можно его убрать. Сообщение в чате останется."
+                text: qsTr("Файл скачан и сохранён локально. Если он больше не нужен на сервере — можно его убрать. Сообщение в чате останется.")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family: Theme.fontFamily
@@ -3127,7 +3171,7 @@ Rectangle {
                 spacing: 12
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Удалить"
+                    text: qsTr("Удалить")
                     onClicked: {
                         const id = deleteServerCopyPrompt.targetMessageId
                         deleteServerCopyPrompt.close()
@@ -3136,7 +3180,7 @@ Rectangle {
                 }
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Оставить"
+                    text: qsTr("Оставить")
                     secondary: true
                     onClicked: deleteServerCopyPrompt.close()
                 }

@@ -426,12 +426,12 @@ namespace paranoia::voip
                     if (granted.status() == Qt::PermissionStatus::Granted)
                         self->attachAudio();
                     else
-                        emit self->errorOccurred(QStringLiteral("Нет доступа к микрофону."));
+                        emit self->errorOccurred(CallEngine::tr("Нет доступа к микрофону."));
                 });
                 return false;
             }
             if (status == Qt::PermissionStatus::Denied) {
-                emit errorOccurred(QStringLiteral("Нет доступа к микрофону."));
+                emit errorOccurred(CallEngine::tr("Нет доступа к микрофону."));
                 return false;
             }
         }
@@ -480,12 +480,12 @@ namespace paranoia::voip
                     if (granted.status() == Qt::PermissionStatus::Granted)
                         self->attachVideo();
                     else
-                        emit self->errorOccurred(QStringLiteral("Нет доступа к камере."));
+                        emit self->errorOccurred(CallEngine::tr("Нет доступа к камере."));
                 });
                 return false;
             }
             if (status == Qt::PermissionStatus::Denied) {
-                emit errorOccurred(QStringLiteral("Нет доступа к камере."));
+                emit errorOccurred(CallEngine::tr("Нет доступа к камере."));
                 return false;
             }
         }

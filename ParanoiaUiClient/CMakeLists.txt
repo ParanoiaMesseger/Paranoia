@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.11 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.12 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -50,7 +50,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(PARANOIA_BETA_LOGGING 0)
 set(PARANOIA_ENABLE_HUNSPELL 1)
 set(PARANOIA_DEFAULT_STUN_SERVER "" CACHE STRING "Default STUN server for VoIP media, e.g. host:port")
-set(PARANOIA_QT_COMPONENTS Quick Concurrent QuickControls2 QuickDialogs2 QuickLayouts Svg Network LabsSettings)
+set(PARANOIA_QT_COMPONENTS Quick Concurrent QuickControls2 QuickDialogs2 QuickLayouts Svg Network LabsSettings LinguistTools)
 
 if(PARANOIA_IS_DESKTOP)
     list(APPEND PARANOIA_QT_COMPONENTS Widgets)
@@ -508,6 +508,8 @@ qt_add_qml_module(Paranoia
     src/utils/Paths.hpp
     src/utils/Logging.cpp
     src/utils/Logging.hpp
+    src/utils/KeyInjector.cpp
+    src/utils/KeyInjector.hpp
     src/spell/SpellChecker.hpp
     src/spell/SpellChecker.cpp
     src/spell/SpellHighlighter.hpp
@@ -519,6 +521,8 @@ qt_add_qml_module(Paranoia
     ui/Theme.qml
     ui/Reactions.qml
     ui/Components/AppIcon.qml
+    ui/Components/EditKeyToolbar.qml
+    ui/Components/MessageText.qml
     ui/Components/CenteredPane.qml
     ui/Components/ParaFileDialog.qml
     ui/Components/EmojiPicker.qml
@@ -658,18 +662,36 @@ set_target_properties(Paranoia PROPERTIES
 )
 
 if(PARANOIA_IS_IOS)
+    # iOS-специфичный compile-define (виден И компилятору, И AUTOMOC — в отличие
+    # от Qt-шного Q_OS_IOS, которого moc не знает). Нужен для guard'ов классов с
+    # Q_OBJECT, существующих только на iOS (IosFileExport), иначе moc их пропускает
+    # → undefined vtable/metaobject при линковке.
+    target_compile_definitions(Paranoia PRIVATE PARANOIA_IOS)
     target_sources(Paranoia PRIVATE
         src/platform/PlatformNotifications_ios.mm
         src/platform/ShareTarget_ios.mm
+        src/platform/IosFileExport.mm
     )
     set_source_files_properties(
         src/platform/PlatformNotifications_ios.mm
         src/platform/ShareTarget_ios.mm
+        src/platform/IosFileExport.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     set_target_properties(Paranoia PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
         XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/Paranoia.entitlements"
+        # Иконка приложения с вариантами light/dark/tinted (iOS 18) — Xcode
+        # компилирует asset-catalog actool'ом и кладёт в бандл.
+        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
     )
+    target_sources(Paranoia PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets"
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    # LaunchScreen НЕ добавляем вручную: Qt сам генерит launch storyboard
+    # (build_ios/.qt/launch_screen_storyboards/Paranoia/LaunchScreen.storyboard),
+    # которому и соответствует UILaunchStoryboardName=LaunchScreen в Info.plist.in.
+    # Свой ios/LaunchScreen.storyboard давал второй продьюсер того же
+    # LaunchScreen.storyboardc → «Multiple commands produce conflicting outputs».
     target_link_libraries(Paranoia PRIVATE
         "-framework BackgroundTasks"
         "-framework UserNotifications"
@@ -729,6 +751,28 @@ if(PARANOIA_IS_MAC)
     target_link_libraries(Paranoia PRIVATE "-framework UserNotifications")
 endif()
 
+# ── Нативная локализация Apple (iOS/macOS) ────────────────────────────────────
+# NSLocalizedString в src/platform/PlatformNotifications_*.mm читает строки из
+# <lang>.lproj/Localizable.strings; <lang>.lproj/InfoPlist.strings локализует
+# usage-описания и имя из Info.plist. Базовый язык (исходные строки) — русский;
+# en.lproj даёт английский. Кладём в Resources/<lang>.lproj бандла.
+# Это отдельный трек от Qt .ts (qsTr/tr) — он покрывает только нативный Obj-C слой.
+if(PARANOIA_IS_IOS OR PARANOIA_IS_MAC)
+    target_sources(Paranoia PRIVATE
+        apple/en.lproj/Localizable.strings
+        apple/en.lproj/InfoPlist.strings
+        apple/ru.lproj/Localizable.strings
+        apple/ru.lproj/InfoPlist.strings)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/apple/en.lproj/Localizable.strings"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apple/en.lproj/InfoPlist.strings"
+        PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/en.lproj")
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/apple/ru.lproj/Localizable.strings"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apple/ru.lproj/InfoPlist.strings"
+        PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/ru.lproj")
+endif()
+
 if(PARANOIA_IS_ANDROID)
     set_target_properties(Paranoia PROPERTIES
         QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android"
@@ -737,8 +781,11 @@ if(PARANOIA_IS_ANDROID)
         QT_ANDROID_VERSION_NAME "${PARANOIA_APP_VERSION}"
         QT_ANDROID_VERSION_CODE ${PARANOIA_ANDROID_VERSION_CODE}
         QT_ANDROID_PERMISSIONS "android.permission.INTERNET;android.permission.ACCESS_NETWORK_STATE;android.permission.FOREGROUND_SERVICE;android.permission.FOREGROUND_SERVICE_DATA_SYNC;android.permission.POST_NOTIFICATIONS;android.permission.CAMERA;android.permission.READ_EXTERNAL_STORAGE;android.permission.WRITE_EXTERNAL_STORAGE;android.permission.READ_MEDIA_IMAGES;android.permission.READ_MEDIA_VIDEO;android.permission.READ_MEDIA_AUDIO;android.permission.RECORD_AUDIO"
-        QT_ANDROID_APP_ICON "@drawable/icon"
     )
+    # Иконка приложения задаётся напрямую в android/AndroidManifest.xml
+    # (android:icon/@mipmap/icon + roundIcon). Qt НЕ имеет свойства
+    # QT_ANDROID_APP_ICON, а androiddeployqt при пустом android-app-icon вообще
+    # убирает атрибут android:icon — поэтому прописываем его в манифесте вручную.
 endif()
 
 if(PARANOIA_IS_LINUX)
@@ -887,7 +934,15 @@ if(PARANOIA_IS_IOS)
     # Ограничиваем multimedia plugins одним darwin-плагином — это исключает
     # Qt6::QFFmpegMediaPlugin (и его impl), который тянет неразрешённые
     # FFmpeg/VideoToolbox символы.
+    # Статическая iOS-сборка: platforminputcontext-плагины НЕ импортируются
+    # автоматически. Без явного импорта QPlatformInputContextFactory::create(
+    # "qtvirtualkeyboard") (вызывается из нашего QPA-патча qiosintegration.mm,
+    # т.к. QT_IM_MODULE=qtvirtualkeyboard) возвращает null → fallback на
+    # QIOSInputContext → всплывает РОДНАЯ клавиатура, а наша не работает.
+    # Qt6::QVirtualKeyboardPlugin = libqtvirtualkeyboardplugin.a (input-context),
+    # это НЕ то же, что Qt6::VirtualKeyboardplugin (QML-модуль).
     qt_import_plugins(Paranoia
+        INCLUDE Qt6::QVirtualKeyboardPlugin
         INCLUDE_BY_TYPE multimedia Qt6::QDarwinMediaPlugin
     )
 endif()
@@ -942,6 +997,21 @@ if(PARANOIA_IS_ANDROID)
     )
     add_dependencies(Paranoia ParanoiaService)
 endif()
+
+# ── Локализация (Qt Linguist) ─────────────────────────────────────────────
+# Исходные строки в коде/QML — русские (sourcelanguage=ru_RU). Каждая целевая
+# локаль = свой .ts. lupdate сканирует C++/QML цели и собирает строки в .ts;
+# lrelease компилирует .qm и встраивает их в бинарь под префикс :/i18n.
+#   • обновить .ts (после новых qsTr/tr):  cmake --build <dir> --target update_translations
+#   • перевести:                           Qt Linguist → i18n/Paranoia_<locale>.ts
+#   • .qm собираются автоматически при обычной сборке и грузятся QTranslator'ом в main.cpp
+# Новый язык — добавить файл в TS_FILES (напр. i18n/Paranoia_de.ts) и запустить update_translations.
+qt_add_translations(Paranoia
+    TS_FILES
+        i18n/Paranoia_en.ts
+    RESOURCE_PREFIX "/i18n"
+    LUPDATE_OPTIONS -no-obsolete -locations none
+)
 
 qt_finalize_executable(Paranoia)
 

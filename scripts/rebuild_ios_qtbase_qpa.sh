@@ -64,7 +64,7 @@ esac
 QT_HOST_OS="${QT_HOST_OS:-$DEFAULT_HOST_OS}"
 
 # Версия марке��а — менять, когда patch изменяется не-bug-fix способом.
-MARKER_VERSION="1"
+MARKER_VERSION="2"
 MARKER_FILE="$QT_IOS_PREFIX/.paranoia-ios-qpa-im-module-v${MARKER_VERSION}"
 PLUGIN_INSTALLED="$QT_IOS_PREFIX/plugins/platforms/libqios.a"
 

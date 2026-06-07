@@ -20,6 +20,10 @@ Column {
     property bool predictiveText: false
     property int inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoAutoUppercase | (predictiveText ? 0 : Qt.ImhNoPredictiveText)
     property bool showPasteButton: true
+    // readOnly запрещает ввод с клавиатуры (текст можно менять программно) и
+    // одновременно гасит виртуальную клавиатуру Qt — на полях PIN с собственным
+    // экранным keypad'ом это убирает «вторую» всплывающую клавиатуру.
+    property bool readOnly: false
 
     onTextChanged: {
         if (field.text !== root.text) field.text = root.text
@@ -94,6 +98,7 @@ Column {
                 placeholderText: root.placeholder
                 placeholderTextColor: Theme.textHint
                 inputMethodHints: root.inputMethodHints
+                readOnly: root.readOnly
                 background: null
                 selectionColor: Theme.accentDark
                 selectedTextColor: Theme.textPrimary
@@ -134,6 +139,7 @@ Column {
                 placeholderText: root.placeholder
                 placeholderTextColor: Theme.textHint
                 inputMethodHints: root.inputMethodHints
+                readOnly: root.readOnly
                 wrapMode: TextEdit.Wrap
                 background: null
                 selectionColor: Theme.accentDark

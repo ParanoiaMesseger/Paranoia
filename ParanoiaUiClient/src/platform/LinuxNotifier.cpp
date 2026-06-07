@@ -36,7 +36,7 @@ bool LinuxNotifier::showMessageCount(quint64 count)
     // Передаём текущий id как replaces_id — daemon обновит существующую карточку
     // вместо создания новой. Так шторка не пухнет от повторных опросов.
     const QString summary = QStringLiteral("Paranoia");
-    const QString body    = QStringLiteral("Новых сообщений: %1").arg(count);
+    const QString body    = LinuxNotifier::tr("Новых сообщений: %1").arg(count);
     QDBusReply<uint> reply = iface.call(QStringLiteral("Notify"), QStringLiteral("Paranoia"),
                                         static_cast<uint>(m_currentId), QStringLiteral("app.paranoia.client"),
                                         summary, body, QStringList(), QVariantMap(), 5000);

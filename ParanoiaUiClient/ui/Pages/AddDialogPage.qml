@@ -16,7 +16,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Добавить собеседника"
+            title: qsTr("Добавить собеседника")
             onBackClicked: root.back()
         }
 
@@ -40,7 +40,7 @@ Rectangle {
                 ParaInput {
                     id: newPeerInput
                     Layout.fillWidth: true
-                    label: "Имя собеседника (локальная метка)"
+                    label: qsTr("Имя собеседника (локальная метка)")
                     placeholder: "username"
                 }
 
@@ -57,11 +57,11 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Обменяться ключом через QR/JSON"
+                    text: qsTr("Обменяться ключом через QR/JSON")
                     onClicked: {
                         let peer = newPeerInput.text.trim()
                         if (peer === "") {
-                            addDialogError.text = "Введите имя собеседника."
+                            addDialogError.text = qsTr("Введите имя собеседника.")
                             return
                         }
                         addDialogError.text = ""

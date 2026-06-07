@@ -43,13 +43,13 @@ Rectangle {
                     return
                 case 1:
                     // Старый PIN не подошёл — обратно на шаг 0 с баннером.
-                    root.errorText = "Неверный текущий PIN"
+                    root.errorText = qsTr("Неверный текущий PIN")
                     root.oldPin = ""
                     root.newPin = ""
                     root.step = 0
                     return
                 default:
-                    root.errorText = "Не удалось сменить PIN. Подробности — в логах."
+                    root.errorText = qsTr("Не удалось сменить PIN. Подробности — в логах.")
             }
         }
     }
@@ -61,7 +61,7 @@ Rectangle {
 
         // Шаг 0: текущий PIN. Без strength-панели — это просто авторизация.
         SetPin {
-            title: "Введите текущий PIN-код"
+            title: qsTr("Введите текущий PIN-код")
             showStrength: false
             showBack: true
             banner: root.step === 0 ? root.errorText : ""
@@ -76,7 +76,7 @@ Rectangle {
         // Шаг 1: новый PIN. Полная strength-визуализация — пользователь
         // осознанно выбирает длину/стойкость.
         SetPin {
-            title: "Установите новый PIN-код"
+            title: qsTr("Установите новый PIN-код")
             showStrength: true
             showBack: true
             onBack: { root.step = 0 }
@@ -88,14 +88,14 @@ Rectangle {
 
         // Шаг 2: подтверждение. Без strength-панели; на mismatch — баннер.
         SetPin {
-            title: "Подтвердите новый PIN-код"
+            title: qsTr("Подтвердите новый PIN-код")
             showStrength: false
             showBack: true
             banner: root.step === 2 ? root.errorText : ""
             onBack: { root.step = 1; root.errorText = "" }
             onAccepted: function(pin) {
                 if (pin !== root.newPin) {
-                    root.errorText = "PIN'ы не совпадают"
+                    root.errorText = qsTr("PIN'ы не совпадают")
                     return
                 }
                 if (root.busy) return
@@ -133,7 +133,7 @@ Rectangle {
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "Перешифровка профилей…"
+                text: qsTr("Перешифровка профилей…")
                 color: Theme.textPrimary
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.fontMd

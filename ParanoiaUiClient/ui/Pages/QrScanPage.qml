@@ -7,8 +7,8 @@ Rectangle {
     id: root
     color: Theme.bgPrimary
 
-    property string title: "Сканировать QR"
-    property string instructions: "Наведите камеру на QR-код. Сканирование завершится автоматически."
+    property string title: qsTr("Сканировать QR")
+    property string instructions: qsTr("Наведите камеру на QR-код. Сканирование завершится автоматически.")
 
     signal back()
     signal qrScanned(string text)
@@ -90,7 +90,7 @@ Rectangle {
 
                     Text {
                         Layout.fillWidth: true
-                        text: scanner.supported ? "Идёт сканирование…" : "Камера недоступна в этой сборке или на устройстве."
+                        text: scanner.supported ? qsTr("Идёт сканирование…") : qsTr("Камера недоступна в этой сборке или на устройстве.")
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontXs
                         font.family: Theme.fontFamily
@@ -101,7 +101,7 @@ Rectangle {
 
                     ParaButton {
                         Layout.fillWidth: true
-                        text: "Отмена"
+                        text: qsTr("Отмена")
                         secondary: true
                         onClicked: root.back()
                     }

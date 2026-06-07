@@ -1,22 +1,25 @@
 From: Paranoia project (security)
-Subject: iOS QPA: honor QT_IM_MODULE (mirror Android pattern)
+Subject: iOS QPA: honor QT_IM_MODULE + make native text interaction inert when
+ the platform input context is not a QIOSInputContext
 
 The iOS platform plugin in Qt 6.10.x hardcodes `m_inputContext = new
-QIOSInputContext` and never consults `QPlatformInputContextFactory`. That
-makes the QT_IM_MODULE environment variable a no-op on iOS — fields focus
-brings up Apple's UITextResponder regardless of whether the user requested
-qtvirtualkeyboard. Android/Windows/eglfs all honor the factory; this patch
-brings iOS in line.
+QIOSInputContext` and never consults QPlatformInputContextFactory, so
+QT_IM_MODULE is a no-op on iOS (focus always raises Apple's native keyboard).
+Android/Windows/eglfs honor the factory; part 1 of this patch brings iOS in
+line so QT_IM_MODULE=qtvirtualkeyboard makes Qt Virtual Keyboard the platform
+input context (threat model: VKB is the ONLY input surface, no system-keyboard
+keylog path).
 
-Paranoia needs Qt Virtual Keyboard to be the *only* input path on iOS for
-threat-model reasons (suspected keylogging via Apple's predictive ML
-services / third-party keyboards). With QT_IM_MODULE=qtvirtualkeyboard set
-in main.cpp, the patched QPA loads VKB as the platform input context and
-never instantiates QIOSInputContext, so the native iOS keyboard is not
-created. Without QT_IM_MODULE, behavior is unchanged.
+Part 2: once the platform input context is the VKB one (not a QIOSInputContext),
+QIOSInputContext::instance() must NOT static_cast inputContext() to
+QIOSInputContext — that bad pointer crashed QUIView, which calls
+QIOSInputContext::instance()->inputMethodAccepted() from -pressesBegan: and
+-editingInteractionConfiguration (SIGSEGV / NULL deref). We track the real
+instance in a file-static (set in ctor, cleared in dtor); instance() returns it
+(nullptr under VKB), and the two QUIView call sites are guarded so native iOS
+text interaction is simply disabled — exactly the VKB-only behavior we want.
 
-License: this file is LGPLv3 (matches qtbase). Patch is a strict mirror of
-qandroidplatformintegration.cpp upstream (same QtCompany code).
+License: LGPLv3 (matches qtbase).
 
 --- a/src/plugins/platforms/ios/qiosintegration.mm
 +++ b/src/plugins/platforms/ios/qiosintegration.mm
@@ -29,15 +32,14 @@ qandroidplatformintegration.cpp upstream (same QtCompany code).
  #if defined(Q_OS_VISIONOS)
  #include "qiosswiftintegration.h"
  #endif
-@@ -91,7 +93,16 @@ void QIOSIntegration::initialize()
+@@ -91,7 +93,15 @@
  #endif
 
      // Depends on a primary screen being present
 -    m_inputContext = new QIOSInputContext;
 +    // Paranoia patch: honor QT_IM_MODULE (mirror of Android QPA pattern).
-+    // Upstream iOS QPA hardcodes QIOSInputContext, so QT_IM_MODULE has no
-+    // effect — even with qtvirtualkeyboard requested, focus still triggers
-+    // the native iOS keyboard via UITextResponder. We need VKB to be the
++    // Upstream iOS QPA hardcodes QIOSInputContext, so QT_IM_MODULE is a no-op
++    // and focus always raises the native iOS keyboard. We need VKB to be the
 +    // only input surface (threat model: no system-keyboard keylog path).
 +    QStringList icStrs = QPlatformInputContextFactory::requested();
 +    icStrs.removeAll(QStringLiteral("ios"));
@@ -47,3 +49,62 @@ qandroidplatformintegration.cpp upstream (same QtCompany code).
 
      QPointingDevice::Capabilities touchCapabilities = QPointingDevice::Capability::Position | QPointingDevice::Capability::NormalizedPosition;
  #if !defined(Q_OS_VISIONOS)
+--- a/src/plugins/platforms/ios/qiosinputcontext.mm
++++ b/src/plugins/platforms/ios/qiosinputcontext.mm
+@@ -291,10 +291,17 @@
+ }
+
+ // -------------------------------------------------------------------------
++
++// Paranoia patch: track the actual QIOSInputContext instance (set in ctor,
++// cleared in dtor). nullptr when QT_IM_MODULE swapped in qtvirtualkeyboard.
++static QIOSInputContext *s_paranoiaIosInputContext = nullptr;
+
+ QIOSInputContext *QIOSInputContext::instance()
+ {
+-    return static_cast<QIOSInputContext *>(QIOSIntegration::instance()->inputContext());
++    // Paranoia patch: old static_cast assumed inputContext() is a
++    // QIOSInputContext; under qtvirtualkeyboard it is NOT (bad ptr crashed
++    // QUIView). nullptr -> QUIView disables native iOS text interaction.
++    return s_paranoiaIosInputContext;
+ }
+
+ QIOSInputContext::QIOSInputContext()
+@@ -304,11 +311,14 @@
+     , m_textResponder(0)
+ {
+     Q_ASSERT(!qGuiApp->focusWindow());
++    s_paranoiaIosInputContext = this; // Paranoia patch
+     connect(qGuiApp, &QGuiApplication::focusWindowChanged, this, &QIOSInputContext::focusWindowChanged);
+ }
+
+ QIOSInputContext::~QIOSInputContext()
+ {
++    if (s_paranoiaIosInputContext == this) // Paranoia patch
++        s_paranoiaIosInputContext = nullptr;
+     [m_localeListener release];
+     [m_keyboardHideGesture.view removeGestureRecognizer:m_keyboardHideGesture];
+     [m_keyboardHideGesture release];
+--- a/src/plugins/platforms/ios/quiview.mm
++++ b/src/plugins/platforms/ios/quiview.mm
+@@ -643,7 +643,9 @@
+         return false;
+
+     bool eventHandled = false;
+-    const bool imEnabled = QIOSInputContext::instance()->inputMethodAccepted();
++    // Paranoia patch: instance() is nullptr when VKB is the input context.
++    QIOSInputContext *paranoiaIc = QIOSInputContext::instance();
++    const bool imEnabled = paranoiaIc && paranoiaIc->inputMethodAccepted();
+
+     for (UIPress* press in presses) {
+         Qt::KeyboardModifiers qtModifiers = Qt::NoModifier;
+@@ -722,7 +724,9 @@
+     // do not do any hit testing here to check that the focus object is the one
+     // being tapped, as the behavior of native iOS apps is to trigger the menu
+     // regardless of where the gesture is being made.
+-    return QIOSInputContext::instance()->inputMethodAccepted() ?
++    // Paranoia patch: guard nullptr instance() (VKB) -> disable native edit menu.
++    QIOSInputContext *paranoiaIc = QIOSInputContext::instance();
++    return (paranoiaIc && paranoiaIc->inputMethodAccepted()) ?
+         UIEditingInteractionConfigurationDefault : UIEditingInteractionConfigurationNone;
+ }

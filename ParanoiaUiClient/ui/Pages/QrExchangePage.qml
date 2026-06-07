@@ -20,8 +20,17 @@ Rectangle {
     property string peerPayloadJson:  ""
     property string sas:            ""
     property string feedback:       ""
+    property bool   feedbackError:  false
     property var cameraScanTargetField: null
     readonly property bool cameraQrScan: MultimediaAvailable && CameraAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios" || Qt.platform.os === "osx")
+
+    // Единая точка установки фидбэка: текст + явный флаг ошибки (цвет берётся из
+    // feedbackError, а не из проверки подстроки — иначе подсветка ломается при
+    // переводе строк на другой язык).
+    function setFeedback(text, isError) {
+        root.feedback = text
+        root.feedbackError = isError === true
+    }
 
     function openCameraScanner(targetField) {
         root.cameraScanTargetField = targetField
@@ -39,18 +48,18 @@ Rectangle {
 
     ParaFileDialog {
         id: scanImageDialog
-        title: "Выбрать изображение QR payload"
+        title: qsTr("Выбрать изображение QR payload")
         mode: "open"
-        nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
+        nameFilters: [qsTr("Изображения (*.png *.jpg *.jpeg *.bmp *.webp)"), qsTr("Все файлы (*)")]
         property var targetField: null
         onAccepted: {
             const decoded = QrCodeUtils.decodeFromImage(Backend.urlToLocalPath(selectedFile))
             if (!decoded.ok) {
-                root.feedback = decoded.error || "QR-код не прочитан."
+                root.setFeedback(decoded.error || qsTr("QR-код не прочитан."), true)
                 return
             }
             if (targetField) targetField.text = decoded.text
-            root.feedback = "Payload считан из QR-кода."
+            root.setFeedback(qsTr("Payload считан из QR-кода."), false)
         }
     }
 
@@ -61,13 +70,13 @@ Rectangle {
         active: false
         source: active ? "QrScanPage.qml" : ""
         onLoaded: {
-            item.title = "Сканировать QR payload"
-            item.instructions = "Наведите камеру на QR-код с payload обмена ключом."
+            item.title = qsTr("Сканировать QR payload")
+            item.instructions = qsTr("Наведите камеру на QR-код с payload обмена ключом.")
             item.back.connect(function () { cameraScanLoader.active = false })
             item.qrScanned.connect(function (text) {
                 if (root.cameraScanTargetField)
                     root.cameraScanTargetField.text = text
-                root.feedback = "Payload считан из QR-кода."
+                root.setFeedback(qsTr("Payload считан из QR-кода."), false)
                 cameraScanLoader.active = false
             })
         }
@@ -79,7 +88,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: root.updateExisting ? "Обновить ключ диалога" : "Обменяться ключом"
+            title: root.updateExisting ? qsTr("Обновить ключ диалога") : qsTr("Обменяться ключом")
             onBackClicked: root.back()
         }
 
@@ -105,7 +114,7 @@ Rectangle {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "Собеседник: " + root.peer
+                        text: qsTr("Собеседник: %1").arg(root.peer)
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSm
                         font.family: Theme.fontFamily
@@ -120,7 +129,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Кто начинает обмен?"
+                            text: qsTr("Кто начинает обмен?")
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontMd
                             font.family: Theme.fontFamily
@@ -129,12 +138,12 @@ Rectangle {
 
                         ParaButton {
                             Layout.fillWidth: true
-                            text: "Я создаю приглашение"
+                            text: qsTr("Я создаю приглашение")
                             onClicked: {
                                 root.feedback = ""
                                 const res = Backend.createDialogKeyInvitation(root.peer)
                                 if (!res.ok) {
-                                    root.feedback = res.error || "Ошибка создания приглашения."
+                                    root.setFeedback(res.error || qsTr("Ошибка создания приглашения."), true)
                                     return
                                 }
                                 root.localStateJson   = res.stateJson
@@ -146,7 +155,7 @@ Rectangle {
 
                         ParaButton {
                             Layout.fillWidth: true
-                            text: "Я получил приглашение"
+                            text: qsTr("Я получил приглашение")
                             secondary: true
                             onClicked: {
                                 root.feedback = ""
@@ -170,7 +179,7 @@ Rectangle {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: "Ваше приглашение — передайте собеседнику:"
+                                text: qsTr("Ваше приглашение — передайте собеседнику:")
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSm
                                 font.family: Theme.fontFamily
@@ -181,7 +190,7 @@ Rectangle {
                                 Layout.alignment: Qt.AlignHCenter
                                 boxSize: Math.min(260, root.width - 48)
                                 payload: root.localPayloadJson
-                                caption: "Invitation QR"
+                                caption: qsTr("Invitation QR")
                                 visible: root.localPayloadJson.length > 0
                             }
 
@@ -194,32 +203,32 @@ Rectangle {
                                     catch(e) { return root.localPayloadJson }
                                 }
                                 copyText: root.localPayloadJson
-                                onCopied: root.feedback = "Payload скопирован."
+                                onCopied: root.setFeedback(qsTr("Payload скопирован."), false)
                             }
 
                             ParaInput {
                                 id: initiatorResponseInput
                                 Layout.fillWidth: true
-                                label: "Вставьте ответ собеседника:"
-                                placeholder: "Вставьте response payload…"
+                                label: qsTr("Вставьте ответ собеседника:")
+                                placeholder: qsTr("Вставьте response payload…")
                                 lineCount: 5
                             }
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: root.cameraQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
+                                text: root.cameraQrScan ? qsTr("Сканировать QR камерой") : qsTr("Считать QR из файла")
                                 secondary: true
                                 onClicked: root.openQrReader(initiatorResponseInput)
                             }
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: "Рассчитать SAS"
+                                text: qsTr("Рассчитать SAS")
                                 onClicked: {
                                     root.peerPayloadJson = initiatorResponseInput.text.trim()
                                     const res = Backend.dialogKeyFingerprint(root.localStateJson, root.peerPayloadJson)
                                     if (!res.ok) {
-                                        root.feedback = res.error || "Ошибка расчёта SAS."
+                                        root.setFeedback(res.error || qsTr("Ошибка расчёта SAS."), true)
                                         return
                                     }
                                     root.sas = res.fingerprint
@@ -238,26 +247,26 @@ Rectangle {
                             ParaInput {
                                 id: responderInvitationInput
                                 Layout.fillWidth: true
-                                label: "Вставьте приглашение собеседника:"
-                                placeholder: "Вставьте invitation payload…"
+                                label: qsTr("Вставьте приглашение собеседника:")
+                                placeholder: qsTr("Вставьте invitation payload…")
                                 lineCount: 5
                             }
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: root.cameraQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
+                                text: root.cameraQrScan ? qsTr("Сканировать QR камерой") : qsTr("Считать QR из файла")
                                 secondary: true
                                 onClicked: root.openQrReader(responderInvitationInput)
                             }
 
                             ParaButton {
                                 Layout.fillWidth: true
-                                text: "Создать ответ"
+                                text: qsTr("Создать ответ")
                                 onClicked: {
                                     root.peerPayloadJson = responderInvitationInput.text.trim()
                                     const res = Backend.createDialogKeyResponse(root.peerPayloadJson)
                                     if (!res.ok) {
-                                        root.feedback = res.error || "Ошибка создания ответа."
+                                        root.setFeedback(res.error || qsTr("Ошибка создания ответа."), true)
                                         return
                                     }
                                     root.localStateJson   = res.stateJson
@@ -276,7 +285,7 @@ Rectangle {
 
                                 Text {
                                     Layout.fillWidth: true
-                                    text: "Ваш ответ — передайте инициатору:"
+                                    text: qsTr("Ваш ответ — передайте инициатору:")
                                     color: Theme.textPrimary
                                     font.pixelSize: Theme.fontSm
                                     font.family: Theme.fontFamily
@@ -287,7 +296,7 @@ Rectangle {
                                     Layout.alignment: Qt.AlignHCenter
                                     boxSize: Math.min(260, root.width - 48)
                                     payload: root.localPayloadJson
-                                    caption: "Response QR"
+                                    caption: qsTr("Response QR")
                                     visible: root.localPayloadJson.length > 0
                                 }
 
@@ -300,12 +309,12 @@ Rectangle {
                                         catch(e) { return root.localPayloadJson }
                                     }
                                     copyText: root.localPayloadJson
-                                    onCopied: root.feedback = "Payload скопирован."
+                                    onCopied: root.setFeedback(qsTr("Payload скопирован."), false)
                                 }
 
                                 ParaButton {
                                     Layout.fillWidth: true
-                                    text: "Далее — сравнить SAS"
+                                    text: qsTr("Далее — сравнить SAS")
                                     onClicked: {
                                         root.feedback = ""
                                         root.step = 2
@@ -323,7 +332,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Сравните код безопасности по независимому каналу:"
+                            text: qsTr("Сравните код безопасности по независимому каналу:")
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontSm
                             font.family: Theme.fontFamily
@@ -342,7 +351,7 @@ Rectangle {
 
                         ParaButton {
                             Layout.fillWidth: true
-                            text: "Подтвердить"
+                            text: qsTr("Подтвердить")
                             onClicked: {
                                 const res = Backend.confirmDialogKeyExchange(
                                     root.peer,
@@ -352,7 +361,7 @@ Rectangle {
                                     root.updateExisting
                                 )
                                 if (!res.ok) {
-                                    root.feedback = res.error || "Ошибка подтверждения."
+                                    root.setFeedback(res.error || qsTr("Ошибка подтверждения."), true)
                                     return
                                 }
                                 root.feedback = ""
@@ -362,7 +371,7 @@ Rectangle {
 
                         ParaButton {
                             Layout.fillWidth: true
-                            text: "Отмена"
+                            text: qsTr("Отмена")
                             secondary: true
                             onClicked: root.back()
                         }
@@ -371,8 +380,7 @@ Rectangle {
                     Text {
                         Layout.fillWidth: true
                         text: root.feedback
-                        color: root.feedback.includes("Ошибка") || root.feedback.includes("ошиб")
-                               ? Theme.error : Theme.textSecondary
+                        color: root.feedbackError ? Theme.error : Theme.textSecondary
                         font.pixelSize: Theme.fontSm
                         font.family: Theme.fontFamily
                         wrapMode: Text.WordWrap
