@@ -8,6 +8,8 @@ import QtQuick.Layouts
 
 KeyboardLayout {
     sharedLayouts: ['symbols']
+    // inputMethod НЕ задаём — дефолтный HunspellInputMethod движка даёт подсказки
+    // (ru_RU). Явно задать нельзя: тип не QML-инстанцируемый на static iOS.
     keyWeight: 160
     readonly property real normalKeyWidth: normalKey.width
     readonly property real functionKeyWidth: mapFromItem(normalKey, normalKey.width / 2, 0).x

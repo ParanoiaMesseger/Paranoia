@@ -65,26 +65,26 @@ Rectangle {
 
     ParaFileDialog {
         id: exportSaveDialog
-        title: "Сохранить export-файл"
+        title: qsTr("Сохранить export-файл")
         mode: "save"
         defaultSuffix: "json"
-        nameFilters: ["Paranoia export (*.json)", "JSON (*.json)"]
+        nameFilters: [qsTr("Paranoia export (*.json)"), qsTr("JSON (*.json)")]
         onAccepted: {
             exportFilePath = Backend.urlToLocalPath(selectedFile);
             exportFeedback.text = "";
             const profile = ["client", "admin", "full"][profileCombo.currentIndex];
             const peers = profile === "admin" ? [] : root.selectedPeerNames();
             if (profile !== "admin" && peers.length === 0) {
-                exportFeedback.text = "Выберите хотя бы один диалог с keyring.";
+                exportFeedback.text = qsTr("Выберите хотя бы один диалог с keyring.");
                 return;
             }
             const res = Backend.exportProfile(profile, peers, exportReceiverKey.text.trim(), exportFilePath.trim());
             if (res.ok) {
-                exportFeedback.text = "✓ Экспорт сохранён: " + res.path;
+                exportFeedback.text = qsTr("✓ Экспорт сохранён: %1").arg(res.path);
                 if (profile !== "admin")
-                    exportFeedback.text += "\nДиалогов: " + res.dialogues + ", ключей: " + res.keyEntries;
+                    exportFeedback.text += qsTr("\nДиалогов: %1, ключей: %2").arg(res.dialogues).arg(res.keyEntries);
             } else {
-                exportFeedback.text = res.error || "Ошибка экспорта.";
+                exportFeedback.text = res.error || qsTr("Ошибка экспорта.");
             }
         }
     }
@@ -103,7 +103,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Экспорт / Импорт"
+            title: qsTr("Экспорт / Импорт")
             onBackClicked: root.back()
         }
 
@@ -119,7 +119,7 @@ Rectangle {
             }
 
             Repeater {
-                model: ["Экспорт", "Импорт"]
+                model: [qsTr("Экспорт"), qsTr("Импорт")]
                 TabButton {
                     required property string modelData
                     required property int index
@@ -183,7 +183,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Файл шифруется ключом принимающего устройства."
+                            text: qsTr("Файл шифруется ключом принимающего устройства.")
                             color: Theme.textSecondary
                             font.pixelSize: Theme.fontSm
                             font.family: Theme.fontFamily
@@ -191,7 +191,7 @@ Rectangle {
                         }
 
                         Text {
-                            text: "Профиль экспорта:"
+                            text: qsTr("Профиль экспорта:")
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontSm
                             font.family: Theme.fontFamily
@@ -201,7 +201,7 @@ Rectangle {
                             id: profileCombo
                             Layout.fillWidth: true
                             implicitHeight: 44
-                            model: ["client — клиентские данные", "admin — ключи администратора", "full — всё"]
+                            model: [qsTr("client — клиентские данные"), qsTr("admin — ключи администратора"), qsTr("full — всё")]
                             background: Rectangle {
                                 implicitHeight: 44
                                 radius: Theme.radiusSm
@@ -259,7 +259,7 @@ Rectangle {
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Диалоги для экспорта:"
+                            text: qsTr("Диалоги для экспорта:")
                             color: Theme.textPrimary
                             font.pixelSize: Theme.fontSm
                             font.family: Theme.fontFamily
@@ -321,7 +321,7 @@ Rectangle {
                                         }
 
                                         Text {
-                                            text: modelData.hasKey ? "keyring" : "нет keyring"
+                                            text: modelData.hasKey ? "keyring" : qsTr("нет keyring")
                                             color: modelData.hasKey ? Theme.textSecondary : Theme.error
                                             font.pixelSize: Theme.fontXs
                                             font.family: Theme.fontFamily
@@ -342,7 +342,7 @@ Rectangle {
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "Нет диалогов с keyring"
+                                text: qsTr("Нет диалогов с keyring")
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontSm
                                 font.family: Theme.fontFamily
@@ -353,12 +353,12 @@ Rectangle {
                         ParaInput {
                             id: exportReceiverKey
                             Layout.fillWidth: true
-                            placeholder: "Публичный ключ принимающего устройства"
+                            placeholder: qsTr("Публичный ключ принимающего устройства")
                         }
 
                         Text {
                             Layout.fillWidth: true
-                            text: "Файл содержит ваши ключи. Храните его в безопасном месте."
+                            text: qsTr("Файл содержит ваши ключи. Храните его в безопасном месте.")
                             color: Theme.textSecondary
                             font.pixelSize: Theme.fontXs
                             font.family: Theme.fontFamily
@@ -377,7 +377,7 @@ Rectangle {
 
                         ParaButton {
                             Layout.fillWidth: true
-                            text: "Экспортировать"
+                            text: qsTr("Экспортировать")
                             onClicked: {
                                 exportSaveDialog.currentFile = Qt.resolvedUrl("paranoia-export.json");
                                 exportSaveDialog.open();

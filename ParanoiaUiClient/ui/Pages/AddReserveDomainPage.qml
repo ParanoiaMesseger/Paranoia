@@ -99,13 +99,13 @@ Rectangle {
             if (!root.matchesTarget(type, id)) return
             reserveDomainInput.text = ""
             root.feedbackError = false
-            root.feedbackText = "Резервный домен добавлен: " + reserve
+            root.feedbackText = qsTr("Резервный домен добавлен: %1").arg(reserve)
             root.refreshReserveDomains()
         }
         function onReserveDomainRemoved(type, id, reserve) {
             if (!root.matchesTarget(type, id)) return
             root.feedbackError = false
-            root.feedbackText = "Резервный домен удалён: " + reserve
+            root.feedbackText = qsTr("Резервный домен удалён: %1").arg(reserve)
             root.refreshReserveDomains()
         }
         function onReserveDomainCheckFinished(type, id, reserve, ok, msg, pingMs) {
@@ -124,13 +124,13 @@ Rectangle {
             if (profileId !== root.targetId) return
             turnInput.text = ""
             root.turnFeedbackError = false
-            root.turnFeedbackText = "TURN-сервер добавлен: " + url
+            root.turnFeedbackText = qsTr("TURN-сервер добавлен: %1").arg(url)
             root.refreshTurnServers()
         }
         function onTurnServerRemoved(profileId, url) {
             if (profileId !== root.targetId) return
             root.turnFeedbackError = false
-            root.turnFeedbackText = "TURN-сервер удалён: " + url
+            root.turnFeedbackText = qsTr("TURN-сервер удалён: %1").arg(url)
             root.refreshTurnServers()
         }
         function onTurnServerCheckFinished(profileId, url, ok, msg, pingMs) {
@@ -149,7 +149,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: root.targetType === "client" ? "Резерв клиента" : "Резерв админа"
+            title: root.targetType === "client" ? qsTr("Резерв клиента") : qsTr("Резерв админа")
             onBackClicked: root.back()
         }
 
@@ -171,7 +171,7 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Резервные адреса используются при проблемах с доступом к основному адресу."
+                    text: qsTr("Резервные адреса используются при проблемах с доступом к основному адресу.")
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -180,7 +180,7 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Основной адрес: " + root.primaryDomain
+                    text: qsTr("Основной адрес: %1").arg(root.primaryDomain)
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -193,7 +193,7 @@ Rectangle {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "Текущие резервные адреса"
+                        text: qsTr("Текущие резервные адреса")
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontMd
                         font.family: Theme.fontFamily
@@ -211,7 +211,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     visible: root.reserveDomains.length === 0
-                    text: "Резервные адреса ещё не добавлены."
+                    text: qsTr("Резервные адреса ещё не добавлены.")
                     color: Theme.textHint
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -257,9 +257,9 @@ Rectangle {
                                 Text {
                                     Layout.alignment: Qt.AlignVCenter
                                     text: {
-                                        if (checkState === "checking") return "проверка…"
+                                        if (checkState === "checking") return qsTr("проверка…")
                                         if (checkState === "ok")       return pingMs + " ms"
-                                        if (checkState === "error")    return "недоступен"
+                                        if (checkState === "error")    return qsTr("недоступен")
                                         return "—"
                                     }
                                     color: {
@@ -320,7 +320,7 @@ Rectangle {
                 ParaInput {
                     id: reserveDomainInput
                     Layout.fillWidth: true
-                    label: "Новый резервный домен"
+                    label: qsTr("Новый резервный домен")
                     placeholder: "cdn.example.com"
                 }
 
@@ -337,12 +337,12 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Добавить резервный домен"
+                    text: qsTr("Добавить резервный домен")
                     onClicked: {
                         const reserveDomain = reserveDomainInput.text.trim()
                         if (reserveDomain === "") {
                             root.feedbackError = true
-                            root.feedbackText = "Укажите резервный домен."
+                            root.feedbackText = qsTr("Укажите резервный домен.")
                             return
                         }
                         root.feedbackError = false
@@ -365,7 +365,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     visible: root.targetType === "client"
-                    text: "Резервные TURN-серверы используются для звонков, когда не удается установить прямое соединение между собеседниками и основной TURN сервер недоступен."
+                    text: qsTr("Резервные TURN-серверы используются для звонков, когда не удается установить прямое соединение между собеседниками и основной TURN сервер недоступен.")
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -379,7 +379,7 @@ Rectangle {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "Текущие TURN-серверы"
+                        text: qsTr("Текущие TURN-серверы")
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontMd
                         font.family: Theme.fontFamily
@@ -397,7 +397,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     visible: root.targetType === "client" && root.turnServers.length === 0
-                    text: "Резервные TURN-серверы не добавлены."
+                    text: qsTr("Резервные TURN-серверы не добавлены.")
                     color: Theme.textHint
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
@@ -442,9 +442,9 @@ Rectangle {
                                 Text {
                                     Layout.alignment: Qt.AlignVCenter
                                     text: {
-                                        if (turnState === "checking") return "проверка…"
-                                        if (turnState === "ok")       return "ok"
-                                        if (turnState === "error")    return "ошибка"
+                                        if (turnState === "checking") return qsTr("проверка…")
+                                        if (turnState === "ok")       return qsTr("ok")
+                                        if (turnState === "error")    return qsTr("ошибка")
                                         return "—"
                                     }
                                     color: {
@@ -501,7 +501,7 @@ Rectangle {
                     id: turnInput
                     Layout.fillWidth: true
                     visible: root.targetType === "client"
-                    label: "Новый TURN-сервер"
+                    label: qsTr("Новый TURN-сервер")
                     placeholder: "turn.example.com:3478"
                 }
 
@@ -519,12 +519,12 @@ Rectangle {
                 ParaButton {
                     Layout.fillWidth: true
                     visible: root.targetType === "client"
-                    text: "Добавить TURN-сервер"
+                    text: qsTr("Добавить TURN-сервер")
                     onClicked: {
                         const t = turnInput.text.trim()
                         if (t === "") {
                             root.turnFeedbackError = true
-                            root.turnFeedbackText = "Укажите адрес TURN-сервера."
+                            root.turnFeedbackText = qsTr("Укажите адрес TURN-сервера.")
                             return
                         }
                         root.turnFeedbackError = false

@@ -135,10 +135,10 @@ namespace
     QString userFacingAttachmentError(const QString &error)
     {
         if (error.contains(QStringLiteral("attachment_incomplete"), Qt::CaseInsensitive))
-            return QStringLiteral("Вложение загружено на сервер не полностью. Попросите отправить файл повторно.");
+            return ChatBackend::tr("Вложение загружено на сервер не полностью. Попросите отправить файл повторно.");
         if (error.contains(QStringLiteral("attachment_bad_size"), Qt::CaseInsensitive) ||
             error.contains(QStringLiteral("attachment_bad_chunk"), Qt::CaseInsensitive))
-            return QStringLiteral("Вложение повреждено. Попросите отправить файл повторно.");
+            return ChatBackend::tr("Вложение повреждено. Попросите отправить файл повторно.");
         return error;
     }
 
@@ -341,17 +341,17 @@ void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId,
                                   const QString &replyText)
 {
     if (m_activePeer.isEmpty()) {
-        emit sendError("Нет активного диалога.");
+        emit sendError(ChatBackend::tr("Нет активного диалога."));
         return;
     }
     auto session = SessionStore::instance()->activeSession();
     if (!session) {
-        emit sendError("Нет активной сессии.");
+        emit sendError(ChatBackend::tr("Нет активной сессии."));
         return;
     }
     auto *dlg = session->findDialog(m_activePeer);
     if (!dlg) {
-        emit sendError("Диалог не найден.");
+        emit sendError(ChatBackend::tr("Диалог не найден."));
         return;
     }
     const QString peer         = m_activePeer;
@@ -399,11 +399,11 @@ void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId,
                 self->m_sendInFlightKeys.remove(sendKey);
                 self->m_recentSendAtMs.remove(sendKey);
                 if (err == "duplicate_seq" || err == "invalid_seq")
-                    emit self->sendError("Ошибка синхронизации seq. Повторите отправку после обновления диалога.");
+                    emit self->sendError(ChatBackend::tr("Ошибка синхронизации seq. Повторите отправку после обновления диалога."));
                 else if (err == "server_unavailable")
-                    emit self->sendError("Сервер недоступен. Проверьте соединение.");
+                    emit self->sendError(ChatBackend::tr("Сервер недоступен. Проверьте соединение."));
                 else
-                    emit self->sendError("Ошибка отправки сообщения.");
+                    emit self->sendError(ChatBackend::tr("Ошибка отправки сообщения."));
             });
             return;
         }
@@ -428,12 +428,12 @@ void ChatBackend::sendReaction(const QString &targetId, const QString &emoji)
 
     auto session = SessionStore::instance()->activeSession();
     if (!session) {
-        emit sendError("Нет активной сессии.");
+        emit sendError(ChatBackend::tr("Нет активной сессии."));
         return;
     }
     auto *dlg = session->findDialog(m_activePeer);
     if (!dlg) {
-        emit sendError("Диалог не найден.");
+        emit sendError(ChatBackend::tr("Диалог не найден."));
         return;
     }
 
@@ -468,9 +468,9 @@ void ChatBackend::sendReaction(const QString &targetId, const QString &emoji)
                     if (!self) return;
                     self->m_sendInFlightKeys.remove(sendKey);
                     if (err == "server_unavailable")
-                        emit self->sendError("Сервер недоступен. Проверьте соединение.");
+                        emit self->sendError(ChatBackend::tr("Сервер недоступен. Проверьте соединение."));
                     else
-                        emit self->sendError("Ошибка отправки реакции.");
+                        emit self->sendError(ChatBackend::tr("Ошибка отправки реакции."));
                 });
                 return;
             }
@@ -489,17 +489,17 @@ void ChatBackend::sendReaction(const QString &targetId, const QString &emoji)
 void ChatBackend::sendFile(const QString &fileUrlOrPath)
 {
     if (m_activePeer.isEmpty()) {
-        emit sendError("Нет активного диалога.");
+        emit sendError(ChatBackend::tr("Нет активного диалога."));
         return;
     }
     auto session = SessionStore::instance()->activeSession();
     if (!session) {
-        emit sendError("Нет активной сессии.");
+        emit sendError(ChatBackend::tr("Нет активной сессии."));
         return;
     }
     auto *dlg = session->findDialog(m_activePeer);
     if (!dlg) {
-        emit sendError("Диалог не найден.");
+        emit sendError(ChatBackend::tr("Диалог не найден."));
         return;
     }
     requestAndroidFileAccessIfNeeded();
@@ -515,7 +515,7 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
             qWarning().noquote() << "ChatBackend::sendFile file not readable; size=" << info.size()
                                  << "exists=" << info.exists() << "isFile=" << info.isFile()
                                  << "isReadable=" << info.isReadable();
-            emit sendError("Файл недоступен для чтения.");
+            emit sendError(ChatBackend::tr("Файл недоступен для чтения."));
             return;
         }
         originalSize     = info.size();
@@ -579,13 +579,13 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
                 self->m_sendInFlightKeys.remove(sendKey);
                 self->decrementFilesInFlight();
                 if (err == "file_read_error")
-                    emit self->sendError("Не удалось прочитать файл.");
+                    emit self->sendError(ChatBackend::tr("Не удалось прочитать файл."));
                 else if (err == "file_too_large")
-                    emit self->sendError("Файл слишком большой — превышает лимит сервера.");
+                    emit self->sendError(ChatBackend::tr("Файл слишком большой — превышает лимит сервера."));
                 else if (err == "server_unavailable")
-                    emit self->sendError("Сервер недоступен. Проверьте соединение.");
+                    emit self->sendError(ChatBackend::tr("Сервер недоступен. Проверьте соединение."));
                 else
-                    emit self->sendError("Ошибка отправки файла: " + err);
+                    emit self->sendError(ChatBackend::tr("Ошибка отправки файла: ") + err);
             });
             return;
         }
@@ -606,17 +606,17 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
 void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QString &caption)
 {
     if (m_activePeer.isEmpty()) {
-        emit sendError("Нет активного диалога.");
+        emit sendError(ChatBackend::tr("Нет активного диалога."));
         return;
     }
     auto session = SessionStore::instance()->activeSession();
     if (!session) {
-        emit sendError("Нет активной сессии.");
+        emit sendError(ChatBackend::tr("Нет активной сессии."));
         return;
     }
     auto *dlg = session->findDialog(m_activePeer);
     if (!dlg) {
-        emit sendError("Диалог не найден.");
+        emit sendError(ChatBackend::tr("Диалог не найден."));
         return;
     }
     requestAndroidFileAccessIfNeeded();
@@ -654,7 +654,7 @@ void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QStri
         ++idx;
     }
     if (photos.isEmpty()) {
-        emit sendError("Не выбрано ни одного фото.");
+        emit sendError(ChatBackend::tr("Не выбрано ни одного фото."));
         return;
     }
 
@@ -714,7 +714,7 @@ void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QStri
                 }
                 if (json.isEmpty()) {
                     QMetaObject::invokeMethod(self, [self, err]() {
-                        if (self) emit self->sendError(QStringLiteral("Ошибка отправки фото: ") + err);
+                        if (self) emit self->sendError(ChatBackend::tr("Ошибка отправки фото: ") + err);
                     });
                     continue;
                 }
@@ -817,7 +817,7 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
                 emit self->attachmentDownloaded(messageId, filename);
                 if (peer == self->m_activePeer) self->loadHistory(peer);
             } else {
-                emit self->receiveError("Не удалось сохранить файл: " + userFacingAttachmentError(err));
+                emit self->receiveError(ChatBackend::tr("Не удалось сохранить файл: ") + userFacingAttachmentError(err));
             }
         });
     });
@@ -959,12 +959,12 @@ void ChatBackend::deleteMessagesUntil(quint64 cutSeq)
                 emit self->dialogsChanged();
             }
             if (localRc != 0) {
-                emit self->receiveError("Не удалось удалить локальные сообщения: " + err);
+                emit self->receiveError(ChatBackend::tr("Не удалось удалить локальные сообщения: ") + err);
             } else if (serverRc != 0) {
                 if (err == "server_unavailable")
-                    emit self->serverHistoryError("Сообщения удалены локально, но сервер недоступен.");
+                    emit self->serverHistoryError(ChatBackend::tr("Сообщения удалены локально, но сервер недоступен."));
                 else
-                    emit self->serverHistoryError("Сообщения удалены локально, ошибка сервера: " + err);
+                    emit self->serverHistoryError(ChatBackend::tr("Сообщения удалены локально, ошибка сервера: ") + err);
             } else {
                 emit self->serverHistoryCleared(peer);
             }
@@ -1026,7 +1026,7 @@ void ChatBackend::deleteMessages(const QStringList &messageIds)
     }
     if (ranges.isEmpty()) {
         if (!missing.isEmpty())
-            emit receiveError(QStringLiteral("Не удалось определить seq у %1 сообщений.").arg(missing.size()));
+            emit receiveError(ChatBackend::tr("Не удалось определить seq у %1 сообщений.").arg(missing.size()));
         return;
     }
     ranges = mergeRanges(ranges);
@@ -1078,9 +1078,9 @@ void ChatBackend::deleteMessages(const QStringList &messageIds)
                 emit self->messagesDeleted(peer);
                 emit self->dialogsChanged();
             } else if (err == "server_unavailable")
-                emit self->serverHistoryError("Сервер недоступен.");
+                emit self->serverHistoryError(ChatBackend::tr("Сервер недоступен."));
             else
-                emit self->serverHistoryError("Не удалось удалить часть сообщений: " + err);
+                emit self->serverHistoryError(ChatBackend::tr("Не удалось удалить часть сообщений: ") + err);
         });
     });
 }
@@ -1127,7 +1127,7 @@ void ChatBackend::removeAttachmentChunksFromServer(const QString &messageId)
         QMetaObject::invokeMethod(self, [self, rc, err]() {
             if (!self) return;
             if (rc != 0 && err != "server_unavailable")
-                emit self->serverHistoryError("Не удалось удалить файл с сервера: " + err);
+                emit self->serverHistoryError(ChatBackend::tr("Не удалось удалить файл с сервера: ") + err);
         });
     });
 }
@@ -1177,7 +1177,7 @@ void ChatBackend::setReadReceiptsEnabled(bool enabled)
                 }
                 if (peer == self->m_activePeer) emit self->readReceiptsEnabledChanged();
                 emit self->dialogsChanged();
-                emit self->receiveError("Не удалось изменить уведомления о прочтении: " + err);
+                emit self->receiveError(ChatBackend::tr("Не удалось изменить уведомления о прочтении: ") + err);
             });
         });
 }
@@ -1222,9 +1222,9 @@ void ChatBackend::fetchMessages()
                 self->m_receiveInFlight = false;
                 self->endMessagesLoading();
                 if (lastErr == "server_unavailable")
-                    emit self->receiveError("Сервер недоступен.");
+                    emit self->receiveError(ChatBackend::tr("Сервер недоступен."));
                 else if (!lastErr.isEmpty())
-                    emit self->receiveError("Ошибка получения: " + lastErr);
+                    emit self->receiveError(ChatBackend::tr("Ошибка получения: ") + lastErr);
                 if (self->m_receiveAgainAfterCurrent) {
                     self->m_receiveAgainAfterCurrent = false;
                     self->fetchMessages();
@@ -1237,7 +1237,7 @@ void ChatBackend::fetchMessages()
             self->m_receiveInFlight = false;
             self->endMessagesLoading();
             if (lastErr.startsWith("decryption_failed:"))
-                emit self->receiveError("Ошибка расшифровки: неверный ключ диалога или повреждённые данные.");
+                emit self->receiveError(ChatBackend::tr("Ошибка расшифровки: неверный ключ диалога или повреждённые данные."));
             const QVariantList messages = self->parseMessages(json);
             const bool appActive        = applicationIsActive();
             if (peer == self->m_activePeer) {
@@ -1748,7 +1748,7 @@ QVariantList ChatBackend::parseMessages(const QString &json) const
     const auto displayNameForSender = [&](const QString &sender, bool selfAsYou) {
         if (sender.isEmpty()) return QString();
         if ((!myId.isEmpty() && sender == myId) || (!myUsername.isEmpty() && sender == myUsername))
-            return selfAsYou ? QStringLiteral("Вы") : myUsername;
+            return selfAsYou ? ChatBackend::tr("Вы") : myUsername;
         return peerIdToUsername.value(sender, sender);
     };
     auto doc           = QJsonDocument::fromJson(json.toUtf8());
@@ -1802,7 +1802,7 @@ QVariantList ChatBackend::parseMessages(const QString &json) const
             msg["text"]    = obj.value(QStringLiteral("caption")).toString();
         }
         else if (kind == "file" || kind == "image" || kind == "voice")
-            msg["text"] = obj["filename"].toString(obj["text"].toString("Файл"));
+            msg["text"] = obj["filename"].toString(obj["text"].toString(ChatBackend::tr("Файл")));
         else if (kind == "reaction") {
             msg["emoji"]     = obj["emoji"].toString();
             msg["target_id"] = obj["target_id"].toString();

@@ -577,5 +577,112 @@ Canvas {
             ctx.stroke()
             return
         }
+
+        // --- Иконки навигации по тексту (панель над клавиатурой) ---
+
+        if (name === "charLeft") {
+            // Стрелка влево на символ.
+            ctx.beginPath()
+            ctx.moveTo(19, 12)
+            ctx.lineTo(6, 12)
+            ctx.moveTo(11, 7)
+            ctx.lineTo(6, 12)
+            ctx.lineTo(11, 17)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "charRight") {
+            // Стрелка вправо на символ.
+            ctx.beginPath()
+            ctx.moveTo(5, 12)
+            ctx.lineTo(18, 12)
+            ctx.moveTo(13, 7)
+            ctx.lineTo(18, 12)
+            ctx.lineTo(13, 17)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "lineUp") {
+            // Стрелка на строку вверх.
+            ctx.beginPath()
+            ctx.moveTo(12, 19)
+            ctx.lineTo(12, 6)
+            ctx.moveTo(7, 11)
+            ctx.lineTo(12, 6)
+            ctx.lineTo(17, 11)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "lineDown") {
+            // Стрелка на строку вниз.
+            ctx.beginPath()
+            ctx.moveTo(12, 5)
+            ctx.lineTo(12, 18)
+            ctx.moveTo(7, 13)
+            ctx.lineTo(12, 18)
+            ctx.lineTo(17, 13)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "goToStart") {
+            // В начало: вертикальная черта слева + стрелка к ней.
+            ctx.beginPath()
+            ctx.moveTo(5, 5)
+            ctx.lineTo(5, 19)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(21, 12)
+            ctx.lineTo(9, 12)
+            ctx.moveTo(14, 7)
+            ctx.lineTo(9, 12)
+            ctx.lineTo(14, 17)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "endOfLine") {
+            // В конец строки: стрелка вправо + вертикальная черта справа.
+            ctx.beginPath()
+            ctx.moveTo(19, 5)
+            ctx.lineTo(19, 19)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(3, 12)
+            ctx.lineTo(15, 12)
+            ctx.moveTo(10, 7)
+            ctx.lineTo(15, 12)
+            ctx.lineTo(10, 17)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "selectAll") {
+            // Выделить всё: уголки рамки выделения + две строки текста.
+            ctx.beginPath()
+            ctx.moveTo(4, 8)
+            ctx.lineTo(4, 5)
+            ctx.lineTo(7, 5)
+            ctx.moveTo(17, 5)
+            ctx.lineTo(20, 5)
+            ctx.lineTo(20, 8)
+            ctx.moveTo(20, 16)
+            ctx.lineTo(20, 19)
+            ctx.lineTo(17, 19)
+            ctx.moveTo(7, 19)
+            ctx.lineTo(4, 19)
+            ctx.lineTo(4, 16)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(8, 10.5)
+            ctx.lineTo(16, 10.5)
+            ctx.moveTo(8, 13.5)
+            ctx.lineTo(16, 13.5)
+            ctx.stroke()
+            return
+        }
     }
 }

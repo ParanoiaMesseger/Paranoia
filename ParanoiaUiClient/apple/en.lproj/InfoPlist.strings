@@ -1,0 +1,10 @@
+/* Paranoia — localized Info.plist values, English.
+   Overrides the (Russian) base values in ios/Info.plist.in & macos/Info.plist.in
+   for English-locale users. Keys are Info.plist keys. */
+
+"CFBundleDisplayName" = "Paranoia";
+"NSCameraUsageDescription" = "The camera is used to scan key-exchange QR codes and for video calls.";
+"NSMicrophoneUsageDescription" = "The microphone is used for voice and video calls.";
+"NSLocalNetworkUsageDescription" = "Local network access is used for P2P calls and STUN/TURN on the same Wi-Fi network.";
+"NSPhotoLibraryUsageDescription" = "Photo library access lets you attach images to messages.";
+"NSPhotoLibraryAddUsageDescription" = "Photo library access lets you save received images.";

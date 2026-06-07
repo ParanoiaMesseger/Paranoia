@@ -1,8 +1,7 @@
 echo "Загрузка paranoia-server"
 sudo -n true
 
-GITLAB_HOST="https://github.com"
-PROJECT_PATH="ParanoiaMesseger/Paranoia"
+GITHUB_REPO="ParanoiaMesseger/Paranoia"
 BINARY_NAME="paranoia"
 INSTALL_DIR="/opt/Paranoia/"
 
@@ -27,14 +26,14 @@ ASSET_NAME="${BINARY_NAME}-${ARCH}"
 echo "Detected architecture: $ARCH"
 echo "Looking for asset: $ASSET_NAME"
 
-# --- Получение последнего тега релиза через GitLab API ---
-PROJECT_ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$PROJECT_PATH', safe=''))")
-API_URL="${GITLAB_HOST}/api/v4/projects/${PROJECT_ENCODED}/releases"
+# --- Получение последнего релиза через GitHub API ---
+API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 
 echo "Fetching latest release..."
-RELEASE_JSON=$(curl -fsSL "$API_URL")
+RELEASE_JSON=$(curl -fsSL -H "Accept: application/vnd.github+json" "$API_URL")
 
-LATEST_TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+# JSON парсим через python3 (GitHub ставит пробел после ':', grep ненадёжен).
+LATEST_TAG=$(printf '%s' "$RELEASE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name',''))")
 
 if [ -z "$LATEST_TAG" ]; then
     echo "Failed to fetch latest release tag" >&2
@@ -44,8 +43,8 @@ fi
 echo "Latest release: $LATEST_TAG"
 
 # --- Формирование URL скачивания ---
-# GitLab хранит артефакты релиза по следующему пути:
-DOWNLOAD_URL="${GITLAB_HOST}/${PROJECT_PATH}/-/releases/${LATEST_TAG}/downloads/${ASSET_NAME}"
+# GitHub отдаёт ассеты по предсказуемому пути releases/download/<tag>/<asset>.
+DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_TAG}/${ASSET_NAME}"
 
 echo "Downloading from: $DOWNLOAD_URL"
 
@@ -57,10 +56,16 @@ HTTP_CODE=$(curl -fsSL -w "%{http_code}" -o "$TMP_FILE" "$DOWNLOAD_URL")
 if [ "$HTTP_CODE" != "200" ]; then
     echo "Download failed (HTTP $HTTP_CODE)" >&2
 
-    # Фолбэк: поискать ссылку в links релиза
-    echo "Trying release links API..."
-    LINKS_URL="${GITLAB_HOST}/api/v4/projects/${PROJECT_ENCODED}/releases/${LATEST_TAG}/assets/links"
-    ASSET_URL=$(curl -fsSL "$LINKS_URL" | grep -o '"url":"[^"]*'"$ASSET_NAME"'[^"]*"' | head -1 | cut -d'"' -f4)
+    # Фолбэк: найти browser_download_url нужного ассета в JSON релиза.
+    echo "Trying release assets API..."
+    ASSET_URL=$(printf '%s' "$RELEASE_JSON" | python3 -c "
+import json,sys
+rel=json.load(sys.stdin)
+name='$ASSET_NAME'
+for a in rel.get('assets',[]):
+    if name in a.get('name',''):
+        print(a.get('browser_download_url','')); break
+")
 
     if [ -z "$ASSET_URL" ]; then
         echo "Asset '$ASSET_NAME' not found in release $LATEST_TAG" >&2

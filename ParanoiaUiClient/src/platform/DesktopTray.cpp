@@ -27,7 +27,7 @@ void DesktopTray::showWindow()
 }
 DesktopTray::DesktopTray(QQmlApplicationEngine &engine)
     : engine_(engine), tray_(QIcon(QStringLiteral(":/logo_symbol.svg"))),
-      showAction_(QStringLiteral("Открыть Paranoia"), &trayMenu_), quitAction_(QStringLiteral("Выйти"), &trayMenu_)
+      showAction_(DesktopTray::tr("Открыть Paranoia"), &trayMenu_), quitAction_(DesktopTray::tr("Выйти"), &trayMenu_)
 {
     trayMenu_.addAction(&showAction_);
     trayMenu_.addSeparator();
@@ -54,7 +54,7 @@ void DesktopTray::notificationAvailable(quint64 count)
     if (linuxNotifier_.isAvailable() && linuxNotifier_.showMessageCount(count)) return;
 #endif
     if (tray_.isVisible())
-        tray_.showMessage(QStringLiteral("Paranoia"), QStringLiteral("Новых сообщений: %1").arg(count),
+        tray_.showMessage(QStringLiteral("Paranoia"), DesktopTray::tr("Новых сообщений: %1").arg(count),
                           QSystemTrayIcon::Information, 10000);
 #else
     Q_UNUSED(count);

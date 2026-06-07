@@ -57,7 +57,7 @@ Rectangle {
 
         Text {
             Layout.alignment:   Qt.AlignHCenter
-            text:               "Мессенджер, который ничего о тебе не помнит"
+            text:               qsTr("Мессенджер, который ничего о тебе не помнит")
             color:              Theme.textSecondary
             font.pixelSize:     Theme.fontSm
             font.family:        Theme.fontFamily
@@ -72,7 +72,7 @@ Rectangle {
         
         ParaButton {
             Layout.fillWidth: true
-            text:             "Регистрация"
+            text:             qsTr("Регистрация")
             onClicked:        root.registerClient()
         }
         
@@ -81,7 +81,7 @@ Rectangle {
         ParaButton {
             Layout.fillWidth: true
             secondary:        true
-            text:             "Импорт"
+            text:             qsTr("Импорт")
             onClicked:        root.importProfile()
         }
 
@@ -89,7 +89,7 @@ Rectangle {
 
         ParaButton {
             Layout.fillWidth: true
-            text:             "Установить свой сервер"
+            text:             qsTr("Установить свой сервер")
             secondary:        true
             onClicked:        root.installServer()
         }
@@ -102,7 +102,7 @@ Rectangle {
             bottom: parent.bottom
             margins: 20
         }
-        text:               "Version: " + Qt.application.version
+        text:               qsTr("Version: ") + Qt.application.version
         color: Theme.textSecondary
         font.pixelSize: Theme.fontSm
         font.family: Theme.fontFamily

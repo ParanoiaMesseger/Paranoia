@@ -21,28 +21,28 @@ Rectangle {
 
     Connections {
         target: Backend
-        function onUserRegistered()       { regFeedback.text = "Пользователь зарегистрирован ✓"; root.back() }
+        function onUserRegistered()       { regFeedback.text = qsTr("Пользователь зарегистрирован ✓"); root.back() }
         function onRegisterUserError(msg) { regFeedback.text = msg }
     }
 
     ParaFileDialog {
         id: registrationQrImageDialog
-        title: "Выбрать изображение QR-кода"
+        title: qsTr("Выбрать изображение QR-кода")
         mode: "open"
-        nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
+        nameFilters: [qsTr("Изображения (*.png *.jpg *.jpeg *.bmp *.webp)"), qsTr("Все файлы (*)")]
         onAccepted: {
             const decoded = QrCodeUtils.decodeFromImage(Backend.urlToLocalPath(selectedFile))
             if (!decoded.ok) {
-                regFeedback.text = decoded.error || "QR-код не прочитан."
+                regFeedback.text = decoded.error || qsTr("QR-код не прочитан.")
                 return
             }
             const parsed = QrCodeUtils.registrationPublicKeyFromQr(decoded.text)
             if (!parsed.ok) {
-                regFeedback.text = parsed.error || "QR-код не содержит публичный ключ."
+                regFeedback.text = parsed.error || qsTr("QR-код не содержит публичный ключ.")
                 return
             }
             newUserPubKeyInput.text = parsed.pubkey
-            regFeedback.text = "QR-код прочитан ✓"
+            regFeedback.text = qsTr("QR-код прочитан ✓")
         }
     }
 
@@ -53,18 +53,18 @@ Rectangle {
         active: false
         source: active ? "QrScanPage.qml" : ""
         onLoaded: {
-            item.title = "Сканировать ключ"
-            item.instructions = "Наведите камеру на QR-код с публичным ключом клиента."
+            item.title = qsTr("Сканировать ключ")
+            item.instructions = qsTr("Наведите камеру на QR-код с публичным ключом клиента.")
             item.back.connect(function () { cameraScanLoader.active = false })
             item.qrScanned.connect(function (text) {
                 const parsed = QrCodeUtils.registrationPublicKeyFromQr(text)
                 if (!parsed.ok) {
-                    regFeedback.text = parsed.error || "QR-код не содержит публичный ключ."
+                    regFeedback.text = parsed.error || qsTr("QR-код не содержит публичный ключ.")
                     cameraScanLoader.active = false
                     return
                 }
                 newUserPubKeyInput.text = parsed.pubkey
-                regFeedback.text = "QR-код прочитан ✓"
+                regFeedback.text = qsTr("QR-код прочитан ✓")
                 cameraScanLoader.active = false
             })
         }
@@ -76,7 +76,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Зарегистрировать пользователя"
+            title: qsTr("Зарегистрировать пользователя")
             onBackClicked: root.back()
         }
 
@@ -98,7 +98,7 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Сервер: " + root.targetDomain
+                    text: qsTr("Сервер: %1").arg(root.targetDomain)
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSm
                     font.family:    Theme.fontFamily
@@ -108,13 +108,13 @@ Rectangle {
                 ParaInput {
                     id: newUserPubKeyInput
                     Layout.fillWidth: true
-                    label:       "Публичный ключ пользователя"
-                    placeholder: "Вставьте ключ или считайте QR…"
+                    label:       qsTr("Публичный ключ пользователя")
+                    placeholder: qsTr("Вставьте ключ или считайте QR…")
                 }
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: root.cameraQrScan ? "Сканировать QR камерой" : "Считать QR из файла"
+                    text: root.cameraQrScan ? qsTr("Сканировать QR камерой") : qsTr("Считать QR из файла")
                     secondary: true
                     onClicked: root.openQrReader()
                 }
@@ -132,16 +132,16 @@ Rectangle {
 
                 ParaButton {
                     Layout.fillWidth: true
-                    text: "Зарегистрировать"
+                    text: qsTr("Зарегистрировать")
                     onClicked: {
                         let pubkey = newUserPubKeyInput.text.trim()
                         if (pubkey === "") {
-                            regFeedback.text = "Введите публичный ключ."
+                            regFeedback.text = qsTr("Введите публичный ключ.")
                             return
                         }
                         const parsed = QrCodeUtils.registrationPublicKeyFromQr(pubkey)
                         if (!parsed.ok) {
-                            regFeedback.text = parsed.error || "Некорректный публичный ключ."
+                            regFeedback.text = parsed.error || qsTr("Некорректный публичный ключ.")
                             return
                         }
                         pubkey = parsed.pubkey

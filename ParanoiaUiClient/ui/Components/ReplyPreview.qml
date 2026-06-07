@@ -51,7 +51,7 @@ Rectangle {
         Text {
             id: authorLabel
             width: replyColumn.width
-            text: root.author.length > 0 ? root.author : "Сообщение"
+            text: root.author.length > 0 ? root.author : qsTr("Сообщение")
             color: root.authorColor
             font.pixelSize: Theme.fontXs
             font.family: Theme.fontFamily
@@ -63,7 +63,7 @@ Rectangle {
         Text {
             id: previewLabel
             width: replyColumn.width
-            text: root.previewText.length > 0 ? root.previewText : "Сообщение недоступно"
+            text: root.previewText.length > 0 ? root.previewText : qsTr("Сообщение недоступно")
             color: root.previewColor
             font.pixelSize: Theme.fontSm
             font.family: Theme.fontFamily

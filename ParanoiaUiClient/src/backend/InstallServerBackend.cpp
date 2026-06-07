@@ -70,7 +70,7 @@ void InstallServerBackend::on_disconnected()
 {
     if (!m_running) return;
     setStep(StepSshConnect, Error);
-    installError(StepSshConnect, "Соединение ssh разорвано((");
+    installError(StepSshConnect, InstallServerBackend::tr("Соединение ssh разорвано(("));
     cancel();
 }
 
@@ -138,7 +138,7 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
                 .then(this, [this, url, serverId](QFuture<bool> future) {
                     const bool ok = future.resultCount() > 0 && future.resultAt(0);
                     if (!ok) {
-                        emit installError(StepRegisterServer, "Не удалось зарегистрировать клиентский профиль.");
+                        emit installError(StepRegisterServer, InstallServerBackend::tr("Не удалось зарегистрировать клиентский профиль."));
                         return;
                     }
                     const QString profileId = Utils::profileIdFor(url, serverId);

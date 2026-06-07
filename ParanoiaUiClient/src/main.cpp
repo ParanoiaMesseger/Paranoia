@@ -12,6 +12,8 @@
 #include <QDir>
 #include <QFile>
 #include <QStyleHints>
+#include <QLocale>
+#include <QTranslator>
 #if defined(DESKTOP_OS)
 #include <QApplication>
 #else
@@ -24,6 +26,7 @@
 #include <ParanoiaFFI>
 #endif
 #include "utils/adminStorage.hpp"
+#include "utils/KeyInjector.hpp"
 #include "backend/ChatBackend.hpp"
 #include "backend/EncryptedImageProvider.hpp"
 #include "backend/MainBackend.hpp"
@@ -33,6 +36,9 @@
 #include "spell/SpellChecker.hpp"
 #if defined(DESKTOP_OS)
 #include "backend/NativeFileDialog.hpp"
+#endif
+#if defined(PARANOIA_IOS)
+#include "platform/IosFileExport.hpp"
 #endif
 #if PARANOIA_HAS_QT_MULTIMEDIA
 #include <QCameraDevice>
@@ -90,6 +96,17 @@ int main(int argc, char *argv[])
     QGuiApplication app(argc, argv);
 #endif
     app.setWindowIcon(QIcon(QStringLiteral(":/logo_symbol.svg")));
+
+    // ── Локализация ────────────────────────────────────────────────────────
+    // Исходные строки русские (sourcelanguage=ru). Для не-русской системной
+    // локали грузим встроенный перевод :/i18n/Paranoia_<locale>.qm (load()
+    // сам перебирает en_US → en). Если .qm нет или строка не переведена —
+    // fallback на исходную русскую строку, т.е. текущее поведение без регрессии.
+    // translator живёт до конца main(), что переживает app.exec().
+    static QTranslator appTranslator;
+    if (appTranslator.load(QLocale(), QStringLiteral("Paranoia"),
+                           QStringLiteral("_"), QStringLiteral(":/i18n")))
+        app.installTranslator(&appTranslator);
 
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -162,6 +179,8 @@ int main(int argc, char *argv[])
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
                      [imageProvider]() { imageProvider->clear(); });
 
+    KeyInjector keyInjector;
+    engine.rootContext()->setContextProperty("KeyInjector", &keyInjector);
     engine.rootContext()->setContextProperty("Backend", &backend);
     engine.rootContext()->setContextProperty("Chat", &chatBackend);
     engine.rootContext()->setContextProperty("Notifications", &notifications);
@@ -171,6 +190,13 @@ int main(int argc, char *argv[])
     // на macOS 26 не выводят панель на экран. См. NativeFileDialog.hpp / ParaFileDialog.qml.
     NativeFileDialog nativeFileDialog;
     engine.rootContext()->setContextProperty("FileDialogs", &nativeFileDialog);
+#endif
+#if defined(PARANOIA_IOS)
+    // Нативный экспорт файла (UIDocumentPickerViewController forExporting) — на iOS
+    // QtQuick.Dialogs save рисует десктопный QML-fallback. См. IosFileExport.hpp /
+    // ParaFileDialog.qml (ветка save на iOS).
+    IosFileExport iosFileExport;
+    engine.rootContext()->setContextProperty("IosFileExport", &iosFileExport);
 #endif
     engine.rootContext()->setContextProperty("VirtualKeyboardAvailable", PARANOIA_HAS_QT_VIRTUAL_KEYBOARD != 0);
     engine.rootContext()->setContextProperty("MultimediaAvailable", PARANOIA_HAS_QT_MULTIMEDIA != 0);

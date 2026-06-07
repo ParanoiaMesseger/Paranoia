@@ -46,7 +46,7 @@ extern "C" void paranoia_macos_show_message_count(unsigned long long count)
 
     UNMutableNotificationContent *content = [UNMutableNotificationContent new];
     content.title = @"Paranoia";
-    content.body = [NSString stringWithFormat:@"Новых сообщений: %llu", count];
+    content.body = [NSString stringWithFormat:NSLocalizedString(@"Новых сообщений: %llu", @"new messages notification body"), count];
     content.sound = UNNotificationSound.defaultSound;
     content.badge = @(count > NSIntegerMax ? NSIntegerMax : (NSInteger)count);
 

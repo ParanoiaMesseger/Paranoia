@@ -1,6 +1,6 @@
 # Paranoia — Требования по безопасности и обоснование решений
 
-![Paranoia](ParanoiaUiClient/resources/design/logo_lockup_animated.svg)
+![Paranoia](../ParanoiaUiClient/resources/design/logo_lockup_animated.svg)
 
 ## 1. Модель угроз и цели
 

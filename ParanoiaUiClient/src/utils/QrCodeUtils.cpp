@@ -45,10 +45,10 @@ QString QrCodeUtils::pngDataUrl(const QString &payload, int size)
 QVariantMap QrCodeUtils::decodeFromImage(const QString &filePath)
 {
     const QString path = Utils::normalizeLocalFilePath(filePath);
-    if (path.isEmpty()) return ParanoiaFFI::errorResult("Не указан файл изображения с QR-кодом.");
+    if (path.isEmpty()) return ParanoiaFFI::errorResult(QrCodeUtils::tr("Не указан файл изображения с QR-кодом."));
 
     const QImage image(path);
-    if (image.isNull()) return ParanoiaFFI::errorResult("Не удалось открыть изображение с QR-кодом.");
+    if (image.isNull()) return ParanoiaFFI::errorResult(QrCodeUtils::tr("Не удалось открыть изображение с QR-кодом."));
 
     const QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
     try {
@@ -62,16 +62,16 @@ QVariantMap QrCodeUtils::decodeFromImage(const QString &filePath)
                 return QVariantMap{{"ok", true}, {"text", QString::fromStdString(barcode.text())}};
             }
         }
-        return ParanoiaFFI::errorResult("QR-код на изображении не найден.");
+        return ParanoiaFFI::errorResult(QrCodeUtils::tr("QR-код на изображении не найден."));
     } catch (const std::exception &e) {
-        return ParanoiaFFI::errorResult(QStringLiteral("Ошибка чтения QR-кода: ") + QString::fromUtf8(e.what()));
+        return ParanoiaFFI::errorResult(QrCodeUtils::tr("Ошибка чтения QR-кода: ") + QString::fromUtf8(e.what()));
     }
 }
 
 QVariantMap QrCodeUtils::registrationPublicKeyFromQr(const QString &payload)
 {
     QString text = payload.trimmed();
-    if (text.isEmpty()) return ParanoiaFFI::errorResult("QR-код не содержит данные регистрации.");
+    if (text.isEmpty()) return ParanoiaFFI::errorResult(QrCodeUtils::tr("QR-код не содержит данные регистрации."));
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &parseError);
     if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
@@ -79,6 +79,6 @@ QVariantMap QrCodeUtils::registrationPublicKeyFromQr(const QString &payload)
         text                  = obj.value(QStringLiteral("pubkey")).toString().trimmed();
     }
     if (!Utils::decodeFixedBase64(text, 32))
-        return ParanoiaFFI::errorResult("QR-код не содержит корректный публичный ключ base64.");
+        return ParanoiaFFI::errorResult(QrCodeUtils::tr("QR-код не содержит корректный публичный ключ base64."));
     return QVariantMap{{"ok", true}, {"pubkey", text}};
 }

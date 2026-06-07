@@ -18,7 +18,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title: "Импорт"
+            title: qsTr("Импорт")
             onBackClicked: root.back()
         }
 

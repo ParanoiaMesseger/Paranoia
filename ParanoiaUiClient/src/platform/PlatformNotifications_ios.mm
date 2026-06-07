@@ -119,10 +119,10 @@ namespace
             [defaults setBool:YES forKey:kWarningShownKey];
 
             UIAlertController *alert = [UIAlertController
-                alertControllerWithTitle:@"Фоновые уведомления недоступны"
-                                 message:@"На iOS 25 и ниже Paranoia не может проверять новые сообщения в фоне. Уведомления работают только пока приложение открыто. Для фоновых уведомлений требуется iOS 26+."
+                alertControllerWithTitle:NSLocalizedString(@"Фоновые уведомления недоступны", @"background notifications alert title")
+                                 message:NSLocalizedString(@"На iOS 25 и ниже Paranoia не может проверять новые сообщения в фоне. Уведомления работают только пока приложение открыто. Для фоновых уведомлений требуется iOS 26+.", @"background notifications alert body")
                           preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"Понятно" style:UIAlertActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Понятно", @"alert dismiss button") style:UIAlertActionStyleDefault handler:nil]];
             [controller presentViewController:alert animated:YES completion:nil];
         });
     }
@@ -195,7 +195,7 @@ namespace
                 visibleInitSelector,
                 kPollingTaskIdentifier,
                 @"Paranoia",
-                @"Проверка новых сообщений");
+                NSLocalizedString(@"Проверка новых сообщений", @"background task title"));
         } else {
             SEL legacyInitSelector = NSSelectorFromString(@"initWithIdentifier:");
             if (![allocatedRequest respondsToSelector:legacyInitSelector]) {
@@ -277,7 +277,7 @@ extern "C" void paranoia_ios_show_message_count(unsigned long long count, const 
     if (count == 0) return;
     UNMutableNotificationContent *content = [UNMutableNotificationContent new];
     content.title = @"Paranoia";
-    content.body = [NSString stringWithFormat:@"Новых сообщений: %llu", count];
+    content.body = [NSString stringWithFormat:NSLocalizedString(@"Новых сообщений: %llu", @"new messages notification body"), count];
     content.sound = UNNotificationSound.defaultSound;
     content.badge = @(count > NSIntegerMax ? NSIntegerMax : (NSInteger)count);
 

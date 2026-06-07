@@ -47,9 +47,9 @@ Rectangle {
 
     function tariffLabel(t) {
         switch (t) {
-            case "private":    return "Частный сервер"
-            case "commercial": return "Коммерческий тариф"
-            case "corporate":  return "Корпоративный тариф"
+            case "private":    return qsTr("Частный сервер")
+            case "commercial": return qsTr("Коммерческий тариф")
+            case "corporate":  return qsTr("Корпоративный тариф")
             default:           return ""
         }
     }
@@ -60,7 +60,7 @@ Rectangle {
 
     function applyParsed(res) {
         if (!res.ok) {
-            root.importFeedback = res.error || "Не удалось разобрать профиль подключения."
+            root.importFeedback = res.error || qsTr("Не удалось разобрать профиль подключения.")
             return
         }
         root.tariff = res.tariff || ""
@@ -70,7 +70,7 @@ Rectangle {
         const reserves = res.reserve_server_urls || []
         reserveEndpointInput.text = reserves.length > 0 ? reserves[0] : ""
         root.imported = true
-        root.importFeedback = "Профиль подключения загружен: " + (root.tariffLabel(root.tariff) || "сервер")
+        root.importFeedback = qsTr("Профиль подключения загружен: %1").arg(root.tariffLabel(root.tariff) || qsTr("сервер"))
     }
 
     function applyBundleText(text) { root.applyParsed(Backend.parseConnectionBundle(text)) }
@@ -107,31 +107,31 @@ Rectangle {
     // ── Источники профиля подключения ────────────────────────────────────────
     ParaFileDialog {
         id: paramsFileDialog
-        title: "Выбрать профиль подключения"
+        title: qsTr("Выбрать профиль подключения")
         mode: "open"
-        nameFilters: ["Профиль подключения (*.json)", "JSON (*.json)", "Все файлы (*)"]
+        nameFilters: [qsTr("Профиль подключения (*.json)"), qsTr("JSON (*.json)"), qsTr("Все файлы (*)")]
         onAccepted: root.applyParsed(Backend.parseConnectionBundle(Backend.urlToLocalPath(selectedFile)))
     }
     ParaFileDialog {
         id: paramsImageDialog
-        title: "Выбрать изображение QR"
+        title: qsTr("Выбрать изображение QR")
         mode: "open"
-        nameFilters: ["Изображения (*.png *.jpg *.jpeg *.bmp *.webp)", "Все файлы (*)"]
+        nameFilters: [qsTr("Изображения (*.png *.jpg *.jpeg *.bmp *.webp)"), qsTr("Все файлы (*)")]
         onAccepted: {
             const decoded = QrCodeUtils.decodeFromImage(Backend.urlToLocalPath(selectedFile))
-            if (!decoded.ok) { root.importFeedback = decoded.error || "QR-код не прочитан."; return }
+            if (!decoded.ok) { root.importFeedback = decoded.error || qsTr("QR-код не прочитан."); return }
             root.applyBundleText(decoded.text)
         }
     }
     ParaFileDialog {
         id: corpBundleDialog
-        title: "Выбрать корпоративный бандл"
+        title: qsTr("Выбрать корпоративный бандл")
         mode: "open"
-        nameFilters: ["Paranoia bundle (*.json)", "JSON (*.json)", "Все файлы (*)"]
+        nameFilters: [qsTr("Paranoia bundle (*.json)"), qsTr("JSON (*.json)"), qsTr("Все файлы (*)")]
         onAccepted: {
             const res = Backend.importProfile(Backend.urlToLocalPath(selectedFile))
-            if (res.ok) root.importFeedback = "Бандл импортирован, выполняется вход…"
-            else        root.importFeedback = res.error || "Ошибка импорта бандла."
+            if (res.ok) root.importFeedback = qsTr("Бандл импортирован, выполняется вход…")
+            else        root.importFeedback = res.error || qsTr("Ошибка импорта бандла.")
         }
     }
 
@@ -142,8 +142,8 @@ Rectangle {
         active: false
         source: active ? "QrScanPage.qml" : ""
         onLoaded: {
-            item.title = "Сканировать профиль подключения"
-            item.instructions = "Наведите камеру на QR-код параметров сервера."
+            item.title = qsTr("Сканировать профиль подключения")
+            item.instructions = qsTr("Наведите камеру на QR-код параметров сервера.")
             item.back.connect(function () { cameraScanLoader.active = false })
             item.qrScanned.connect(function (text) {
                 root.applyBundleText(text)
@@ -158,7 +158,7 @@ Rectangle {
 
         ParaHeader {
             Layout.fillWidth: true
-            title:            "Регистрация"
+            title:            qsTr("Регистрация")
             onBackClicked:    root.back()
         }
 
@@ -192,7 +192,7 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
-                        text: "Загрузите профиль подключения (QR/файл от администратора) — адрес сервера и параметры подставятся автоматически. Либо введите адрес сервера вручную."
+                        text: qsTr("Загрузите профиль подключения (QR/файл от администратора) — адрес сервера и параметры подставятся автоматически. Либо введите адрес сервера вручную.")
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontXs
                         font.family: Theme.fontFamily
@@ -209,14 +209,14 @@ Rectangle {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             secondary: true
-                            text: "Сканировать QR"
+                            text: qsTr("Сканировать QR")
                             onClicked: root.openParamsQrReader()
                         }
                         ParaButton {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             secondary: true
-                            text: "Выбрать файл"
+                            text: qsTr("Выбрать файл")
                             onClicked: paramsFileDialog.open()
                         }
                     }
@@ -226,7 +226,7 @@ Rectangle {
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
                         secondary: true
-                        text: "Ввести вручную"
+                        text: qsTr("Ввести вручную")
                         onClicked: root.manualMode = true
                     }
                 }
@@ -242,7 +242,7 @@ Rectangle {
                     color: Theme.accentDim
                     Text {
                         anchors.centerIn: parent
-                        text: "Тариф: " + root.tariffLabel(root.tariff)
+                        text: qsTr("Тариф: %1").arg(root.tariffLabel(root.tariff))
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontSm
                         font.family: Theme.fontFamily
@@ -283,7 +283,7 @@ Rectangle {
 
                     Text {
                         anchors.centerIn: parent
-                        text:  "Генерация ключей…"
+                        text:  qsTr("Генерация ключей…")
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSm
                         font.family:    Theme.fontFamily
@@ -302,7 +302,7 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
-                        title: "Передайте администратору ваш ключ устройства — он пришлёт ваш корпоративный бандл:"
+                        title: qsTr("Передайте администратору ваш ключ устройства — он пришлёт ваш корпоративный бандл:")
                         keyText: Backend.devicePubkey
                     }
 
@@ -317,7 +317,7 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
-                        text: "Импортировать корпоративный бандл"
+                        text: qsTr("Импортировать корпоративный бандл")
                         onClicked: corpBundleDialog.open()
                     }
                 }
@@ -332,7 +332,7 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
-                        title: "Передайте ваш публичный ключ администратору сервера"
+                        title: qsTr("Передайте ваш публичный ключ администратору сервера")
                         keyText: root.publicKey
                     }
 
@@ -345,7 +345,7 @@ Rectangle {
 
                     Text {
                         Layout.alignment:   Qt.AlignHCenter
-                        text:               "Или дайте администратору отсканировать этот QR-код. Ключ сохранён локально и восстановится после перезапуска."
+                        text:               qsTr("Или дайте администратору отсканировать этот QR-код. Ключ сохранён локально и восстановится после перезапуска.")
                         color:              Theme.textSecondary
                         font.pixelSize:     Theme.fontXs
                         font.family:        Theme.fontFamily
@@ -362,7 +362,7 @@ Rectangle {
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
                         Layout.minimumWidth: 0
-                        label: "Адрес сервера"
+                        label: qsTr("Адрес сервера")
                         placeholder: "https://example.com"
                     }
 
@@ -372,8 +372,8 @@ Rectangle {
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
                         Layout.minimumWidth: 0
-                        label: "Резервный адрес сервера"
-                        placeholder: "https://cdn.example.com (опционально)"
+                        label: qsTr("Резервный адрес сервера")
+                        placeholder: qsTr("https://cdn.example.com (опционально)")
                     }
 
                     ParaInput {
@@ -382,7 +382,7 @@ Rectangle {
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
                         Layout.minimumWidth: 0
-                        label: "Имя пользователя"
+                        label: qsTr("Имя пользователя")
                         placeholder: "username"
                     }
 
@@ -413,17 +413,17 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.leftMargin: 24
                         Layout.rightMargin: 24
-                        text:             root.isLoading ? "Вход…" : "Я передал ключ, войти"
+                        text:             root.isLoading ? qsTr("Вход…") : qsTr("Я передал ключ, войти")
                         enabled:          !root.generating && !root.isLoading
                         onClicked: {
                             const server = endpointInput.text.trim()
                             const username = usernameInput.text.trim()
                             if (server === "" || username === "") {
-                                root.errorMsg = "Укажите сервер и имя пользователя."
+                                root.errorMsg = qsTr("Укажите сервер и имя пользователя.")
                                 return
                             }
                             if (root.privateKey === "") {
-                                root.errorMsg = "Ключи ещё не сгенерированы."
+                                root.errorMsg = qsTr("Ключи ещё не сгенерированы.")
                                 return
                             }
                             root.errorMsg = ""

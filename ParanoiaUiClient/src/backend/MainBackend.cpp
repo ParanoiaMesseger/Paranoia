@@ -504,18 +504,18 @@ QVariantMap MainBackend::parseConnectionBundle(const QString &pathOrText) const
         bytes = trimmed.toUtf8();
     } else {
         bytes = Utils::readAll(Utils::resolveImportPath(pathOrText));
-        if (bytes.isEmpty()) return QVariantMap{{"ok", false}, {"error", "Не удалось прочитать файл"}};
+        if (bytes.isEmpty()) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Не удалось прочитать файл")}};
     }
     QJsonParseError perr;
     const QJsonDocument doc = QJsonDocument::fromJson(bytes, &perr);
     if (perr.error != QJsonParseError::NoError || !doc.isObject())
-        return QVariantMap{{"ok", false}, {"error", "Некорректный профиль подключения (не JSON)"}};
+        return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Некорректный профиль подключения (не JSON)")}};
     const QJsonObject o = doc.object();
     if (o.value("type").toString() != QStringLiteral("paranoia.connect.v1"))
-        return QVariantMap{{"ok", false}, {"error", "Неподдерживаемый формат профиля подключения"}};
+        return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Неподдерживаемый формат профиля подключения")}};
     const QString server = Utils::normalizedServerUrl(o.value("server").toString());
     if (server.isEmpty())
-        return QVariantMap{{"ok", false}, {"error", "В профиле не указан адрес сервера"}};
+        return QVariantMap{{"ok", false}, {"error", MainBackend::tr("В профиле не указан адрес сервера")}};
     const QString tariff = o.value("tariff").toString();
     QStringList reserve = Utils::stringListFromJsonArray(o.value("reserve_server_urls").toArray());
     return QVariantMap{
@@ -538,12 +538,12 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
     const QString trimmedUsername        = username.trimmed();
     const QString serverId               = ParanoiaFFI::derive_server_id(private_key);
     if (serverId.isEmpty()) {
-        if (makeActive) emit loginError("Не удалось вычислить server ID из ключа.");
+        if (makeActive) emit loginError(MainBackend::tr("Не удалось вычислить server ID из ключа."));
         return;
     }
     const QString profileId = Utils::profileIdFor(url, serverId);
     if (!Paths::ensureProfileDir(profileId)) {
-        if (makeActive) emit loginError("Не удалось подготовить каталог профиля.");
+        if (makeActive) emit loginError(MainBackend::tr("Не удалось подготовить каталог профиля."));
         return;
     }
     // TURN-список хранится в profile JSON отдельно от reserveServerUrls и не
@@ -565,7 +565,7 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
             auto handle = std::make_shared<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
             if (!self) return;
             if (!handle || !handle->isRawOk()) {
-                if (makeActive) emit self->loginError("Не удалось подключиться. Проверьте адрес сервера и ключ.");
+                if (makeActive) emit self->loginError(MainBackend::tr("Не удалось подключиться. Проверьте адрес сервера и ключ."));
                 return;
             }
             auto *store  = SessionStore::instance();
@@ -624,7 +624,7 @@ void MainBackend::activateProfile(const QString &profileId)
 {
     const auto obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
     if (obj.isEmpty()) {
-        emit loginError("Профиль не найден.");
+        emit loginError(MainBackend::tr("Профиль не найден."));
         return;
     }
     const QString server          = obj.value("server").toString();
@@ -632,7 +632,7 @@ void MainBackend::activateProfile(const QString &profileId)
     const QString private_key     = obj.value("private_key").toString();
     const QStringList reserveUrls = reserveUrlsFromObject(obj, server);
     if (server.isEmpty() || private_key.isEmpty()) {
-        emit loginError("Профиль повреждён.");
+        emit loginError(MainBackend::tr("Профиль повреждён."));
         return;
     }
     loginClientInternal(server, username, private_key, reserveUrls, true);
@@ -645,12 +645,12 @@ void MainBackend::registerUser(const QString &domain, const QString &pubkey)
     const auto found =
         std::ranges::find_if(admin::Admin::admins, [&](const admin::Admin &a) { return a.domain == domain; });
     if (found == admin::Admin::admins.end()) {
-        emit registerUserError("Нет прав администратора для этого сервера.");
+        emit registerUserError(MainBackend::tr("Нет прав администратора для этого сервера."));
         return;
     }
     const QString serverId = serverIdFromPubkey(pubkey);
     if (serverId.isEmpty()) {
-        emit registerUserError("Некорректный публичный ключ.");
+        emit registerUserError(MainBackend::tr("Некорректный публичный ключ."));
         return;
     }
     found->regUser(serverId, pubkey).then([this](QFuture<bool> future) {
@@ -659,7 +659,7 @@ void MainBackend::registerUser(const QString &domain, const QString &pubkey)
             if (ok)
                 emit userRegistered();
             else
-                emit registerUserError("Ошибка регистрации. Проверьте данные.");
+                emit registerUserError(MainBackend::tr("Ошибка регистрации. Проверьте данные."));
         });
     });
 }
@@ -696,21 +696,21 @@ void MainBackend::addAdminReserveDomain(const QString &primaryDomain, const QStr
     auto found =
         std::ranges::find_if(admin::Admin::admins, [&](const admin::Admin &a) { return a.domain == primaryUrl; });
     if (found == admin::Admin::admins.end()) {
-        emit reserveDomainError("Нет прав администратора для этого сервера.");
+        emit reserveDomainError(MainBackend::tr("Нет прав администратора для этого сервера."));
         return;
     }
 
     const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
     if (reserveUrl.isEmpty()) {
-        emit reserveDomainError("Укажите резервный домен.");
+        emit reserveDomainError(MainBackend::tr("Укажите резервный домен."));
         return;
     }
     if (reserveUrl == found->domain) {
-        emit reserveDomainError("Резервный домен совпадает с основным.");
+        emit reserveDomainError(MainBackend::tr("Резервный домен совпадает с основным."));
         return;
     }
     if (Utils::normalizedServerUrls(found->reserveServerUrls, found->domain).contains(reserveUrl)) {
-        emit reserveDomainError("Этот резервный домен уже добавлен.");
+        emit reserveDomainError(MainBackend::tr("Этот резервный домен уже добавлен."));
         return;
     }
 
@@ -723,7 +723,7 @@ void MainBackend::addAdminReserveDomain(const QString &primaryDomain, const QStr
 void MainBackend::addClientReserveDomain(const QString &profileId, const QString &reserveDomain)
 {
     if (profileId.trimmed().isEmpty()) {
-        emit reserveDomainError("Не выбран клиентский профиль.");
+        emit reserveDomainError(MainBackend::tr("Не выбран клиентский профиль."));
         return;
     }
 
@@ -746,26 +746,26 @@ void MainBackend::addClientReserveDomain(const QString &profileId, const QString
     primaryUrl  = Utils::normalizedServerUrl(primaryUrl);
     reserveUrls = Utils::normalizedServerUrls(reserveUrls, primaryUrl);
     if (primaryUrl.isEmpty() || privateKey.isEmpty()) {
-        emit reserveDomainError("Клиентский профиль повреждён.");
+        emit reserveDomainError(MainBackend::tr("Клиентский профиль повреждён."));
         return;
     }
 
     const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
     if (reserveUrl.isEmpty()) {
-        emit reserveDomainError("Укажите резервный домен.");
+        emit reserveDomainError(MainBackend::tr("Укажите резервный домен."));
         return;
     }
     if (reserveUrl == primaryUrl) {
-        emit reserveDomainError("Резервный домен совпадает с основным.");
+        emit reserveDomainError(MainBackend::tr("Резервный домен совпадает с основным."));
         return;
     }
     if (reserveUrls.contains(reserveUrl)) {
-        emit reserveDomainError("Этот резервный домен уже добавлен.");
+        emit reserveDomainError(MainBackend::tr("Этот резервный домен уже добавлен."));
         return;
     }
     if (serverId.isEmpty()) serverId = ParanoiaFFI::derive_server_id(privateKey);
     if (serverId.isEmpty()) {
-        emit reserveDomainError("Не удалось вычислить server ID из ключа профиля.");
+        emit reserveDomainError(MainBackend::tr("Не удалось вычислить server ID из ключа профиля."));
         return;
     }
 
@@ -788,14 +788,14 @@ void MainBackend::removeAdminReserveDomain(const QString &primaryDomain, const Q
     auto found =
         std::ranges::find_if(admin::Admin::admins, [&](const admin::Admin &a) { return a.domain == primaryUrl; });
     if (found == admin::Admin::admins.end()) {
-        emit reserveDomainError("Нет прав администратора для этого сервера.");
+        emit reserveDomainError(MainBackend::tr("Нет прав администратора для этого сервера."));
         return;
     }
 
     const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
     QStringList reserveUrls  = Utils::normalizedServerUrls(found->reserveServerUrls, found->domain);
     if (reserveUrl.isEmpty() || !reserveUrls.contains(reserveUrl)) {
-        emit reserveDomainError("Резервный домен не найден.");
+        emit reserveDomainError(MainBackend::tr("Резервный домен не найден."));
         return;
     }
 
@@ -808,7 +808,7 @@ void MainBackend::removeAdminReserveDomain(const QString &primaryDomain, const Q
 void MainBackend::removeClientReserveDomain(const QString &profileId, const QString &reserveDomain)
 {
     if (profileId.trimmed().isEmpty()) {
-        emit reserveDomainError("Не выбран клиентский профиль.");
+        emit reserveDomainError(MainBackend::tr("Не выбран клиентский профиль."));
         return;
     }
 
@@ -831,18 +831,18 @@ void MainBackend::removeClientReserveDomain(const QString &profileId, const QStr
     primaryUrl  = Utils::normalizedServerUrl(primaryUrl);
     reserveUrls = Utils::normalizedServerUrls(reserveUrls, primaryUrl);
     if (primaryUrl.isEmpty() || privateKey.isEmpty()) {
-        emit reserveDomainError("Клиентский профиль повреждён.");
+        emit reserveDomainError(MainBackend::tr("Клиентский профиль повреждён."));
         return;
     }
 
     const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
     if (reserveUrl.isEmpty() || !reserveUrls.contains(reserveUrl)) {
-        emit reserveDomainError("Резервный домен не найден.");
+        emit reserveDomainError(MainBackend::tr("Резервный домен не найден."));
         return;
     }
     if (serverId.isEmpty()) serverId = ParanoiaFFI::derive_server_id(privateKey);
     if (serverId.isEmpty()) {
-        emit reserveDomainError("Не удалось вычислить server ID из ключа профиля.");
+        emit reserveDomainError(MainBackend::tr("Не удалось вычислить server ID из ключа профиля."));
         return;
     }
 
@@ -864,7 +864,7 @@ void MainBackend::checkReserveDomain(const QString &targetType, const QString &t
 {
     const QString reserveUrl = Utils::normalizedServerUrl(reserveDomain);
     if (reserveUrl.isEmpty()) {
-        emit reserveDomainCheckFinished(targetType, targetId, reserveUrl, false, "Укажите резервный домен.", -1);
+        emit reserveDomainCheckFinished(targetType, targetId, reserveUrl, false, MainBackend::tr("Укажите резервный домен."), -1);
         return;
     }
 
@@ -883,20 +883,20 @@ void MainBackend::checkReserveDomain(const QString &targetType, const QString &t
         QString msg;
         if (resultJson.isEmpty()) {
             const QString err = ParanoiaFFI::last_error();
-            msg = err.isEmpty() ? QStringLiteral("Ошибка FFI") : QStringLiteral("Ошибка FFI: ") + err;
+            msg = err.isEmpty() ? MainBackend::tr("Ошибка FFI") : MainBackend::tr("Ошибка FFI: ") + err;
         } else {
             QJsonParseError parseError;
             const auto doc = QJsonDocument::fromJson(resultJson.toUtf8(), &parseError);
             if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
-                msg = QStringLiteral("Невалидный ответ FFI");
+                msg = MainBackend::tr("Невалидный ответ FFI");
             } else {
                 const auto obj = doc.object();
                 ok             = obj.value("ok").toBool();
                 if (ok) {
-                    msg = QStringLiteral("Endpoint /notify доступен.");
+                    msg = MainBackend::tr("Endpoint /notify доступен.");
                 } else {
                     const QString errText = obj.value("error").toString();
-                    msg = errText.isEmpty() ? QStringLiteral("Endpoint недоступен") : errText;
+                    msg = errText.isEmpty() ? MainBackend::tr("Endpoint недоступен") : errText;
                 }
             }
         }
@@ -964,18 +964,18 @@ void MainBackend::addTurnServer(const QString &profileId, const QString &turnUrl
 {
     const QString normalized = normalizeTurnUrl(turnUrl);
     if (normalized.isEmpty()) {
-        emit turnServerError("Укажите адрес TURN-сервера (host:port).");
+        emit turnServerError(MainBackend::tr("Укажите адрес TURN-сервера (host:port)."));
         return;
     }
 
     const QJsonObject obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
     if (obj.value("server").toString().isEmpty()) {
-        emit turnServerError("Профиль не найден или повреждён.");
+        emit turnServerError(MainBackend::tr("Профиль не найден или повреждён."));
         return;
     }
     QStringList list = turnUrlsFromObject(obj);
     if (list.contains(normalized, Qt::CaseInsensitive)) {
-        emit turnServerError("Этот TURN-сервер уже добавлен.");
+        emit turnServerError(MainBackend::tr("Этот TURN-сервер уже добавлен."));
         return;
     }
     list.append(normalized);
@@ -1002,19 +1002,19 @@ void MainBackend::removeTurnServer(const QString &profileId, const QString &turn
 {
     const QString normalized = normalizeTurnUrl(turnUrl);
     if (normalized.isEmpty()) {
-        emit turnServerError("Пустой адрес TURN-сервера.");
+        emit turnServerError(MainBackend::tr("Пустой адрес TURN-сервера."));
         return;
     }
     const QJsonObject obj = Utils::readJsonObjectFile(Paths::profileClient(profileId));
     if (obj.value("server").toString().isEmpty()) {
-        emit turnServerError("Профиль не найден или повреждён.");
+        emit turnServerError(MainBackend::tr("Профиль не найден или повреждён."));
         return;
     }
     QStringList list = turnUrlsFromObject(obj);
     const int before = list.size();
     list.removeIf([&](const QString &s) { return QString::compare(s, normalized, Qt::CaseInsensitive) == 0; });
     if (list.size() == before) {
-        emit turnServerError("TURN-сервер не найден.");
+        emit turnServerError(MainBackend::tr("TURN-сервер не найден."));
         return;
     }
     const QString url        = obj.value("server").toString();
@@ -1035,7 +1035,7 @@ void MainBackend::checkTurnServer(const QString &profileId, const QString &turnU
 {
     const QString normalized = normalizeTurnUrl(turnUrl);
     if (normalized.isEmpty()) {
-        emit turnServerCheckFinished(profileId, turnUrl, false, "Пустой адрес TURN-сервера.", -1);
+        emit turnServerCheckFinished(profileId, turnUrl, false, MainBackend::tr("Пустой адрес TURN-сервера."), -1);
         return;
     }
     // Простая проверка: попытаться разобрать адрес. Реальный allocate-probe
@@ -1047,12 +1047,12 @@ void MainBackend::checkTurnServer(const QString &profileId, const QString &turnU
             ? normalized.left(normalized.lastIndexOf(':'))
             : normalized;
     if (host.isEmpty()) {
-        emit turnServerCheckFinished(profileId, normalized, false, "Не удалось разобрать host:port.", -1);
+        emit turnServerCheckFinished(profileId, normalized, false, MainBackend::tr("Не удалось разобрать host:port."), -1);
         return;
     }
     // Заглушка: эмитим «ok с 0ms» — UI покажет «доступен» (по факту проверка
     // ограничена синтаксисом). TODO: добавить FFI paranoia_turn_probe(host, port).
-    emit turnServerCheckFinished(profileId, normalized, true, QStringLiteral("сохранён"), 0);
+    emit turnServerCheckFinished(profileId, normalized, true, MainBackend::tr("сохранён"), 0);
 }
 
 // ── Dialogs Management ────────────────────────────────────────────────────────
@@ -1062,16 +1062,16 @@ QVariantMap MainBackend::createDialogKeyInvitation(const QString &peer) const
     const auto session        = SessionStore::instance()->activeSession();
     const QString trimmedPeer = peer.trimmed();
     if (!session || session->serverId.isEmpty() || trimmedPeer.isEmpty())
-        return ParanoiaFFI::errorResult("Не указан server ID или собеседник.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Не указан server ID или собеседник."));
 
     const QString bundleJson = ParanoiaFFI::qr_create_invitation(session->serverId);
     if (bundleJson.isEmpty()) return ParanoiaFFI::lastRustErrorResult();
     const auto doc = QJsonDocument::fromJson(bundleJson.toUtf8());
-    if (!doc.isObject()) return ParanoiaFFI::errorResult("Некорректный JSON invitation.");
+    if (!doc.isObject()) return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный JSON invitation."));
     const auto obj            = doc.object();
     const QString stateJson   = Utils::compactJson(obj.value("state"));
     const QString payloadJson = Utils::compactJson(obj.value("payload"));
-    if (stateJson.isEmpty() || payloadJson.isEmpty()) return ParanoiaFFI::errorResult("Некорректный JSON invitation.");
+    if (stateJson.isEmpty() || payloadJson.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный JSON invitation."));
     return QVariantMap{
         {"ok", true},
         {"peer", trimmedPeer},
@@ -1084,15 +1084,15 @@ QVariantMap MainBackend::createDialogKeyResponse(const QString &invitationPayloa
 {
     const auto session = SessionStore::instance()->activeSession();
     if (!session || session->serverId.isEmpty() || invitationPayloadJson.trimmed().isEmpty())
-        return ParanoiaFFI::errorResult("Нет invitation payload или server ID.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Нет invitation payload или server ID."));
     const QString bundleJson = ParanoiaFFI::qr_create_response(invitationPayloadJson, session->serverId);
     if (bundleJson.isEmpty()) return ParanoiaFFI::lastRustErrorResult();
     const auto doc = QJsonDocument::fromJson(bundleJson.toUtf8());
-    if (!doc.isObject()) return ParanoiaFFI::errorResult("Некорректный JSON response.");
+    if (!doc.isObject()) return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный JSON response."));
     const auto obj            = doc.object();
     const QString stateJson   = Utils::compactJson(obj.value("state"));
     const QString payloadJson = Utils::compactJson(obj.value("payload"));
-    if (stateJson.isEmpty() || payloadJson.isEmpty()) return ParanoiaFFI::errorResult("Некорректный JSON response.");
+    if (stateJson.isEmpty() || payloadJson.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный JSON response."));
     QVariantMap fingerprint = dialogKeyFingerprint(stateJson, invitationPayloadJson);
     if (!fingerprint.value("ok").toBool()) return fingerprint;
     return QVariantMap{
@@ -1106,7 +1106,7 @@ QVariantMap MainBackend::createDialogKeyResponse(const QString &invitationPayloa
 QVariantMap MainBackend::dialogKeyFingerprint(const QString &localStateJson, const QString &peerPayloadJson)
 {
     if (localStateJson.trimmed().isEmpty() || peerPayloadJson.trimmed().isEmpty())
-        return ParanoiaFFI::errorResult("Нет state или payload для расчёта SAS.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Нет state или payload для расчёта SAS."));
     const QString fingerprint = ParanoiaFFI::qr_fingerprint(localStateJson, peerPayloadJson);
     if (fingerprint.isEmpty()) return ParanoiaFFI::lastRustErrorResult();
     return QVariantMap{{"ok", true}, {"fingerprint", fingerprint}};
@@ -1117,16 +1117,16 @@ QVariantMap MainBackend::confirmDialogKeyExchange(const QString &peer, const QSt
                                                   const bool updateExisting)
 {
     const QString trimmedPeer = peer.trimmed();
-    if (trimmedPeer.isEmpty()) return ParanoiaFFI::errorResult("Не указан собеседник.");
+    if (trimmedPeer.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Не указан собеседник."));
     const QString completedJson = ParanoiaFFI::qr_confirm_exchange(localStateJson, peerPayloadJson, fingerprint);
     if (completedJson.isEmpty()) return ParanoiaFFI::lastRustErrorResult();
 
     const auto doc = QJsonDocument::fromJson(completedJson.toUtf8());
-    if (!doc.isObject()) return ParanoiaFFI::errorResult("Некорректный JSON завершения обмена.");
+    if (!doc.isObject()) return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный JSON завершения обмена."));
     const auto completedObj     = doc.object();
     const QByteArray sessionKey = QByteArray::fromBase64(completedObj.value("session_key_b64").toString().toLatin1());
     const QString fpResult      = completedObj.value("fingerprint").toString();
-    if (sessionKey.size() != 32) return ParanoiaFFI::errorResult("Некорректный ключ диалога.");
+    if (sessionKey.size() != 32) return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный ключ диалога."));
 
     auto session               = SessionStore::instance()->activeSession();
     const QString initiatorId  = completedObj.value("initiator_id").toString();
@@ -1247,7 +1247,7 @@ void MainBackend::applyCorporateKeyring(const QString &keyringJson)
         ++updated;
     }
     emit corporateSyncFinished(true, updated,
-                               updated > 0 ? QStringLiteral("Связка обновлена") : QStringLiteral("Связка пуста"));
+                               updated > 0 ? MainBackend::tr("Связка обновлена") : MainBackend::tr("Связка пуста"));
 }
 
 void MainBackend::syncCorporateKeyring()
@@ -1274,9 +1274,9 @@ void MainBackend::syncCorporateKeyring()
             if (!self) return;
             if (keyringJson.isEmpty()) {
                 if (err.isEmpty())
-                    emit self->corporateSyncFinished(true, 0, QStringLiteral("Связка пуста"));
+                    emit self->corporateSyncFinished(true, 0, MainBackend::tr("Связка пуста"));
                 else
-                    emit self->corporateSyncFinished(false, 0, QStringLiteral("Синхронизация: ") + err);
+                    emit self->corporateSyncFinished(false, 0, MainBackend::tr("Синхронизация: ") + err);
                 return;
             }
             self->applyCorporateKeyring(keyringJson);
@@ -1347,11 +1347,11 @@ QVariantMap MainBackend::maskingStatus() const
 QVariantMap MainBackend::resetMasking()
 {
     auto session = SessionStore::instance()->activeSession();
-    if (!session) return QVariantMap{{"ok", false}, {"error", "Нет активной сессии"}};
+    if (!session) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Нет активной сессии")}};
     int rc;
     {
         QMutexLocker locker(&session->ffiMutex);
-        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", "Сессия не готова"}};
+        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Сессия не готова")}};
         rc = session->ffi->set_masking_profile(QString());
     }
     if (rc != 0) return QVariantMap{{"ok", false}, {"error", ParanoiaFFI::last_error()}};
@@ -1359,17 +1359,17 @@ QVariantMap MainBackend::resetMasking()
     m_maskingState.clear();
     m_maskingProfileName.clear();
     emit maskingStateChanged();
-    emit maskingApplied(true, QStringLiteral("Возвращена встроенная маска"));
+    emit maskingApplied(true, MainBackend::tr("Возвращена встроенная маска"));
     return QVariantMap{{"ok", true}};
 }
 
 QVariantMap MainBackend::applyMaskingFromFile(const QString &filePath, bool allowUnsigned)
 {
     auto session = SessionStore::instance()->activeSession();
-    if (!session) return QVariantMap{{"ok", false}, {"error", "Нет активной сессии"}};
+    if (!session) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Нет активной сессии")}};
     const QString localPath = Utils::resolveImportPath(filePath);
     const QByteArray bytes  = Utils::readAll(localPath);
-    if (bytes.isEmpty()) return QVariantMap{{"ok", false}, {"error", "Не удалось прочитать файл"}};
+    if (bytes.isEmpty()) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Не удалось прочитать файл")}};
 
     bool isSigned = false;
     const QString name    = maskingProfileNameFromJson(bytes, &isSigned);
@@ -1378,15 +1378,15 @@ QVariantMap MainBackend::applyMaskingFromFile(const QString &filePath, bool allo
 
     if (isSigned && trusted.isEmpty())
         return QVariantMap{{"ok", false},
-                           {"error", "Профиль подписан, но доверенный ключ не задан в профиле подключения"}};
+                           {"error", MainBackend::tr("Профиль подписан, но доверенный ключ не задан в профиле подключения")}};
     if (!isSigned && !allowUnsigned)
         return QVariantMap{{"ok", false}, {"unsigned", true},
-                           {"error", "Профиль без подписи. Подтвердите применение без проверки."}};
+                           {"error", MainBackend::tr("Профиль без подписи. Подтвердите применение без проверки.")}};
 
     int rc;
     {
         QMutexLocker locker(&session->ffiMutex);
-        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", "Сессия не готова"}};
+        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Сессия не готова")}};
         rc = isSigned ? session->ffi->set_signed_masking_profile(json, trusted)
                       : session->ffi->set_masking_profile(json);
     }
@@ -1395,8 +1395,8 @@ QVariantMap MainBackend::applyMaskingFromFile(const QString &filePath, bool allo
     // Сбрасываем сохранённый хэш — файловое применение перебивает node-сверку.
     Utils::writeJsonObjectFile(Paths::profileMaskingState(session->profileId), QJsonObject{});
     setMaskingState(QStringLiteral("updated"), name);
-    emit maskingApplied(true, isSigned ? QStringLiteral("Подписанный профиль применён")
-                                       : QStringLiteral("Профиль применён без проверки подписи"));
+    emit maskingApplied(true, isSigned ? MainBackend::tr("Подписанный профиль применён")
+                                       : MainBackend::tr("Профиль применён без проверки подписи"));
     return QVariantMap{{"ok", true}, {"profileName", name}, {"signed", isSigned}};
 }
 
@@ -1414,7 +1414,7 @@ void MainBackend::syncMaskingFromNode()
     const QString trusted = cfg.value("trusted").toString();
     if (trusted.isEmpty()) {
         setMaskingState(QStringLiteral("error"));
-        emit maskingApplied(false, QStringLiteral("Не задан доверенный ключ профиля"));
+        emit maskingApplied(false, MainBackend::tr("Не задан доверенный ключ профиля"));
         return;
     }
     const QString bearer    = cfg.value("bearer").toString();
@@ -1436,7 +1436,7 @@ void MainBackend::syncMaskingFromNode()
         if (!session || session->profileId != profileId) return;
         if (reply->error() != QNetworkReply::NoError) {
             self->setMaskingState(QStringLiteral("error"));
-            emit self->maskingApplied(false, QStringLiteral("Сеть: ") + reply->errorString());
+            emit self->maskingApplied(false, MainBackend::tr("Сеть: ") + reply->errorString());
             return;
         }
         const QByteArray body = reply->readAll();
@@ -1450,7 +1450,7 @@ void MainBackend::syncMaskingFromNode()
         }
         if (rc != 0) {
             self->setMaskingState(QStringLiteral("error"));
-            emit self->maskingApplied(false, QStringLiteral("Профиль отвергнут: ") + ParanoiaFFI::last_error());
+            emit self->maskingApplied(false, MainBackend::tr("Профиль отвергнут: ") + ParanoiaFFI::last_error());
             return;
         }
         const QString hash =
@@ -1460,8 +1460,8 @@ void MainBackend::syncMaskingFromNode()
         Utils::writeJsonObjectFile(Paths::profileMaskingState(profileId),
                                    QJsonObject{{"hash", hash}, {"name", name}});
         self->setMaskingState(changed ? QStringLiteral("updated") : QStringLiteral("verified"), name);
-        emit self->maskingApplied(true, changed ? QStringLiteral("Маска обновлена")
-                                                : QStringLiteral("Маска сверена"));
+        emit self->maskingApplied(true, changed ? MainBackend::tr("Маска обновлена")
+                                                : MainBackend::tr("Маска сверена"));
     });
 }
 
@@ -1492,7 +1492,7 @@ void MainBackend::deleteDialogLocal(const QString &peer)
                 emit self->dialogRemoved(peerCopy);
                 emit self->dialogDeleted(peerCopy);
             } else
-                emit self->serverHistoryError("Ошибка удаления локальной истории: " + err);
+                emit self->serverHistoryError(MainBackend::tr("Ошибка удаления локальной истории: ") + err);
         });
     });
 }
@@ -1501,12 +1501,12 @@ void MainBackend::clearDialogHistory(const QString &peer)
 {
     auto session = SessionStore::instance()->activeSession();
     if (!session) {
-        emit serverHistoryError("Нет активной сессии.");
+        emit serverHistoryError(MainBackend::tr("Нет активной сессии."));
         return;
     }
     const auto *dlg = session->findDialog(peer);
     if (!dlg) {
-        emit serverHistoryError("Диалог не найден.");
+        emit serverHistoryError(MainBackend::tr("Диалог не найден."));
         return;
     }
     const QString peerCopy     = peer;
@@ -1532,9 +1532,9 @@ void MainBackend::clearDialogHistory(const QString &peer)
                 emit self->serverHistoryCleared(peerCopy);
                 emit self->dialogsChanged();
             } else if (err == "server_unavailable")
-                emit self->serverHistoryError("Сервер недоступен.");
+                emit self->serverHistoryError(MainBackend::tr("Сервер недоступен."));
             else
-                emit self->serverHistoryError("Ошибка очистки диалога: " + err);
+                emit self->serverHistoryError(MainBackend::tr("Ошибка очистки диалога: ") + err);
         });
     });
 }
@@ -1546,14 +1546,14 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
 {
     const QString normalizedProfile = profileType.trimmed();
     if (!Utils::isSupportedExportProfile(normalizedProfile))
-        return ParanoiaFFI::errorResult("Неподдерживаемый тип профиля экспорта.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Неподдерживаемый тип профиля экспорта."));
     if (receiverPubkeyB64.trimmed().isEmpty())
-        return ParanoiaFFI::errorResult("Не указан публичный ключ принимающего устройства.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Не указан публичный ключ принимающего устройства."));
     // На Android FileDialog (SaveFile) возвращает content:// URI — его нельзя
     // нормализовать в локальный путь, поэтому передаём цель как есть и пишем
     // через Utils::writeBytesToTarget (SAF на Android, обычный файл на desktop).
     const QString exportTarget = filePath.trimmed();
-    if (exportTarget.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
+    if (exportTarget.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Не указан путь к файлу."));
     QJsonObject payload;
     payload["format_version"] = 1;
     payload["profile_type"]   = normalizedProfile;
@@ -1564,7 +1564,7 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
     if (includeClient) {
         auto session = SessionStore::instance()->activeSession();
         if (!session || session->server.isEmpty() || session->private_key.isEmpty())
-            return ParanoiaFFI::errorResult("Нет активной клиентской сессии для экспорта.");
+            return ParanoiaFFI::errorResult(MainBackend::tr("Нет активной клиентской сессии для экспорта."));
         QJsonArray dialoguesArr;
         for (const auto &dlg : session->dialogs) {
             if (!peers.isEmpty() && !peers.contains(dlg.peer)) continue;
@@ -1587,7 +1587,7 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
             exportedKeyEntries += keyringArr.size();
         }
         if (!peers.isEmpty() && exportedDialogues == 0)
-            return ParanoiaFFI::errorResult("Нет выбранных диалогов с keyring для экспорта.");
+            return ParanoiaFFI::errorResult(MainBackend::tr("Нет выбранных диалогов с keyring для экспорта."));
         QJsonObject serverObj;
         serverObj["url"]                 = session->server;
         serverObj["reserve_server_urls"] = Utils::stringListToJsonArray(session->reserveServerUrls);
@@ -1615,12 +1615,12 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
     auto envelope             = ParanoiaFFI::ecies_encrypt(receiverPubkeyB64.trimmed(), payloadJson);
     if (envelope.isEmpty()) {
         if (ParanoiaFFI::last_error() == "invalid_device_key")
-            return ParanoiaFFI::errorResult("Некорректный публичный ключ принимающего устройства.");
-        return ParanoiaFFI::errorResult("Ошибка шифрования экспорта.");
+            return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный публичный ключ принимающего устройства."));
+        return ParanoiaFFI::errorResult(MainBackend::tr("Ошибка шифрования экспорта."));
     }
     const QByteArray envelopeBytes = envelope.toUtf8();
     if (!Utils::writeBytesToTarget(exportTarget, envelopeBytes))
-        return ParanoiaFFI::errorResult("Не удалось записать файл экспорта.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось записать файл экспорта."));
     return QVariantMap{
         {"ok", true},
         {"path", exportTarget},
@@ -1631,49 +1631,49 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
 
 QVariantMap MainBackend::importProfile(const QString &filePath)
 {
-    if (m_devicePrivkey.isEmpty()) return ParanoiaFFI::errorResult("Device keypair не инициализирован.");
+    if (m_devicePrivkey.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Device keypair не инициализирован."));
     // На Android FileDialog возвращает content:// URI — QFile его не откроет.
     // resolveImportPath на Android копирует контент в CacheLocation и
     // возвращает путь к копии; cleanup ниже.
     const QString normalizedFilePath = Utils::resolveImportPath(filePath);
-    if (normalizedFilePath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
+    if (normalizedFilePath.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Не указан путь к файлу."));
     const bool isContentUri =
         filePath.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
     QFile file(normalizedFilePath);
     if (!file.open(QIODevice::ReadOnly)) {
         if (isContentUri) QFile::remove(normalizedFilePath);
-        return ParanoiaFFI::errorResult("Не удалось открыть файл: " + normalizedFilePath);
+        return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось открыть файл: ") + normalizedFilePath);
     }
     if (file.size() > Utils::MaxExportFileBytes) {
         file.close();
         if (isContentUri) QFile::remove(normalizedFilePath);
-        return ParanoiaFFI::errorResult("Файл экспорта слишком большой.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Файл экспорта слишком большой."));
     }
     const QString envelopeJson = QString::fromUtf8(file.readAll());
     file.close();
     // Кэш-копия от resolveImportPath больше не нужна — освобождаем место.
     if (isContentUri) QFile::remove(normalizedFilePath);
-    if (envelopeJson.trimmed().isEmpty()) return ParanoiaFFI::errorResult("Файл пуст.");
+    if (envelopeJson.trimmed().isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Файл пуст."));
     auto payloadJson = ParanoiaFFI::ecies_decrypt(m_devicePrivkey, envelopeJson);
     if (payloadJson.isEmpty()) {
         const QString err = ParanoiaFFI::last_error();
         if (err == "ecies_decrypt_error")
             return ParanoiaFFI::errorResult(
-                "Не удалось расшифровать файл. Файл зашифрован другим ключом или повреждён.");
+                MainBackend::tr("Не удалось расшифровать файл. Файл зашифрован другим ключом или повреждён."));
         if (err == "ecies_unsupported_version")
-            return ParanoiaFFI::errorResult("Неподдерживаемая версия формата экспорта.");
-        return ParanoiaFFI::errorResult("Ошибка расшифровки.");
+            return ParanoiaFFI::errorResult(MainBackend::tr("Неподдерживаемая версия формата экспорта."));
+        return ParanoiaFFI::errorResult(MainBackend::tr("Ошибка расшифровки."));
     }
     QJsonParseError parseError;
     const auto doc = QJsonDocument::fromJson(payloadJson.toUtf8(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject())
-        return ParanoiaFFI::errorResult("Некорректный формат payload после расшифровки.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный формат payload после расшифровки."));
     const auto payload = doc.object();
     if (payload["format_version"].toInt() != 1)
-        return ParanoiaFFI::errorResult("Неподдерживаемая версия формата payload.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Неподдерживаемая версия формата payload."));
     const QString profileType = payload["profile_type"].toString();
     if (!Utils::isSupportedExportProfile(profileType))
-        return ParanoiaFFI::errorResult("Неподдерживаемый тип профиля в payload.");
+        return ParanoiaFFI::errorResult(MainBackend::tr("Неподдерживаемый тип профиля в payload."));
     const bool allowClientImport = (profileType == "client" || profileType == "full");
     const bool allowAdminImport  = (profileType == "admin" || profileType == "full");
     int importedDialogues        = 0;
@@ -1708,7 +1708,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
         const QString myProfileId = session ? session->profileId : QString();
         const QJsonArray servers  = payload["servers"].toArray();
         if (servers.size() > Utils::MaxImportServers)
-            return ParanoiaFFI::errorResult("Слишком много client-профилей в export payload.");
+            return ParanoiaFFI::errorResult(MainBackend::tr("Слишком много client-профилей в export payload."));
         int totalDialogues  = 0;
         int totalKeyEntries = 0;
         for (const auto &serverVal : servers) {
@@ -1720,10 +1720,10 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
             const QString signingKey = serverObj["signing_key_b64"].toString().trimmed();
             if (url.isEmpty()) continue;
             if (!Utils::decodeFixedBase64(signingKey, 32))
-                return ParanoiaFFI::errorResult("Некорректный private signing key в client-профиле export payload.");
+                return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный private signing key в client-профиле export payload."));
             const QString importedServerId = ParanoiaFFI::derive_server_id(signingKey);
             if (importedServerId.isEmpty())
-                return ParanoiaFFI::errorResult("Не удалось вычислить server_id из ключа в export payload.");
+                return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось вычислить server_id из ключа в export payload."));
             const QString profileId    = Utils::profileIdFor(url, importedServerId);
             const bool isCurrentClient = !myProfileId.isEmpty() && (profileId == myProfileId);
             const bool profileExists   = QFile::exists(Paths::profileClient(profileId));
@@ -1742,7 +1742,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
             QSet<QString> touchedDialogues;
             const QJsonArray dialogues = serverObj["dialogues"].toArray();
             if (totalDialogues + dialogues.size() > Utils::MaxImportDialogues)
-                return ParanoiaFFI::errorResult("Слишком много диалогов в export payload.");
+                return ParanoiaFFI::errorResult(MainBackend::tr("Слишком много диалогов в export payload."));
             totalDialogues += dialogues.size();
             for (const auto &dlgVal : dialogues) {
                 const auto dlgObj          = dlgVal.toObject();
@@ -1758,7 +1758,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
                     continue;
                 }
                 if (totalKeyEntries + keyringArr.size() > Utils::MaxImportKeyEntries)
-                    return ParanoiaFFI::errorResult("Слишком много keyring entries в export payload.");
+                    return ParanoiaFFI::errorResult(MainBackend::tr("Слишком много keyring entries в export payload."));
                 totalKeyEntries += keyringArr.size();
                 for (const auto &keyVal : keyringArr) {
                     const auto keyObj      = keyVal.toObject();
@@ -1823,7 +1823,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
     if (allowAdminImport) {
         const QJsonArray adminServers = payload["admin_servers"].toArray();
         if (adminServers.size() > Utils::MaxImportAdminServers)
-            return ParanoiaFFI::errorResult("Слишком много admin-профилей в export payload.");
+            return ParanoiaFFI::errorResult(MainBackend::tr("Слишком много admin-профилей в export payload."));
         for (const auto &adminVal : adminServers) {
             const auto adminObj           = adminVal.toObject();
             const QString url             = Utils::normalizedServerUrl(adminObj["url"].toString());
@@ -1832,7 +1832,7 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
                 Utils::stringListFromJsonArray(adminObj["reserve_server_urls"].toArray()), url);
             if (url.isEmpty() || private_key.isEmpty()) continue;
             if (!Utils::decodeFixedBase64(private_key, 32))
-                return ParanoiaFFI::errorResult("Некорректный private admin key в export payload.");
+                return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный private admin key в export payload."));
             bool found = false;
             for (auto &a : admin::Admin::admins)
                 if (a.domain == url) {
@@ -1931,13 +1931,13 @@ QVariantMap MainBackend::deleteExportFile(const QString &filePath)
     // вместо вводящей в заблуждение ошибки FS.
     if (raw.startsWith(QStringLiteral("content://"), Qt::CaseInsensitive))
         return ParanoiaFFI::errorResult(
-            "Файл выбран из системного хранилища — удалите его вручную через файловый менеджер.");
+            MainBackend::tr("Файл выбран из системного хранилища — удалите его вручную через файловый менеджер."));
     const QString trimmedPath = Utils::normalizeLocalFilePath(filePath);
-    if (trimmedPath.isEmpty()) return ParanoiaFFI::errorResult("Не указан путь к файлу.");
+    if (trimmedPath.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Не указан путь к файлу."));
     if (!QFile::exists(trimmedPath))
-        return QVariantMap{{"ok", true}, {"deleted", false}, {"message", "Файл уже удалён."}};
+        return QVariantMap{{"ok", true}, {"deleted", false}, {"message", MainBackend::tr("Файл уже удалён.")}};
     if (!QFile::remove(trimmedPath))
-        return ParanoiaFFI::errorResult("Не удалось удалить файл экспорта: " + trimmedPath);
+        return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось удалить файл экспорта: ") + trimmedPath);
     return QVariantMap{{"ok", true}, {"deleted", true}};
 }
 
