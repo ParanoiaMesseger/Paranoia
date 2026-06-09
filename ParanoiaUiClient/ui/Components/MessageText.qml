@@ -119,15 +119,24 @@ Item {
         let text = rawText || ""
         let chips = []
         text = text.replace(/`([^`\n]+)`/g, function(m, code) {
+            // ВАЖНО: цвет ЯВНО через inline-style. Text.linkColor в Qt 6.10 к этим
+            // <a> НЕ применяется (рендерится дефолтным синим — «светло-синий на
+            // белом»), а вот style="color:" на самом <a> работает. Inline-код
+            // красим в codeText на фоне-чипе codeBg (как блок кода) → читаемо в
+            // обеих темах и отличимо от обычных ссылок.
             chips.push('<a href="copy:' + encodeURIComponent(code)
-                     + '" style="background-color:' + Theme.codeBg + '">' + _esc(code) + '</a>')
+                     + '" style="background-color:' + Theme.codeBg + ';color:' + Theme.codeText + '">'
+                     + _esc(code) + '</a>')
             return "\x01" + (chips.length - 1) + "\x01"
         })
         text = _esc(text)
         text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, function(m, alt) {
             return alt && alt.length > 0 ? "[" + alt + "]" : "[image]"
         })
-        text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>')
+        // Цвет ссылки тоже задаём явно (linkColor в Qt 6.10 игнорируется, иначе
+        // дефолтный синий): акцентный цвет темы.
+        text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
+                            '<a href="$2" style="color:' + Theme.accentHover + '">$1</a>')
         text = text.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/__([^_]+)__/g, "<b>$1</b>")
         text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>")
         text = text.replace(/~~([^~]+)~~/g, "<s>$1</s>")
@@ -237,13 +246,25 @@ Item {
                         Text {
                             id: codeText
                             x: 12; y: 10
-                            width: body.width - 24
+                            width: Math.max(1, body.width - 24)
                             text: body._codeHtml(modelData.content)
                             textFormat: Text.RichText
                             color: Theme.codeText
                             font.family: Theme.monoFamily
                             font.pixelSize: Theme.fontSm
-                            wrapMode: Text.WrapAnywhere
+                            // КРИТИЧНО (фикс «namertvo»-фриза в диалогах с кодом): при
+                            // создании делегата ListView body.width кратковременно ~0
+                            // (измеритель ещё не разложен) → width≈0; WrapAnywhere при
+                            // нулевой ширине раздувает высоту блока до гигантской
+                            // (каждый символ на строку) → contentHeight подскакивает →
+                            // автоскролл onContentHeightChanged→positionViewAtEnd
+                            // пересоздаёт делегат → снова width≈0 → бесконечный цикл,
+                            // UI виснет намертво (воспроизводилось на всех платформах).
+                            // Пока ширина невалидна — НЕ переносим (NoWrap: высота =
+                            // числу строк, без взрыва); WrapAnywhere включаем, когда
+                            // ширина пузыря уже посчитана. Порог 40 — реальные код-
+                            // пузыри всегда шире (код задаёт ширину пузыря).
+                            wrapMode: body.width > 40 ? Text.WrapAnywhere : Text.NoWrap
                         }
 
                         AppIcon {

@@ -9,6 +9,26 @@ Rectangle {
     color: Theme.bgPrimary
     readonly property bool isMobileOs: (Qt.platform.os === "android" || Qt.platform.os === "ios")
     required property string peer
+    // Локальные имя/аватар диалога (см. MainPage/Backend) — для хедера. Берём из
+    // getDialogs по peer; обновляем по dialogsChanged. Пусто → fallback на peer/букву.
+    property string displayName: peer
+    property string avatar: ""
+    function _refreshPeerInfo() {
+        const list = Backend.getDialogs()
+        for (var i = 0; i < list.length; ++i) {
+            if (list[i].peer === root.peer) {
+                root.displayName = list[i].displayName || root.peer
+                root.avatar = list[i].avatar || ""
+                return
+            }
+        }
+        root.displayName = root.peer
+        root.avatar = ""
+    }
+    Connections {
+        target: Backend
+        function onDialogsChanged() { root._refreshPeerInfo() }
+    }
     property string pendingDownloadId: ""
     property string pendingDownloadName: "attachment.bin"
     property string downloadingAttachmentId: ""
@@ -777,6 +797,7 @@ Rectangle {
 
     Component.onCompleted: {
         Chat.openChat(root.peer)
+        root._refreshPeerInfo()
         restoreDraft()
         applyShareTarget()
         if (VoIPAvailable) {
@@ -865,7 +886,11 @@ Rectangle {
         width: 274
         height: menuColumn.implicitHeight + topPadding + bottomPadding
         padding: 6
-        modal: false
+        // modal (без затемнения): закрывающий press-outside поглощается оверлеем
+        // и НЕ проваливается на inline-/блок-код сообщения под меню — иначе тап
+        // «мимо, чтобы закрыть» случайно копировал текст и показывал тост.
+        modal: true
+        dim: false
         focus: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         z: 900
@@ -1519,20 +1544,43 @@ Rectangle {
                     }
                 }
 
-                // Avatar
+                // Avatar (локальный аватар или буква по отображаемому имени)
                 Rectangle {
+                    id: headerAvatar
                     width: 36; height: 36
-                    radius: Theme.radiusSm
+                    radius: width / 2     // кружок — единообразно со списком (стандарт мессенджеров)
                     color: Theme.bgCard
                     border.width: 1
                     border.color: Theme.accentDim
+                    clip: true
+
+                    // ВАЖНО: НЕ вызывать .length/.charAt на ВЫРАЖЕНИИ ((x||"")…) —
+                    // qmlcachegen AOT мис-типизирует результат и компилит .length как
+                    // indexOfProperty("length") на битом QMetaObject → SIGSEGV при
+                    // инкубации страницы (крашило вход в ЛЮБОЙ диалог). На ПРЯМОМ
+                    // string-свойстве методы безопасны (как было у root.peer.charAt).
+                    // hasAvatar — сравнение без метода; displayName всегда непустой
+                    // (дефолт = peer, _refreshPeerInfo не ставит пустое).
+                    readonly property bool hasAvatar: root.avatar !== ""
 
                     Text {
                         anchors.centerIn: parent
-                        text: root.peer.charAt(0).toUpperCase()
+                        visible: !headerAvatar.hasAvatar
+                        text: root.displayName.charAt(0).toUpperCase()
                         color: Theme.accentHover
                         font.pixelSize: Theme.fontMd
                         font.weight: Font.Bold
+                    }
+
+                    // Круг запечён в PNG (см. setDialogAvatar) → обычный Image без
+                    // QML-маски/MultiEffect (та создавала FBO и вешала UI на GPU).
+                    Image {
+                        id: headerAvatarImg
+                        anchors.fill: parent
+                        visible: headerAvatar.hasAvatar && status === Image.Ready
+                        source: headerAvatar.hasAvatar ? root.avatar : ""
+                        fillMode: Image.PreserveAspectFit
+                        mipmap: true
                     }
                 }
 
@@ -1540,7 +1588,7 @@ Rectangle {
                     Layout.fillWidth: true
                     spacing: 2
                     Text {
-                        text: root.peer
+                        text: root.displayName
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontMd
                         font.family: Theme.fontFamily
@@ -1806,13 +1854,25 @@ Rectangle {
                 // за обрез. Флаг обновляется только когда жест пролистывания
                 // действительно завершён, чтобы не сбрасываться во время скролла.
                 property bool stickToBottom: true
-                onHeightChanged: if (stickToBottom) Qt.callLater(positionViewAtEnd)
                 // Высота делегатов с MessageText (Loader/Repeater/измерители) досчитывается
                 // на несколько polish-проходов позже, чем у простого Text, поэтому
                 // одиночного positionViewAtEnd после отправки мало — view встаёт на
                 // «низ», который потом подрастает. Пока стоим у низа и нет жеста —
-                // переставляем в конец при каждом росте contentHeight.
-                onContentHeightChanged: if (stickToBottom && !moving) Qt.callLater(positionViewAtEnd)
+                // держим view у конца, пока contentHeight растёт.
+                //
+                // ВАЖНО (перф/лаг при входе в диалог): НЕ пинить на КАЖДЫЙ
+                // contentHeightChanged — за время устаканивания высот код-блоков их
+                // прилетает десятки, и каждый positionViewAtEnd — полный relayout
+                // ленты → заметное подтормаживание. Коалесцируем в ОДИН пин через
+                // таймер с restart: фактический positionViewAtEnd срабатывает один
+                // раз, через кадр после того, как поток изменений утих.
+                Timer {
+                    id: pinBottomTimer
+                    interval: 16
+                    onTriggered: if (listView.stickToBottom && !listView.moving) listView.positionViewAtEnd()
+                }
+                onHeightChanged: if (stickToBottom) pinBottomTimer.restart()
+                onContentHeightChanged: if (stickToBottom && !moving) pinBottomTimer.restart()
                 onMovementEnded: stickToBottom = root.isListAtEnd()
                 onDraggingChanged: if (!dragging) stickToBottom = root.isListAtEnd()
 
@@ -2039,7 +2099,7 @@ Rectangle {
                         anchors.top: parent.top
                         anchors.left: parent.left
                         anchors.margins: 10
-                        text: isMe ? "" : root.peer
+                        text: isMe ? "" : root.displayName
                         color: Theme.accent
                         font.pixelSize: Theme.fontXs
                         font.family: Theme.fontFamily
@@ -2088,6 +2148,7 @@ Rectangle {
                         visible: isPhotoGroup
                         photos: groupPhotos
                         caption: isPhotoGroup ? (model.caption || "") : ""
+                        captionColor: isMe ? Theme.messageTextOutgoing : Theme.textPrimary
                         maxWidth: Math.min(440, Math.max(240, listView.width * 0.55))
                         progressMap: root.uploadProgress
                         progressTick: root.uploadTick

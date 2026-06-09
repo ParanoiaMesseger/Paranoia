@@ -85,18 +85,26 @@ Rectangle {
     // Строка поиска по имени собеседника.
     property string dialogQuery: ""
 
-    // Фильтр по имени + сортировка: непрочитанные сверху, затем по убыванию
-    // количества непрочитанных, затем по алфавиту.
+    // Фильтр по имени + сортировка по свежести (как в Telegram): диалог с самой
+    // недавней активностью — сверху. Сортируем по lastActivityMs, НЕ по
+    // непрочитанным: новое сообщение поднимает диалог вверх, а открытие/прочтение
+    // НЕ переставляет строку (раньше очистка непрочитанного роняла диалог вниз
+    // прямо во время клика → казалось, что клик попал не туда). Тай-брейк —
+    // алфавит (диалоги без активности, lastActivityMs=0, уходят в конец).
     function filteredDialogs() {
         const q = root.dialogQuery.trim().toLowerCase()
         const src = (root.allDialogs || []).filter(function(d) {
             return q === "" || (d.peer || "").toLowerCase().indexOf(q) !== -1
         })
         return src.slice().sort(function(a, b) {
-            const ua = a.unreadCount || 0
-            const ub = b.unreadCount || 0
-            if ((ua > 0) !== (ub > 0)) return ua > 0 ? -1 : 1
-            if (ua !== ub) return ub - ua
+            // «Избранное» (self-диалог, peer хранится литералом — НЕ переводится,
+            // см. i18n) всегда закреплён сверху, вне зависимости от свежести.
+            const fa = (a.peer === "Избранное")
+            const fb = (b.peer === "Избранное")
+            if (fa !== fb) return fa ? -1 : 1
+            const ta = a.lastActivityMs || 0
+            const tb = b.lastActivityMs || 0
+            if (ta !== tb) return tb - ta
             return (a.peer || "").localeCompare(b.peer || "")
         })
     }
@@ -112,6 +120,8 @@ Rectangle {
     Connections {
         target: Chat
         function onDialogsChanged() { root.allDialogs = Backend.getDialogs() }
+        // Photo picker (Android) вернул фото под аватар диалога → ставим его.
+        function onAvatarPhotoPicked(peer, uri) { Backend.setDialogAvatar(peer, uri) }
     }
 
     Connections {
@@ -369,6 +379,7 @@ Rectangle {
                             spacing:                8
 
                             Text {
+                                id: srvUrlText
                                 anchors.verticalCenter: parent.verticalCenter
                                 text:  Backend.server
                                 color: Theme.textPrimary
@@ -376,7 +387,8 @@ Rectangle {
                                 font.family:    Theme.fontFamily
                                 font.weight:    Font.Medium
                                 elide: Text.ElideRight
-                                width: Math.min(implicitWidth, parent.width - 80)
+                                // URL не должен занимать всю строку — оставляем место имени.
+                                width: Math.min(implicitWidth, parent.width * 0.55)
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
@@ -384,6 +396,11 @@ Rectangle {
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontXs
                                 font.family:    Theme.fontFamily
+                                // Длинное имя обрезаем по остатку строки (учитывая
+                                // индикатор маски), чтобы не наезжало на «Резерв».
+                                elide: Text.ElideRight
+                                width: Math.max(0, parent.width - srvUrlText.width - parent.spacing
+                                                - (maskIndicator.visible ? maskIndicator.width + parent.spacing : 0))
                             }
 
                             // Индикатор маскировки: refresh (сверка идёт),
@@ -421,13 +438,15 @@ Rectangle {
                             }
                         }
 
-                        // Session count badge — visible when >1 session
+                        // Бейдж профилей — видимая тап-зона свитчера (переключение/
+                        // выход). Показываем и при одном профиле, чтобы был доступ к
+                        // выходу/удалению (иначе при единственном профиле выйти нельзя).
                         Rectangle {
                             id: sessionBadge
                             anchors.right:          parent.right
                             anchors.rightMargin:    8
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: root.sessionsData.length > 1
+                            visible: Backend.loggedIn && root.sessionsData.length >= 1
                             width: sessionBadgeText.implicitWidth + 10
                             height: 18
                             radius: 9
@@ -481,7 +500,9 @@ Rectangle {
                             z: 0
                             anchors.fill: parent
                             hoverEnabled: true
-                            enabled:      root.sessionsData.length > 1
+                            // Открываем свитчер и при единственном профиле — чтобы был
+                            // доступен выход/удаление профиля (корзина в свитчере).
+                            enabled:      root.sessionsData.length >= 1
                             onClicked:    sessionSwitcherPopup.open()
                         }
                     }
@@ -612,18 +633,37 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
 
                                     Rectangle {
+                                        id: avatarBg
                                         anchors.fill: parent
                                         radius: 19
                                         color:  Theme.bgCard
                                         border.width: 1
                                         border.color: Theme.accentDim
+                                        clip: true
 
+                                        readonly property bool hasAvatar: (modelData.avatar || "").length > 0
+
+                                        // Буква (когда нет аватара) — по отображаемому имени.
                                         Text {
                                             anchors.centerIn: parent
-                                            text:  modelData.peer.charAt(0).toUpperCase()
+                                            visible: !avatarBg.hasAvatar
+                                            text:  (modelData.displayName || modelData.peer || "?").charAt(0).toUpperCase()
                                             color: Theme.accentHover
                                             font.pixelSize: Theme.fontMd
                                             font.weight:    Font.Bold
+                                        }
+
+                                        // Локальный аватар (data:-URL). Круг ЗАПЕЧЁН в самом
+                                        // PNG (см. setDialogAvatar) → обычный Image, без QML-маски
+                                        // /MultiEffect (та создавала FBO на каждую строку и вешала
+                                        // UI на реальном GPU). Прозрачные углы открывают фон-кружок.
+                                        Image {
+                                            id: avatarImg
+                                            anchors.fill: parent
+                                            visible: avatarBg.hasAvatar && status === Image.Ready
+                                            source: avatarBg.hasAvatar ? modelData.avatar : ""
+                                            fillMode: Image.PreserveAspectFit
+                                            mipmap: true
                                         }
                                     }
 
@@ -650,7 +690,7 @@ Rectangle {
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 3
                                     Text {
-                                        text:           modelData.peer
+                                        text:           modelData.displayName || modelData.peer
                                         color:          dlgItem.highlighted ? Theme.accentHover : Theme.textPrimary
                                         font.pixelSize: Theme.fontMd
                                         font.family:    Theme.fontFamily
@@ -729,6 +769,9 @@ Rectangle {
                                     hoverEnabled: true
                                     onClicked: {
                                         dlgContextMenu.selectedPeer = modelData.peer
+                                        dlgContextMenu.selectedDisplayName = modelData.displayName || modelData.peer
+                                        dlgContextMenu.selectedLocalName = modelData.localName || ""
+                                        dlgContextMenu.selectedHasAvatar = (modelData.avatar || "").length > 0
 
                                         dlgContextMenu.x = dlgItem.x + (dlgItem.width - dlgContextMenu.width - 8)
                                         dlgContextMenu.y = dlgItem.mapToItem(root, 0, 0).y + 16
@@ -978,6 +1021,9 @@ Rectangle {
         z: 900
 
         property string selectedPeer: ""
+        property string selectedDisplayName: ""
+        property string selectedLocalName: ""
+        property bool   selectedHasAvatar: false
 
         background: Rectangle {
             color: Theme.bgSecondary
@@ -990,6 +1036,106 @@ Rectangle {
             id: contextMenuColumn
             width: 224
             spacing: 2
+
+            // ── Переименовать (локальное имя) ──────────────────────────────
+            Rectangle {
+                width: contextMenuColumn.width
+                height: 34
+                radius: Theme.radiusSm
+                color: renameArea.containsMouse ? Theme.bgButton : "transparent"
+                Text {
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 10; anchors.rightMargin: 10
+                    text: qsTr("Переименовать")
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: renameArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                        renamePopup.peer = dlgContextMenu.selectedPeer
+                        renamePopup.presetName = dlgContextMenu.selectedDisplayName
+                        dlgContextMenu.close()
+                        renamePopup.open()
+                    }
+                }
+            }
+
+            // ── Аватар (задать из файла) ───────────────────────────────────
+            Rectangle {
+                width: contextMenuColumn.width
+                height: 34
+                radius: Theme.radiusSm
+                color: avatarArea.containsMouse ? Theme.bgButton : "transparent"
+                Text {
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 10; anchors.rightMargin: 10
+                    text: dlgContextMenu.selectedHasAvatar ? qsTr("Сменить аватар") : qsTr("Задать аватар")
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: avatarArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                        var p = dlgContextMenu.selectedPeer
+                        dlgContextMenu.close()
+                        // Android — системный photo picker (галерея), а не SAF
+                        // document picker; результат прилетит сигналом
+                        // Chat.avatarPhotoPicked → Backend.setDialogAvatar.
+                        if (Qt.platform.os === "android") {
+                            Chat.pickAvatarFromGallery(p)
+                        } else {
+                            avatarDialog.peer = p
+                            avatarDialog.open()
+                        }
+                    }
+                }
+            }
+
+            // ── Убрать аватар (только если задан) ──────────────────────────
+            Rectangle {
+                width: contextMenuColumn.width
+                height: dlgContextMenu.selectedHasAvatar ? 34 : 0
+                visible: dlgContextMenu.selectedHasAvatar
+                radius: Theme.radiusSm
+                color: clearAvatarArea.containsMouse ? Theme.bgButton : "transparent"
+                Text {
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 10; anchors.rightMargin: 10
+                    text: qsTr("Убрать аватар")
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: clearAvatarArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                        dlgContextMenu.close()
+                        Backend.clearDialogAvatar(dlgContextMenu.selectedPeer)
+                    }
+                }
+            }
+
+            // ── Separator ──────────────────────────────────────────────────
+            Rectangle {
+                width: contextMenuColumn.width
+                height: 1
+                color: Theme.separator
+            }
 
             // ── Обновить ключ диалога ──────────────────────────────────────
             Rectangle {
@@ -1246,7 +1392,8 @@ Rectangle {
 
                         Column {
                             anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width - (modelData.totalUnread > 0 ? 48 : 0) - 8
+                            // -30 — место под кнопку-корзину (удалить профиль) справа.
+                            width: parent.width - (modelData.totalUnread > 0 ? 48 : 0) - 8 - 30
                             spacing: 2
 
                             Text {
@@ -1296,6 +1443,102 @@ Rectangle {
                             sessionSwitcherPopup.close()
                         }
                     }
+
+                    // Удалить профиль (локально). z выше switchArea — клик по корзине
+                    // не переключает, а открывает подтверждение.
+                    AppIcon {
+                        id: deleteProfileBtn
+                        anchors.right: parent.right
+                        anchors.rightMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 18; height: 18
+                        z: 5
+                        name: "trash"
+                        iconColor: deleteProfileArea.containsMouse ? Theme.error : Theme.textSecondary
+                        MouseArea {
+                            id: deleteProfileArea
+                            anchors.fill: parent
+                            anchors.margins: -7
+                            hoverEnabled: true
+                            onClicked: {
+                                deleteProfilePopup.profileId = modelData.profileId
+                                deleteProfilePopup.profileServer = modelData.server
+                                deleteProfilePopup.profileUsername = modelData.username
+                                sessionSwitcherPopup.close()
+                                deleteProfilePopup.open()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Попап: удалить профиль (локально, «выход из профиля») ──
+    Popup {
+        id: deleteProfilePopup
+        anchors.centerIn: Overlay.overlay
+        width: 340; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        property string profileId: ""
+        property string profileServer: ""
+        property string profileUsername: ""
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  qsTr("Удалить профиль")
+                color: Theme.error
+                font.pixelSize: Theme.fontLg
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: deleteProfilePopup.profileUsername + " · " + deleteProfilePopup.profileServer
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WrapAnywhere
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: qsTr("Профиль удалится только с этого устройства: сессия, диалоги, ключи, история и вложения. На сервере регистрация останется (дерегистрацию не делаем). Восстановить локально нельзя.")
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: qsTr("Удалить")
+                    onClicked: {
+                        Backend.deleteProfile(deleteProfilePopup.profileId)
+                        deleteProfilePopup.close()
+                    }
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: qsTr("Отмена")
+                    secondary: true
+                    onClicked: deleteProfilePopup.close()
                 }
             }
         }
@@ -1367,6 +1610,87 @@ Rectangle {
                 }
             }
         }
+    }
+
+    // ── Попап: переименовать диалог (локальное имя) ───────────
+    Popup {
+        id: renamePopup
+        anchors.centerIn: Overlay.overlay
+        width: 320; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        property string peer: ""
+        property string presetName: ""
+        onOpened: { renameInput.text = renamePopup.presetName; renameInput.forceActiveFocus() }
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        function commit() {
+            Backend.setDialogLocalName(renamePopup.peer, renameInput.text)
+            renamePopup.close()
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  qsTr("Имя диалога")
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+
+            ParaInput {
+                id: renameInput
+                Layout.fillWidth: true
+                placeholder: qsTr("Отображаемое имя")
+                predictiveText: true
+                showPasteButton: false
+                onAccepted: renamePopup.commit()
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: qsTr("Локальное имя. Маршрутизация идёт по server_id и не меняется. Пусто — вернуть исходное.")
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontXs
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: qsTr("Сохранить")
+                    onClicked: renamePopup.commit()
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: qsTr("Отмена")
+                    secondary: true
+                    onClicked: renamePopup.close()
+                }
+            }
+        }
+    }
+
+    // ── Файловый диалог: выбор аватара диалога ────────────────
+    ParaFileDialog {
+        id: avatarDialog
+        property string peer: ""
+        title: qsTr("Выберите аватар")
+        mode: "open"
+        nameFilters: [qsTr("Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)"), qsTr("Все файлы (*)")]
+        onAccepted: Backend.setDialogAvatar(avatarDialog.peer, selectedFile.toString())
     }
 
 }

@@ -65,6 +65,10 @@ public:
     // через sendFile (см. consumePickedAttachment).
     Q_INVOKABLE void pickPhotoFromGallery();
     Q_INVOKABLE void pickVideoFromGallery();
+    // Выбор аватара диалога через системный photo picker (Android). Результат
+    // (первое фото) уходит сигналом avatarPhotoPicked(peer, uri), а НЕ в отправку
+    // — QML зовёт Backend.setDialogAvatar. peer запоминается до consumePickedAttachment.
+    Q_INVOKABLE void pickAvatarFromGallery(const QString &peer);
 
     // Локальные черновики (несинхронизированные с сервером). Хранятся как
     // поле Dialog::draft внутри dialogs.json — не плодим лишних файлов и
@@ -100,6 +104,9 @@ signals:
     // поля ввода и роутит как мультивыбор десктопа (sendSelectedPhotos):
     // одно фото — обычной отправкой, несколько — мозаикой-группой.
     void attachmentsPicked(const QStringList &uris);
+    // Photo picker вернул фото для АВАТАРА диалога peer (URI первого выбранного).
+    // QML (MainPage) ловит и зовёт Backend.setDialogAvatar(peer, uri).
+    void avatarPhotoPicked(const QString &peer, const QString &uri);
     void dialogsChanged();
     void serverHistoryCleared(const QString &peer);
     void serverHistoryError(const QString &msg);
@@ -128,6 +135,9 @@ private slots:
 
 private:
     QString m_activePeer;
+    // Peer, для которого открыт photo picker под АВАТАР (Android). Выставляется
+    // в pickAvatarFromGallery, потребляется one-shot в consumePickedAttachment.
+    QString m_pendingAvatarPeer;
     QMap<QString, QVariantList> m_messageCache;
     QMap<QString, QSet<QString>> m_seenIds;
     QMap<QString, QSet<QString>> m_appliedReactionIds;

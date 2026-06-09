@@ -9,6 +9,10 @@
 #include <QWindow>
 #include <QDebug>
 #include <QStandardPaths>
+#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
+#include <QLocalServer>
+#include <QLocalSocket>
+#endif
 #include <QDir>
 #include <QFile>
 #include <QStyleHints>
@@ -96,6 +100,44 @@ int main(int argc, char *argv[])
     QGuiApplication app(argc, argv);
 #endif
     app.setWindowIcon(QIcon(QStringLiteral(":/logo_symbol.svg")));
+
+#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
+    // ── Single-instance (Linux desktop) ─────────────────────────────────────
+    // Приложение живёт в трее (setQuitOnLastWindowClosed(false)). Повторный
+    // запуск (клик по иконке, когда оно уже работает/свёрнуто в трей) НЕ должен
+    // плодить второй процесс, а обязан поднять существующее окно. Механизм —
+    // именованный QLocalServer: вторичный инстанс коннектится к нему, отдаёт
+    // команду «поднять» и тут же выходит; первичный по этому сигналу показывает
+    // и активирует окно. Имя сокета привязано к профилю (AppDataLocation), чтобы
+    // разные пользователи на одной машине не мешали друг другу.
+    const QString siName = QStringLiteral("ParanoiaUiClient-")
+        + QString::number(qHash(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)));
+    {
+        QLocalSocket probe;
+        probe.connectToServer(siName);
+        if (probe.waitForConnected(300)) {
+            probe.write("RAISE\n");
+            probe.flush();
+            probe.waitForBytesWritten(300);
+            probe.disconnectFromServer();
+            return 0;   // уже запущено — отдали «поднять окно» и выходим
+        }
+    }
+    QWindow *siWindow      = nullptr;
+    auto    *siServer      = new QLocalServer(&app);
+    QLocalServer::removeServer(siName);   // подчистить «осиротевший» сокет после краша
+    siServer->listen(siName);
+    QObject::connect(siServer, &QLocalServer::newConnection, &app, [siServer, &siWindow]() {
+        while (QLocalSocket *c = siServer->nextPendingConnection()) {
+            QObject::connect(c, &QLocalSocket::disconnected, c, &QObject::deleteLater);
+            if (!siWindow) continue;
+            if (siWindow->visibility() == QWindow::Hidden)   siWindow->show();      // вернуть из трея
+            if (siWindow->visibility() == QWindow::Minimized) siWindow->showNormal(); // развернуть
+            siWindow->raise();
+            siWindow->requestActivate();
+        }
+    });
+#endif
 
     // ── Локализация ────────────────────────────────────────────────────────
     // Исходные строки русские (sourcelanguage=ru). Для не-русской системной
@@ -222,6 +264,12 @@ int main(int argc, char *argv[])
     if (engine.rootObjects().isEmpty())
         qCritical().noquote() << "QML root object is empty after loadFromModule. Import paths:"
                               << engine.importPathList().join(", ");
+#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
+    // Привязываем корневое окно к single-instance-обработчику (см. выше): по
+    // приходу второго запуска оно показывается/активируется.
+    if (!engine.rootObjects().isEmpty())
+        siWindow = qobject_cast<QWindow *>(engine.rootObjects().constFirst());
+#endif
     DesktopTray desktopTray(engine);
     QObject::connect(&notifications, &NotificationCoordinator::notificationAvailable, &desktopTray,
                      &DesktopTray::notificationAvailable);

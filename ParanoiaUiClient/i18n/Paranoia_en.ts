@@ -17,7 +17,7 @@
     </message>
     <message>
         <source>Введите имя собеседника.</source>
-        <translation>Enter the contact's name.</translation>
+        <translation>Enter the contact&apos;s name.</translation>
     </message>
 </context>
 <context>
@@ -734,7 +734,7 @@
     </message>
     <message>
         <source>Я передал ключ, войти</source>
-        <translation>I've shared the key, sign in</translation>
+        <translation>I&apos;ve shared the key, sign in</translation>
     </message>
     <message>
         <source>Укажите сервер и имя пользователя.</source>
@@ -869,7 +869,7 @@ Dialogues: %1, keys: %2</translation>
     </message>
     <message>
         <source>Файл шифруется ключом принимающего устройства.</source>
-        <translation>The file is encrypted with the receiving device's key.</translation>
+        <translation>The file is encrypted with the receiving device&apos;s key.</translation>
     </message>
     <message>
         <source>Профиль экспорта:</source>
@@ -901,7 +901,7 @@ Dialogues: %1, keys: %2</translation>
     </message>
     <message>
         <source>Публичный ключ принимающего устройства</source>
-        <translation>Receiving device's public key</translation>
+        <translation>Receiving device&apos;s public key</translation>
     </message>
     <message>
         <source>Файл содержит ваши ключи. Храните его в безопасном месте.</source>
@@ -982,7 +982,7 @@ Entries skipped: %1</translation>
     </message>
     <message>
         <source>Импортировать профиль из зашифрованного файла. Передайте ваш публичный ключ экспортирующему устройству — файл расшифровывается ключом этого устройства.</source>
-        <translation>Import a profile from an encrypted file. Give your public key to the exporting device — the file is decrypted with this device's key.</translation>
+        <translation>Import a profile from an encrypted file. Give your public key to the exporting device — the file is decrypted with this device&apos;s key.</translation>
     </message>
     <message>
         <source>Ваш публичный ключ:</source>
@@ -1366,7 +1366,7 @@ Delete the file manually: %1 (%2)</translation>
     </message>
     <message>
         <source>Не указан публичный ключ принимающего устройства.</source>
-        <translation>The receiving device's public key is not specified.</translation>
+        <translation>The receiving device&apos;s public key is not specified.</translation>
     </message>
     <message>
         <source>Не указан путь к файлу.</source>
@@ -1580,6 +1580,22 @@ Delete the file manually: %1 (%2)</translation>
         <translation>App version</translation>
     </message>
     <message>
+        <source>Переименовать</source>
+        <translation>Rename</translation>
+    </message>
+    <message>
+        <source>Сменить аватар</source>
+        <translation>Change avatar</translation>
+    </message>
+    <message>
+        <source>Задать аватар</source>
+        <translation>Set avatar</translation>
+    </message>
+    <message>
+        <source>Убрать аватар</source>
+        <translation>Remove avatar</translation>
+    </message>
+    <message>
         <source>Обновить ключ диалога</source>
         <translation>Update dialogue key</translation>
     </message>
@@ -1616,12 +1632,48 @@ Delete the file manually: %1 (%2)</translation>
         <translation>Servers</translation>
     </message>
     <message>
+        <source>Удалить профиль</source>
+        <translation>Delete profile</translation>
+    </message>
+    <message>
+        <source>Профиль удалится только с этого устройства: сессия, диалоги, ключи, история и вложения. На сервере регистрация останется (дерегистрацию не делаем). Восстановить локально нельзя.</source>
+        <translation>The profile will be removed from this device only: session, dialogues, keys, history and attachments. The registration stays on the server (no deregistration). It cannot be restored locally.</translation>
+    </message>
+    <message>
         <source>Удалить диалог, локальную историю и ключ с этого устройства. На сервере зашифрованные данные останутся.</source>
         <translation>Delete the dialogue, local history and key from this device. The encrypted data will remain on the server.</translation>
     </message>
     <message>
         <source>Удалить</source>
         <translation>Delete</translation>
+    </message>
+    <message>
+        <source>Имя диалога</source>
+        <translation>Dialogue name</translation>
+    </message>
+    <message>
+        <source>Отображаемое имя</source>
+        <translation>Display name</translation>
+    </message>
+    <message>
+        <source>Локальное имя. Маршрутизация идёт по server_id и не меняется. Пусто — вернуть исходное.</source>
+        <translation>Local name. Routing goes by server_id and does not change. Empty — restore the original.</translation>
+    </message>
+    <message>
+        <source>Сохранить</source>
+        <translation>Save</translation>
+    </message>
+    <message>
+        <source>Выберите аватар</source>
+        <translation>Choose an avatar</translation>
+    </message>
+    <message>
+        <source>Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)</source>
+        <translation>Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)</translation>
+    </message>
+    <message>
+        <source>Все файлы (*)</source>
+        <translation>All files (*)</translation>
     </message>
 </context>
 <context>
@@ -1817,7 +1869,7 @@ Delete the file manually: %1 (%2)</translation>
     </message>
     <message>
         <source>Я создаю приглашение</source>
-        <translation>I'm creating an invitation</translation>
+        <translation>I&apos;m creating an invitation</translation>
     </message>
     <message>
         <source>Ошибка создания приглашения.</source>
@@ -1841,7 +1893,7 @@ Delete the file manually: %1 (%2)</translation>
     </message>
     <message>
         <source>Вставьте ответ собеседника:</source>
-        <translation>Paste your contact's response:</translation>
+        <translation>Paste your contact&apos;s response:</translation>
     </message>
     <message>
         <source>Вставьте response payload…</source>
@@ -1865,7 +1917,7 @@ Delete the file manually: %1 (%2)</translation>
     </message>
     <message>
         <source>Вставьте приглашение собеседника:</source>
-        <translation>Paste your contact's invitation:</translation>
+        <translation>Paste your contact&apos;s invitation:</translation>
     </message>
     <message>
         <source>Вставьте invitation payload…</source>
@@ -1967,7 +2019,7 @@ Delete the file manually: %1 (%2)</translation>
     </message>
     <message>
         <source>Наведите камеру на QR-код с публичным ключом клиента.</source>
-        <translation>Point the camera at the QR code with the client's public key.</translation>
+        <translation>Point the camera at the QR code with the client&apos;s public key.</translation>
     </message>
     <message>
         <source>Зарегистрировать пользователя</source>
@@ -1979,7 +2031,7 @@ Delete the file manually: %1 (%2)</translation>
     </message>
     <message>
         <source>Публичный ключ пользователя</source>
-        <translation>User's public key</translation>
+        <translation>User&apos;s public key</translation>
     </message>
     <message>
         <source>Вставьте ключ или считайте QR…</source>
@@ -2209,8 +2261,8 @@ Delete the file manually: %1 (%2)</translation>
         <translation>Could not check for updates. Open the releases page manually.</translation>
     </message>
     <message>
-        <source>GitLab вернул некорректный ответ о релизе.</source>
-        <translation>GitLab returned an invalid release response.</translation>
+        <source>Сервер вернул некорректный ответ о релизе.</source>
+        <translation>The server returned an invalid release response.</translation>
     </message>
     <message>
         <source>В последнем релизе не указана версия.</source>
@@ -2252,8 +2304,12 @@ Delete the file manually: %1 (%2)</translation>
         <translation>Download and install</translation>
     </message>
     <message>
-        <source>Открыть страницу релизов</source>
-        <translation>Open releases page</translation>
+        <source>GitHub</source>
+        <translation>GitHub</translation>
+    </message>
+    <message>
+        <source>Сайт Paranoia.run</source>
+        <translation>Paranoia.run website</translation>
     </message>
 </context>
 <context>

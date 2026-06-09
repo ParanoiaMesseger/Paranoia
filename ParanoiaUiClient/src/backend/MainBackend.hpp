@@ -127,15 +127,35 @@ public:
 
     Q_INVOKABLE QVariantList getSessionList() const;
     Q_INVOKABLE void switchSession(const QString &profileId);
+    /// «Выход из профиля» — ЛОКАЛЬНОЕ удаление профиля сервера с этого устройства
+    /// (сессия + запись в манифесте + папка профиля: диалоги/ключи/БД/вложения).
+    /// Серверную дерегистрацию НЕ делает. Если удалён активный — переключает на
+    /// другой профиль, а если их не осталось — переводит в состояние «не залогинен».
+    Q_INVOKABLE void deleteProfile(const QString &profileId);
 
     Q_INVOKABLE void deleteDialogLocal(const QString &peer);
     /// Очистить диалог: удалить всю историю и на сервере, и локально, оставив
     /// сам диалог и его ключи (можно продолжать общение).
     Q_INVOKABLE void clearDialogHistory(const QString &peer);
 
+    /// Локальное отображаемое имя диалога (бывший username). Маршрутизация идёт
+    /// по server_id (peerServerId) — оно не трогается; меняем только показываемое
+    /// имя. Локально, не синхронизируется; пусто → показываем внутренний ключ.
+    Q_INVOKABLE void setDialogLocalName(const QString &peer, const QString &name);
+    /// Задать локальный аватар диалога из файла (file:// или content://):
+    /// масштаб до квадрата 64×64 (кроп по центру), PNG base64 в зашифрованном
+    /// dialogs (в vault). Возвращает true при успехе.
+    Q_INVOKABLE bool setDialogAvatar(const QString &peer, const QString &fileUrl);
+    /// Убрать локальный аватар (вернуть букву).
+    Q_INVOKABLE void clearDialogAvatar(const QString &peer);
+
     Q_INVOKABLE QVariantMap exportProfile(const QString &profileType, const QStringList &peers,
                                           const QString &receiverPubkeyB64, const QString &filePath);
-    Q_INVOKABLE QVariantMap importProfile(const QString &filePath);
+    /// activate=true: импортированный (первый client-)профиль становится активным
+    /// и логинится, даже если уже есть активный профиль (поток регистрации/
+    /// онбординга — «войти этим профилем»). activate=false — прежнее поведение
+    /// (активирует только если активного профиля ещё нет; для импорта в настройках).
+    Q_INVOKABLE QVariantMap importProfile(const QString &filePath, bool activate = false);
     Q_INVOKABLE QVariantMap deleteExportFile(const QString &filePath);
 
     /// Конвертировать QML-овский url (например, FileDialog.selectedFile) в
