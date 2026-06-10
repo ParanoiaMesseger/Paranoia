@@ -14,6 +14,9 @@ Item {
     // [{id, source, name, key, status}]; key!="" → оптимистичная (грузится).
     property var photos: []
     property string caption: ""
+    // Цвет подписи — задаётся вызывающим по isMe (исходящие пузыри = accent-фон,
+    // текст должен быть messageTextOutgoing, иначе тёмный текст на тёмном фоне).
+    property color captionColor: Theme.textPrimary
     property real maxWidth: 260
     property real spacing: 3
     // Прогресс загрузки: progressMap[key] ∈ [0..1]; tick форсирует перевычисление.
@@ -192,7 +195,7 @@ Item {
             width: parent.width
             visible: mosaic.caption.length > 0
             text: mosaic.caption
-            color: Theme.textPrimary
+            color: mosaic.captionColor
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontMd
             wrapMode: Text.Wrap

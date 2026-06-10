@@ -9,8 +9,13 @@
 #include "platform/PlatformNotifications.hpp"
 #include "utils/Utils.hpp"
 #include <ParanoiaFFI>
+#include <QBuffer>
+#include <QFile>
 #include <QFileInfo>
 #include <QFutureWatcher>
+#include <QImage>
+#include <QPainter>
+#include <QPainterPath>
 #include <QGuiApplication>
 
 #include <limits>
@@ -1180,12 +1185,25 @@ QVariantList MainBackend::getDialogs() const
     if (!session) return {};
     const QString profileId = session->profileId;
     QVariantList result;
-    for (const auto &dlg : session->dialogs)
+    for (const auto &dlg : session->dialogs) {
+        // Свежесть для сортировки: max персистентного (Dialog) и in-memory
+        // (фоновые входящие, отслеженные координатором до открытия диалога).
+        const qint64 activityMs = qMax(dlg.lastActivityMs, m_notifications->lastActivityMs(profileId, dlg.peer));
+        // Отображаемое имя: локальное (alias) если задано, иначе внутренний ключ.
+        const QString displayName = dlg.localName.isEmpty() ? dlg.peer : dlg.localName;
+        // Аватар — готовый data:-URL для QML Image (пусто → UI рисует букву).
+        const QString avatarUrl =
+            dlg.avatar.isEmpty() ? QString() : (QStringLiteral("data:image/png;base64,") + dlg.avatar);
         result.append(QVariantMap{{"peer", dlg.peer},
+                                  {"displayName", displayName},
+                                  {"localName", dlg.localName},
+                                  {"avatar", avatarUrl},
                                   {"lastMsg", dlg.lastMsg},
                                   {"hasKey", !dlg.keyring.isEmpty()},
                                   {"unreadCount", m_notifications->unreadCount(profileId, dlg.peer)},
+                                  {"lastActivityMs", static_cast<double>(activityMs)},
                                   {"notificationHint", m_notifications->isNotificationHintFor(profileId, dlg.peer)}});
+    }
     return result;
 }
 
@@ -1539,6 +1557,82 @@ void MainBackend::clearDialogHistory(const QString &peer)
     });
 }
 
+// ── Локальные имя / аватар диалога ────────────────────────────────────────────
+
+void MainBackend::setDialogLocalName(const QString &peer, const QString &name)
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    Dialog *dlg = session->findDialog(peer);
+    if (!dlg) return;
+    const QString trimmed = name.trimmed();
+    if (dlg->localName == trimmed) return;
+    dlg->localName = trimmed;
+    session->saveDialogs();
+    emit dialogsChanged();
+}
+
+bool MainBackend::setDialogAvatar(const QString &peer, const QString &fileUrl)
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return false;
+    Dialog *dlg = session->findDialog(peer);
+    if (!dlg) return false;
+
+    const bool isContentUri = fileUrl.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
+    const QString localPath = Utils::resolveImportPath(fileUrl);
+    if (localPath.isEmpty()) return false;
+    QImage img(localPath);
+    // content:// резолвится во временную копию в кэше — удаляем после чтения
+    // (file:// — это пользовательский файл, его НЕ трогаем).
+    if (isContentUri) QFile::remove(localPath);
+    if (img.isNull()) return false;
+
+    // Квадрат 64×64: cover по меньшей стороне + кроп по центру.
+    constexpr int kSide = 64;
+    const QImage scaled = img.scaled(kSide, kSide, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    const QImage square = scaled.copy((scaled.width() - kSide) / 2, (scaled.height() - kSide) / 2, kSide, kSide);
+
+    // КРУГ ЗАПЕКАЕМ В САМ PNG (антиалиасинг, прозрачные углы) — чтобы UI показывал
+    // готовый кружок ОБЫЧНЫМ Image, БЕЗ QML-маски/MultiEffect. Прежний вариант с
+    // `layer.enabled:true`-маской создавал ShaderEffectSource/FBO на КАЖДУЮ строку
+    // списка и хедер даже без аватара → на реальном GPU/Wayland это вешало UI при
+    // входе в любой диалог (offscreen/софт-рендер не воспроизводил). См. memory.
+    QImage circular(kSide, kSide, QImage::Format_ARGB32_Premultiplied);
+    circular.fill(Qt::transparent);
+    {
+        QPainter painter(&circular);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        QPainterPath clip;
+        clip.addEllipse(0.5, 0.5, kSide - 1.0, kSide - 1.0);
+        painter.setClipPath(clip);
+        painter.drawImage(0, 0, square);
+    }
+
+    QByteArray png;
+    QBuffer buf(&png);
+    buf.open(QIODevice::WriteOnly);
+    if (!circular.save(&buf, "PNG")) return false;
+    buf.close();
+
+    dlg->avatar = QString::fromLatin1(png.toBase64());
+    session->saveDialogs();
+    emit dialogsChanged();
+    return true;
+}
+
+void MainBackend::clearDialogAvatar(const QString &peer)
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    Dialog *dlg = session->findDialog(peer);
+    if (!dlg || dlg->avatar.isEmpty()) return;
+    dlg->avatar.clear();
+    session->saveDialogs();
+    emit dialogsChanged();
+}
+
 // ── Export / Import ───────────────────────────────────────────────────────────
 
 QVariantMap MainBackend::exportProfile(const QString &profileType, const QStringList &peers,
@@ -1629,7 +1723,7 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
     };
 }
 
-QVariantMap MainBackend::importProfile(const QString &filePath)
+QVariantMap MainBackend::importProfile(const QString &filePath, bool activate)
 {
     if (m_devicePrivkey.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Device keypair не инициализирован."));
     // На Android FileDialog возвращает content:// URI — QFile его не откроет.
@@ -1805,9 +1899,14 @@ QVariantMap MainBackend::importProfile(const QString &filePath)
                                            QJsonObject{{"url", corpObj["url"].toString()},
                                                        {"psk", corpObj["psk"].toString()}});
             Dialog::saveToPath(Paths::profileDialogs(profileId), targetDialogs);
-            Utils::upsertProfileManifest(profileId, url, username, isCurrentClient || myProfileId.isEmpty());
+            // activate=true (поток регистрации): импортированный профиль делаем
+            // активным, даже если уже был активный — иначе после импорта UI не
+            // переключается и нужен рестарт. Активируем только ПЕРВЫЙ профиль бандла.
+            const bool makeThisActive =
+                isCurrentClient || myProfileId.isEmpty() || (activate && activatePrivkey.isEmpty());
+            Utils::upsertProfileManifest(profileId, url, username, makeThisActive);
             if (!profileExists) ++importedProfiles;
-            if (myProfileId.isEmpty() && activatePrivkey.isEmpty()) {
+            if (makeThisActive && activatePrivkey.isEmpty()) {
                 activateServer            = url;
                 activateUsername          = username;
                 activatePrivkey           = signingKey;
@@ -2021,6 +2120,58 @@ void MainBackend::switchSession(const QString &profileId)
     emit sessionSwitched();
     syncMaskingFromNode();
     m_notifications->schedulePoll(0);
+}
+
+void MainBackend::deleteProfile(const QString &profileId)
+{
+    if (profileId.isEmpty()) return;
+    auto *store          = SessionStore::instance();
+    const auto active    = store->activeSession();
+    const bool wasActive = active && active->profileId == profileId;
+
+    // 1) Снять in-memory сессию (освобождает handle/WAL).
+    if (auto s = store->sessionForProfile(profileId)) {
+        if (wasActive) store->setActiveSession({});
+        store->removeSession(s);
+    }
+
+    // 2) Убрать запись из манифеста профилей; поправить last_profile_id.
+    QJsonObject manifest = Utils::loadProfilesManifest();
+    QJsonArray kept;
+    for (const auto &v : manifest.value("profiles").toArray())
+        if (v.toObject().value("id").toString() != profileId) kept.append(v);
+    manifest["profiles"] = kept;
+    if (manifest.value("last_profile_id").toString() == profileId)
+        manifest["last_profile_id"] = kept.isEmpty() ? QString() : kept.first().toObject().value("id").toString();
+    Utils::writeJsonObjectFile(Paths::profilesManifest(), manifest);
+
+    // 3) Удалить данные профиля с диска (диалоги/ключи/БД/вложения).
+    QDir(Paths::profileDir(profileId).absolutePath()).removeRecursively();
+
+    // 4) Почистить in-memory нотификации профиля.
+    m_notifications->clearProfile(profileId);
+
+    // 5) Обновить флаг наличия профилей (логин-экран зависит от него).
+    setHasStoredClientProfiles(hasStoredClientProfileOnDisk());
+
+    // 6) Если удалили активный — переключиться на оставшийся, иначе «не залогинен».
+    if (wasActive) {
+        const auto &remaining = store->allSessions();
+        if (!remaining.empty()) {
+            store->setActiveSession(remaining.front());
+            m_notifications->resetActiveContext();
+            emit sessionReset();
+            emit sessionSwitched();
+            syncMaskingFromNode();
+            m_notifications->schedulePoll(0);
+        } else {
+            m_notifications->resetActiveContext();
+            emit sessionReset();
+        }
+        emit dialogsChanged();
+        emit loginStateChanged();
+    }
+    emit sessionsChanged();
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────

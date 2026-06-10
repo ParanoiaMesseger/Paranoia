@@ -1383,10 +1383,30 @@ void ChatBackend::pickVideoFromGallery()
 #endif
 }
 
+void ChatBackend::pickAvatarFromGallery(const QString &peer)
+{
+#if defined(Q_OS_ANDROID)
+    const QJniObject context = androidContext();
+    if (!context.isValid()) return;
+    m_pendingAvatarPeer = peer;   // потребится one-shot в consumePickedAttachment
+    QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaAndroidUtils", "pickMediaFromGallery",
+                                       "(Landroid/content/Context;Z)V", context.object<jobject>(),
+                                       static_cast<jboolean>(true));
+    clearPendingAndroidException();
+#else
+    Q_UNUSED(peer)
+#endif
+}
+
 void ChatBackend::consumePickedAttachment()
 {
 #if defined(Q_OS_ANDROID)
-    if (m_activePeer.isEmpty()) return;
+    // Аватар-пик инициируется из СПИСКА диалогов, где активного чата нет, поэтому
+    // забираем pending-peer one-shot ДО проверки m_activePeer (иначе результат
+    // молча отбрасывался бы при пустом m_activePeer).
+    const QString avatarPeer = m_pendingAvatarPeer;
+    m_pendingAvatarPeer.clear();
+    if (avatarPeer.isEmpty() && m_activePeer.isEmpty()) return;
     const QJniObject context = androidContext();
     if (!context.isValid()) return;
     const QJniObject result = QJniObject::callStaticObjectMethod(
@@ -1395,13 +1415,19 @@ void ChatBackend::consumePickedAttachment()
     clearPendingAndroidException();
     if (!result.isValid()) return;
     const QString joined = result.toString();
-    if (joined.isEmpty()) return;
+    if (joined.isEmpty()) return;   // отмена пикера — avatarPeer уже сброшен
     // Формат: первая строка — тип ("img"/"vid"), далее URI (мультивыбор фото).
     QStringList parts = joined.split(QChar('\n'), Qt::SkipEmptyParts);
     if (parts.isEmpty()) return;
     const bool isImage = (parts.first() == QStringLiteral("img"));
     parts.removeFirst();
     if (parts.isEmpty()) return;
+    // Аватар: первое выбранное фото → сигнал (QML зовёт Backend.setDialogAvatar),
+    // а НЕ отправка в чат.
+    if (!avatarPeer.isEmpty()) {
+        if (isImage) emit avatarPhotoPicked(avatarPeer, parts.first());
+        return;
+    }
     if (isImage) {
         // Фото — через QML (подпись из поля ввода, мозаика-группа при >1; та же
         // логика, что мультивыбор на десктопе — sendSelectedPhotos).
@@ -1706,8 +1732,12 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
     if (session && !cache.isEmpty()) {
         auto &dialogs = session->dialogs;
         if (const auto found = std::ranges::find_if(dialogs, [&](const Dialog &d) { return d.peer == peer; });
-            found != dialogs.end())
+            found != dialogs.end()) {
             found->lastMsg = cache.last().toMap()["text"].toString();
+            // Свежесть для сортировки списка диалогов: берём ts последнего
+            // сообщения (qMax — чтобы догрузка старой истории не откатывала назад).
+            found->lastActivityMs = qMax(found->lastActivityMs, cache.last().toMap()["ts"].toLongLong());
+        }
         session->saveDialogs();
     }
     seen.clear();

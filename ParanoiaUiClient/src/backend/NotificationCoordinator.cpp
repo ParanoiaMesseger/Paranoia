@@ -6,6 +6,7 @@
 #include <ParanoiaFFI>
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QGuiApplication>
 #include <QMutexLocker>
@@ -73,6 +74,11 @@ quint64 NotificationCoordinator::unreadCount(const QString &profileId, const QSt
     return m_notifiedPendingByPeer.value(profileId + QLatin1Char(':') + peer, 0);
 }
 
+qint64 NotificationCoordinator::lastActivityMs(const QString &profileId, const QString &peer) const
+{
+    return m_lastActivityByPeer.value(profileId + QLatin1Char(':') + peer, 0);
+}
+
 quint64 NotificationCoordinator::totalUnreadForProfile(const QString &profileId) const
 {
     quint64 total        = 0;
@@ -125,6 +131,22 @@ bool NotificationCoordinator::clearPeer(const QString &profileId, const QString 
     return changed;
 }
 
+void NotificationCoordinator::clearProfile(const QString &profileId)
+{
+    if (profileId.isEmpty()) return;
+    const QString prefix = profileId + QLatin1Char(':');
+    const auto dropPrefixed = [&prefix](QMap<QString, quint64> &m) {
+        for (auto it = m.begin(); it != m.end();)
+            it = it.key().startsWith(prefix) ? m.erase(it) : std::next(it);
+    };
+    dropPrefixed(m_notifiedPendingByPeer);
+    dropPrefixed(m_locallyReceivedPendingByPeer);
+    for (auto it = m_lastActivityByPeer.begin(); it != m_lastActivityByPeer.end();)
+        it = it.key().startsWith(prefix) ? m_lastActivityByPeer.erase(it) : std::next(it);
+    if (m_notificationHintProfileId == profileId) setNotificationHint({}, {});
+    emit dialogsChanged();
+}
+
 void NotificationCoordinator::resetActiveContext()
 {
     m_activePeer.clear();
@@ -156,6 +178,7 @@ void NotificationCoordinator::onBackgroundMessagesReceived(const QString &profil
     const QString key                   = profileId + QLatin1Char(':') + peer;
     m_locallyReceivedPendingByPeer[key] = m_locallyReceivedPendingByPeer.value(key, 0) + count;
     m_notifiedPendingByPeer[key]        = m_notifiedPendingByPeer.value(key, 0) + count;
+    m_lastActivityByPeer[key]           = QDateTime::currentMSecsSinceEpoch();
     quint64 total                       = 0;
     for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it)
         total += it.value();
@@ -336,6 +359,9 @@ void NotificationCoordinator::applyNotifyCounts(PollMode mode, const QList<Notif
         const quint64 previousServer   = previousCombined > previousLocal ? previousCombined - previousLocal : 0;
         if (combinedCount != previousCombined) pendingChanged = true;
         if (serverCount > previousServer) {
+            // Новое серверное сообщение для этого пира — бампаем свежесть, чтобы
+            // диалог поднялся в списке (in-memory, как и счётчики непрочитанного).
+            m_lastActivityByPeer[key] = QDateTime::currentMSecsSinceEpoch();
             hasNewPending = true;
             ++newPendingPeers;
             if (newPendingPeers == 1) {

@@ -37,8 +37,11 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
         QString peer         = obj["peer"].toString();
         QString peerServerId = obj["peerServerId"].toString();
         QString lastMsg      = obj["lastMsg"].toString();
-        QString draft        = obj["draft"].toString();
-        bool receiptsEnabled = obj["receiptsEnabled"].toBool(true);
+        QString draft         = obj["draft"].toString();
+        bool receiptsEnabled  = obj["receiptsEnabled"].toBool(true);
+        QString localName     = obj["localName"].toString();
+        QString avatar        = obj["avatar"].toString();
+        qint64 lastActivityMs = static_cast<qint64>(obj["lastActivityMs"].toDouble(0));
         QList<DialogKeyEntry> keyring;
 
         const QJsonArray keyringJson = obj["keyring"].toArray();
@@ -52,7 +55,9 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
 
         std::sort(keyring.begin(), keyring.end(),
                   [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
-        if (!peer.isEmpty()) dialogs.append({peer, peerServerId, keyring, lastMsg, draft, receiptsEnabled});
+        if (!peer.isEmpty())
+            dialogs.append({peer, peerServerId, keyring, lastMsg, draft, receiptsEnabled, localName, avatar,
+                            lastActivityMs});
     }
     return dialogs;
 }
@@ -78,6 +83,9 @@ void Dialog::saveToPath(const QString &path, const QList<Dialog> &dialogs)
         o["lastMsg"]         = d.lastMsg;
         if (!d.draft.isEmpty()) o["draft"] = d.draft;
         o["receiptsEnabled"] = d.receiptsEnabled;
+        if (!d.localName.isEmpty()) o["localName"] = d.localName;
+        if (!d.avatar.isEmpty()) o["avatar"] = d.avatar;
+        if (d.lastActivityMs > 0) o["lastActivityMs"] = static_cast<double>(d.lastActivityMs);
         arr.append(QJsonValue(o));
     }
     // Через Utils::writeFile — для путей внутри profiles/ это уйдёт в

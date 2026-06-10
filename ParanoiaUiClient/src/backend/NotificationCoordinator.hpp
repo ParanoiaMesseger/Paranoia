@@ -27,10 +27,16 @@ public:
     QString notificationHintProfileId() const;
     quint64 unreadCount(const QString &profileId, const QString &peer) const;
     quint64 totalUnreadForProfile(const QString &profileId) const;
+    // Время последней активности (ms epoch), отслеженное координатором для
+    // ФОНОВЫХ входящих (пока диалог не открыт и appendMessages не звался).
+    // Сортировка списка диалогов берёт max этого и Dialog::lastActivityMs.
+    qint64 lastActivityMs(const QString &profileId, const QString &peer) const;
     bool isNotificationHintFor(const QString &profileId, const QString &peer) const;
 
     Q_INVOKABLE QString takeNotificationPeer();
     bool clearPeer(const QString &profileId, const QString &peer);
+    // Убрать ВСЕ in-memory счётчики/активность профиля (при удалении профиля).
+    void clearProfile(const QString &profileId);
     void resetActiveContext();
     void schedulePoll(int delayMs = -1);
 
@@ -75,6 +81,9 @@ private:
     QString m_activePeer;
     QMap<QString, quint64> m_notifiedPendingByPeer;
     QMap<QString, quint64> m_locallyReceivedPendingByPeer;
+    // Свежесть для сортировки (in-memory, как и счётчики непрочитанного):
+    // бампается при детекте нового ФОНОВОГО сообщения, НЕ при прочтении.
+    QMap<QString, qint64> m_lastActivityByPeer;
     QString m_notificationHintProfileId;
     QString m_notificationHintPeer;
     int m_notifyRetryCount               = 0;

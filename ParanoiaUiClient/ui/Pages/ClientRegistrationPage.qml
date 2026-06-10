@@ -129,9 +129,15 @@ Rectangle {
         mode: "open"
         nameFilters: [qsTr("Paranoia bundle (*.json)"), qsTr("JSON (*.json)"), qsTr("Все файлы (*)")]
         onAccepted: {
-            const res = Backend.importProfile(Backend.urlToLocalPath(selectedFile))
-            if (res.ok) root.importFeedback = qsTr("Бандл импортирован, выполняется вход…")
-            else        root.importFeedback = res.error || qsTr("Ошибка импорта бандла.")
+            // activate=true: импортированный профиль сразу становится активным и
+            // логинится — onLoginStateChanged уведёт со страницы (без рестарта).
+            const res = Backend.importProfile(Backend.urlToLocalPath(selectedFile), true)
+            if (res.ok) {
+                root.importFeedback = qsTr("Бандл импортирован, выполняется вход…")
+                root.isLoading = true
+            } else {
+                root.importFeedback = res.error || qsTr("Ошибка импорта бандла.")
+            }
         }
     }
 
