@@ -33,6 +33,7 @@
 #include "utils/KeyInjector.hpp"
 #include "backend/ChatBackend.hpp"
 #include "backend/EncryptedImageProvider.hpp"
+#include "backend/EmojiImageProvider.hpp"
 #include "backend/MainBackend.hpp"
 #include "backend/NotificationCoordinator.hpp"
 #include "backend/VersionInfoBackend.hpp"
@@ -214,6 +215,10 @@ int main(int argc, char *argv[])
     auto *imageProvider = new EncryptedImageProvider();
     engine.addImageProvider(QStringLiteral("secure"), imageProvider);
     chatBackend.setImageProvider(imageProvider);
+    // Эмодзи-сетка (#42) рендерится через image://emoji/<символ> (минуя цветной
+    // glyph-кэш scene-graph, переполнявшийся на Android). Движок забирает
+    // владение провайдером.
+    engine.addImageProvider(QStringLiteral("emoji"), new EmojiImageProvider());
     // Зануляем кеш плейн-байтов при vault_lock и при выходе приложения.
     // aboutToQuit срабатывает ДО деструкции engine — imageProvider ещё жив.
     QObject::connect(&backend, &MainBackend::vaultLocked, &chatBackend,

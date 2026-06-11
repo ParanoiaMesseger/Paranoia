@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
 import QtQuick.Dialogs
+import QtQuick.Window
 import ParanoiaUiClient
 import QtQuick.VectorImage
 
@@ -78,14 +79,36 @@ Rectangle {
             tabBar.currentIndex = 1
     }
 
-    Component.onCompleted: root.refreshSessions()
+    // Начальную ТЯЖЁЛУЮ загрузку (getSessionList + getDialogs — синхронный FFI с
+    // расшифровкой → ~1с фриз GUI-потока при старте) ОТКЛАДЫВАЕМ на ~кадр: сперва
+    // отрисуется страница со спиннером-лого (крутится на render-потоке, не замирает),
+    // и фриз пройдёт уже ПОД анимацией, а не на пустом/чёрном старте.
+    property bool _initialLoadDone: false
+    property bool _initialLoadStarted: false
+    // Грузим ПОСЛЕ первого отрендеренного кадра окна (frameSwapped) — чтобы спиннер-
+    // лого гарантированно появился ДО фриза GUI-потока на расшифровке диалогов
+    // (тогда он крутится через render-поток всё время фриза). Таймер 250мс — фолбэк.
+    function _startInitialLoad() {
+        if (root._initialLoadStarted) return
+        root._initialLoadStarted = true
+        root.refreshSessions()
+        root.allDialogs = Backend.getDialogs()
+        root._initialLoadDone = true
+    }
+    Connections {
+        target: root.Window.window
+        enabled: !root._initialLoadStarted
+        function onFrameSwapped() { root._startInitialLoad() }
+    }
+    Timer { interval: 250; running: true; repeat: false; onTriggered: root._startInitialLoad() }
 
     // Список всех диалогов (источник); отображается отфильтрованным/отсортированным.
-    property var allDialogs: Backend.getDialogs()
+    // Стартует пустым — наполняется отложенной начальной загрузкой (см. выше).
+    property var allDialogs: []
     // Строка поиска по имени собеседника.
     property string dialogQuery: ""
 
-    // Фильтр по имени + сортировка по свежести (как в Telegram): диалог с самой
+    // Фильтр по имени + сортировка по свежести (по дате последней активности): диалог с самой
     // недавней активностью — сверху. Сортируем по lastActivityMs, НЕ по
     // непрочитанным: новое сообщение поднимает диалог вверх, а открытие/прочтение
     // НЕ переставляет строку (раньше очистка непрочитанного роняла диалог вниз
@@ -792,9 +815,33 @@ Rectangle {
                             anchors.fill: parent
                             visible: dialogsView.count === 0
 
+                            // Спиннер начальной загрузки — вращающийся лого Paranoia
+                            // (RotationAnimator на render-потоке: крутится даже пока
+                            // GUI-поток занят расшифровкой диалогов на старте, #3).
+                            Item {
+                                anchors.centerIn: parent
+                                width: 56; height: 56
+                                visible: !root._initialLoadDone
+                                Image {
+                                    anchors.fill: parent
+                                    source: "qrc:/logo_symbol.svg"
+                                    sourceSize.width: 112
+                                    sourceSize.height: 112
+                                    smooth: true
+                                    fillMode: Image.PreserveAspectFit
+                                    RotationAnimator on rotation {
+                                        running: !root._initialLoadDone
+                                        from: 0; to: 360
+                                        duration: 1100
+                                        loops: Animation.Infinite
+                                    }
+                                }
+                            }
+
                             Column {
                                 anchors.centerIn: parent
                                 spacing: 8
+                                visible: root._initialLoadDone   // «Нет диалогов» — только после загрузки
                                 Text {
                                     anchors.horizontalCenter: parent.horizontalCenter
                                     text:           qsTr("Нет диалогов")
@@ -1341,6 +1388,11 @@ Rectangle {
         }
     }
 
+    // Закрыть попап переключения сессий. Вынесено в функцию root, т.к. из делегата
+    // Repeater внутри попапа id `sessionSwitcherPopup` не резолвится (скоуп делегата
+    // в Qt6) → был ReferenceError на switchSession. Функцию root делегат видит.
+    function closeSessionSwitcher() { sessionSwitcherPopup.close() }
+
     // ── Попап: переключение сессий ────────────────────────
     Popup {
         id: sessionSwitcherPopup
@@ -1440,7 +1492,7 @@ Rectangle {
                         enabled: !modelData.isActive
                         onClicked: {
                             Backend.switchSession(modelData.profileId)
-                            sessionSwitcherPopup.close()
+                            root.closeSessionSwitcher()
                         }
                     }
 
@@ -1464,7 +1516,7 @@ Rectangle {
                                 deleteProfilePopup.profileId = modelData.profileId
                                 deleteProfilePopup.profileServer = modelData.server
                                 deleteProfilePopup.profileUsername = modelData.username
-                                sessionSwitcherPopup.close()
+                                root.closeSessionSwitcher()
                                 deleteProfilePopup.open()
                             }
                         }

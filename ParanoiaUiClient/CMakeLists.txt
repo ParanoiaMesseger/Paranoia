@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.13 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.14 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -480,6 +480,8 @@ qt_add_qml_module(Paranoia
     src/backend/ChatBackend.hpp
     src/backend/ChatBackend.cpp
     src/backend/EncryptedImageProvider.hpp
+    src/backend/EmojiImageProvider.hpp
+    src/backend/EmojiImageProvider.cpp
     src/session/Dialog.hpp
     src/session/Dialog.cpp
     src/session/ServerSession.hpp
@@ -523,6 +525,9 @@ qt_add_qml_module(Paranoia
     ui/Components/AppIcon.qml
     ui/Components/EditKeyToolbar.qml
     ui/Components/MessageText.qml
+    ui/Components/EmojiPanel.qml
+    ui/Components/emojidata.js
+    ui/Components/ShredderOverlay.qml
     ui/Components/CenteredPane.qml
     ui/Components/ParaFileDialog.qml
     ui/Components/EmojiPicker.qml

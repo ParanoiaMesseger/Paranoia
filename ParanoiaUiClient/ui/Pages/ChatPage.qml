@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
+import QtQuick.Window
 import QtCore
 import ParanoiaUiClient
 
@@ -34,6 +35,60 @@ Rectangle {
     property string downloadingAttachmentId: ""
     property bool sendLocked: false
     property bool messagesLoaded: false
+    // Inline эмодзи-панель (#42) открыта (вместо клавиатуры). Toggle ниже.
+    property bool emojiPanelOpen: false
+
+    // Открыть панель эмодзи: прячем клавиатуру (снимаем фокус с поля), показываем
+    // панель. Иконка кнопки превращается в «клавиатуру».
+    function openEmojiPanel() {
+        root.emojiPanelOpen = true
+        msgInput.focus = false
+        Qt.inputMethod.hide()
+    }
+    // Закрыть панель и вернуть клавиатуру (фокус на поле).
+    function closeEmojiPanel() {
+        root.emojiPanelOpen = false
+        msgInput.forceActiveFocus()
+        if (root.isMobileOs) Qt.inputMethod.show()
+    }
+    function toggleEmojiPanel() {
+        if (root.emojiPanelOpen) root.closeEmojiPanel()
+        else root.openEmojiPanel()
+    }
+
+    // Анимация удаления «шредер»: НАБОР id сообщений, чьи пузыри сейчас «режутся»
+    // (поддерживает и одиночное, и множественное удаление). Делегаты с этими id
+    // запускают ShredderOverlay; реальное удаление делает ОДИН общий таймер после
+    // окончания анимации (а не каждый делегат сам — иначе N model-update'ов).
+    property var shreddingIds: ({})
+    property var _shredDeleteIds: []
+    // visibleIds — id видимых пузырей для анимации; deleteIds — что реально удалить
+    // (расширенный набор, напр. с фото из групп).
+    function startShredder(visibleIds, deleteIds) {
+        const del = (deleteIds && deleteIds.length > 0) ? deleteIds : (visibleIds || [])
+        if (!visibleIds || visibleIds.length === 0) {
+            if (del.length > 0) Chat.deleteMessages(del)
+            return
+        }
+        const set = {}
+        for (let i = 0; i < visibleIds.length; ++i) set[visibleIds[i]] = true
+        root.shreddingIds = set
+        root._shredDeleteIds = del
+        shredCommitTimer.restart()
+    }
+    Timer {
+        id: shredCommitTimer
+        interval: 740   // сразу после анимации шредера (720мс) — слот схлопывается быстро
+        onTriggered: {
+            if (root._shredDeleteIds.length > 0) Chat.deleteMessages(root._shredDeleteIds)
+            root._shredDeleteIds = []
+            // НЕ чистим shreddingIds здесь: иначе isShredding→false вернёт пузырю
+            // opacity=1 (он мелькнёт на месте) ДО того как model-update удалит делегат.
+            // Пузырь остаётся скрытым (opacity 0), пока модель его не уберёт. Набор
+            // перезапишется при следующем startShredder; восстановление видимости
+            // переиспользованных делегатов — через onIsShreddingChanged (смена model.id).
+        }
+    }
     property string pendingReplyId: ""
     property string pendingReplySender: ""
     property string pendingReplyAuthor: ""
@@ -54,7 +109,7 @@ Rectangle {
     property bool selectionMode: false
     property var selectedIds: ({})  // объект как Set: { [messageId]: true }
     property int selectionCount: 0
-    // Drag-select состояние (Telegram-style).
+    // Drag-select состояние (выделение перетаскиванием).
     property int _dragStartIndex: -1
     property int _dragLastIndex: -1
     property real _dragMouseY: 0
@@ -179,8 +234,12 @@ Rectangle {
     function openSaveDialog(messageId, filename) {
         root.pendingDownloadId = messageId
         root.pendingDownloadName = filename && filename.length > 0 ? filename : "attachment.bin"
+        root.downloadingAttachmentId = messageId
         Chat.requestFileAccessPermissions()
-        saveDialog.open()
+        // Одним тапом в дефолт-папку (картинки → Изображения/Paranoia, файлы →
+        // Загрузки/Paranoia), без диалога выбора. onAttachmentSaved
+        // покажет тост с путём. (#33/#34)
+        Chat.saveAttachmentToDefault(messageId)
     }
 
     // Собрать все уже загруженные (с готовым превью) фото-вложения диалога —
@@ -461,12 +520,14 @@ Rectangle {
     }
 
     function confirmDeleteSelection() {
-        const ids = root.expandDeleteIds(Object.keys(root.selectedIds))
+        const vis = Object.keys(root.selectedIds)
+        const ids = root.expandDeleteIds(vis)
         if (ids.length === 0) {
             root.exitSelection()
             return
         }
-        Chat.deleteMessages(ids)
+        // Анимация-шредер на всех выбранных пузырях, затем удаление (общий таймер).
+        root.startShredder(vis, ids)
         root.exitSelection()
     }
 
@@ -619,6 +680,18 @@ Rectangle {
         }
     }
 
+    // Дебаунс сохранения черновика. Раньше onTextChanged звал saveDraft() на
+    // КАЖДЫЙ символ → setDraft → session->saveDialogs() (синхронная запись всех
+    // диалогов под ffiMutex на GUI-потоке) → залипания при печати. Теперь печать
+    // только перезапускает таймер; реальная запись — через 600мс после паузы.
+    // Явные сохранения (отправка/закрытие страницы) флашат немедленно сами.
+    Timer {
+        id: draftSaveTimer
+        interval: 600
+        repeat: false
+        onTriggered: root.saveDraft()
+    }
+
     function messageKey(message) {
         if (!message) return ""
         // Фото-группа: ключуем по СТАБИЛЬНОМУ group_id, а не по id строки. id
@@ -638,40 +711,93 @@ Rectangle {
         return seq > 0 ? "seq:" + seq : ""
     }
 
+    // ── Пагинация ленты (#39) ────────────────────────────────────────────
+    // В ListView кладём ОКНО последних _windowCount сообщений, а не всю историю.
+    // Лента ИНВЕРТИРОВАНА (BottomToTop): index 0 = НОВЕЙШЕЕ сообщение (внизу), далее
+    // к старым вверх. _allMessages — хронологический порядок (старые→новые), окно
+    // берём с конца (новейшие) и РАЗВОРАЧИВАЕМ при заливке в модель. Старые
+    // раскрываются порциями, когда долистал до визуального верха (= конец модели,
+    // onAtYEndChanged).
+    property var _allMessages: []
+    readonly property int _windowDefault: 50
+    readonly property int _windowPage: 40
+    property int _windowCount: 50
+    property bool _loadingOlder: false
+
     function updateMessageModel(messages) {
-        if (msgModel.count === messages.length) {
+        root._allMessages = messages
+        const start = Math.max(0, messages.length - root._windowCount)
+        const slice = start > 0 ? messages.slice(start) : messages
+        // Разворачиваем: index 0 = новейшее (для BottomToTop-ленты).
+        const windowed = slice.slice().reverse()
+        if (msgModel.count === windowed.length) {
             let sameOrder = true
-            for (let i = 0; i < messages.length; ++i) {
-                if (messageKey(msgModel.get(i)) !== messageKey(messages[i])) {
+            for (let i = 0; i < windowed.length; ++i) {
+                if (messageKey(msgModel.get(i)) !== messageKey(windowed[i])) {
                     sameOrder = false
                     break
                 }
             }
             if (sameOrder) {
-                for (let i = 0; i < messages.length; ++i)
-                    msgModel.set(i, messages[i])
+                for (let i = 0; i < windowed.length; ++i)
+                    msgModel.set(i, windowed[i])
                 return true
             }
         }
 
         msgModel.clear()
-        for (let i = 0; i < messages.length; ++i)
-            msgModel.append(messages[i])
+        for (let i = 0; i < windowed.length; ++i)
+            msgModel.append(windowed[i])
         return false
     }
 
-    function isListAtEnd() {
-        if (listView.contentHeight <= listView.height) return true
-        return listView.contentY >= root.listMaxContentY() - 24
+    // Раскрыть ещё страницу старых сообщений (когда долистал до визуального верха).
+    // В инвертированной ленте старые добавляются в КОНЕЦ модели (выше по экрану) —
+    // дно (index 0) не двигается, поэтому видимая позиция сохраняется сама собой;
+    // anchor-restore оставлен как страховка от скачка на стыке.
+    function loadOlderMessages() {
+        if (root._loadingOlder) return
+        if (root._windowCount >= root._allMessages.length) return
+        root._loadingOlder = true
+        const anchor = root.visibleMessageAnchor()
+        root._windowCount = Math.min(root._allMessages.length, root._windowCount + root._windowPage)
+        root.updateMessageModel(root._allMessages)
+        root.restoreVisibleMessageAnchor(anchor)
+        Qt.callLater(function() { root._loadingOlder = false })
     }
 
-    function listMaxContentY() {
-        const minY = listView.originY
-        return Math.max(minY, minY + listView.contentHeight - listView.height)
+    // Показать новейшее сообщение внизу. В ИНВЕРТИРОВАННОЙ ленте новейшее — index 0,
+    // и «дно» = positionViewAtBeginning. Якорь дна (index 0) всегда реализован →
+    // позиционирование стабильно, без зависимости от оценочной contentHeight и без
+    // дрейфа (в отличие от positionViewAtEnd на не-инверт. ленте — корень #39).
+    function pinToBottom() {
+        if (listView)
+            listView.positionViewAtBeginning()
+    }
+
+    // Явный «к низу» (вход, кнопка «вниз», отправка). Один pin + пара отложенных —
+    // дёшево и надёжно докручивает к index 0 после досоздания делегатов.
+    function settleToBottom() {
+        if (!listView) return
+        listView.stickToBottom = true
+        root.pinToBottom()
+        Qt.callLater(root.pinToBottom)
+    }
+
+    // «У новейшего» = визуальный низ инверт-ленты. КВИРК BottomToTop: index 0
+    // (новейшее) лежит у нижнего края, и по Y это соответствует atYEnd (а не
+    // atYBeginning); старейшее (визуальный верх, конец модели) — atYBeginning.
+    function isListAtEnd() {
+        if (!listView) return true
+        if (listView.contentHeight <= listView.height) return true
+        return listView.atYEnd
+            || (listView.contentY + listView.height >= listView.originY + listView.contentHeight - 24)
     }
 
     function clampListContentY(y) {
-        return Math.min(Math.max(y, listView.originY), root.listMaxContentY())
+        const minY = listView.originY
+        const maxY = Math.max(minY, minY + listView.contentHeight - listView.height)
+        return Math.min(Math.max(y, minY), maxY)
     }
 
     function visibleMessageAnchor() {
@@ -722,18 +848,27 @@ Rectangle {
             root.messagesLoaded = true
             messages = root.composeMessages(messages)
             const wasEmpty = msgModel.count === 0
-            const wasAtEnd = root.isListAtEnd()
-            const anchor = wasEmpty || wasAtEnd ? null : root.visibleMessageAnchor()
+            // Свежий вход в диалог → окно на дефолт (последние N), без накопленного
+            // _windowCount от прошлого открытия (пагинация #39).
+            if (wasEmpty) root._windowCount = root._windowDefault
+            // Следовать низу на входе в диалог И на всех догрузках, пока юзер сам не
+            // пролистнул вверх (тогда stickToBottom станет false на его жесте). Раньше
+            // решение бралось по сиюминутному isListAtEnd(): первый pin не успевал
+            // доехать до низа (высоты делегатов досчитываются позже), вторая догрузка
+            // видела «не в конце» → уходила в anchor-restore и фиксировала СЕРЕДИНУ →
+            // диалог открывался не внизу (#39).
+            const stick = wasEmpty || listView.stickToBottom
+            const anchor = stick ? null : root.visibleMessageAnchor()
             const previousContentY = listView.contentY
             if (root.updateMessageModel(messages)) {
-                if (wasAtEnd) Qt.callLater(function() { if (listView) listView.positionViewAtEnd() })
+                if (stick) Qt.callLater(function() { if (listView) root.settleToBottom() })
                 if (root.searchActive) root.recomputeSearchMatches()
                 return
             }
             Qt.callLater(function() {
                 if (!listView) return // страница могла быть разрушена до отложенного вызова
-                if (wasEmpty || wasAtEnd) {
-                    listView.positionViewAtEnd()
+                if (stick) {
+                    root.settleToBottom()
                     return
                 }
 
@@ -796,7 +931,6 @@ Rectangle {
     }
 
     Component.onCompleted: {
-        Chat.openChat(root.peer)
         root._refreshPeerInfo()
         restoreDraft()
         applyShareTarget()
@@ -806,7 +940,28 @@ Rectangle {
             if (root.callPageComponent.status === Component.Error)
                 console.warn("CallPage load error:", root.callPageComponent.errorString());
         }
+        // Тяжёлую загрузку диалога (Chat.openChat — синхронный FFI: расшифровка
+        // кэша диалога, ~0.5с фриз GUI-потока) ОТКЛАДЫВАЕМ на ~кадр. Так сперва
+        // отрисуется страница со спиннером-лого (он крутится на render-потоке и не
+        // замирает), а фриз пройдёт уже ПОД анимацией, а не на пустом переходе.
+        // (Идея юзера: открыть диалог → показать анимацию загрузки → грузить контент.)
+        // Тяжёлую загрузку запускаем ПОСЛЕ первого отрендеренного кадра окна
+        // (frameSwapped) — гарантия, что спиннер-лого уже на экране ДО фриза
+        // GUI-потока (тогда RotationAnimator крутит его через render-поток ВСЁ время
+        // фриза). Таймер 250мс — фолбэк, если кадр почему-то не пришёл. (#2/#47 Option A)
     }
+    property bool _openChatStarted: false
+    function _startOpenChat() {
+        if (root._openChatStarted) return
+        root._openChatStarted = true
+        Chat.openChat(root.peer)
+    }
+    Connections {
+        target: root.Window.window
+        enabled: !root._openChatStarted
+        function onFrameSwapped() { root._startOpenChat() }
+    }
+    Timer { interval: 250; running: true; repeat: false; onTriggered: root._startOpenChat() }
 
     function applyShareTarget() {
         if (root.shareTextInitial && root.shareTextInitial.length > 0) {
@@ -891,7 +1046,12 @@ Rectangle {
         // «мимо, чтобы закрыть» случайно копировал текст и показывал тост.
         modal: true
         dim: false
-        focus: true
+        // focus:false — меню НЕ забирает фокус у поля ввода. Иначе на мобиле при
+        // открытии меню VKB пряталась, а при закрытии всплывала (фокус возвращался
+        // в msgInput) — даже если клавиатуры не было; смена геометрии дёргала UI и
+        // меню вставало не над тем сообщением (#29). Закрытие — по press-outside
+        // (модальный оверлей) и по действиям меню; Escape на десктопе — оверлеем.
+        focus: false
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         z: 900
 
@@ -1125,7 +1285,9 @@ Rectangle {
                     onClicked: {
                         const id = messageMenu.messageId
                         messageMenu.close()
-                        if (id.length > 0) Chat.deleteMessages(root.expandDeleteIds([id]))
+                        // Не удаляем сразу: запускаем анимацию-шредер на пузыре; по её
+                        // завершении общий таймер вызовет реальное удаление.
+                        if (id.length > 0) root.startShredder([id], root.expandDeleteIds([id]))
                     }
                 }
             }
@@ -1729,7 +1891,10 @@ Rectangle {
                         Text {
                             anchors.fill: parent
                             verticalAlignment: Text.AlignVCenter
-                            visible: searchField.text.length === 0
+                            // И preeditText: при предиктивном вводе (Android) набранное
+                            // сидит в preeditText, а text пуст → иначе плейсхолдер не
+                            // прятался и НАЕЗЖАЛ на вводимый текст.
+                            visible: searchField.text.length === 0 && searchField.preeditText.length === 0
                             text: qsTr("Поиск по диалогу…")
                             color: Theme.textHint
                             font: searchField.font
@@ -1839,6 +2004,16 @@ Rectangle {
                 anchors.fill: parent
                 clip: true
                 spacing: 4
+                // ИНВЕРТИРОВАННАЯ лента (как во всех чат-клиентах). Новейшее сообщение —
+                // index 0, лежит у НИЗА. «Дно» диалога = positionViewAtBeginning /
+                // atYBeginning, и якорь дна (index 0) ВСЕГДА реализован → высоты старых
+                // сообщений выше не двигают дно. Это снимает корневую причину #39:
+                // делегаты с rich-text/кодом отдают нестабильную высоту (минимальную до
+                // реализации, реальную после), из-за чего contentHeight на не-инверт.
+                // ленте осциллировала и любой bottom-anchor через contentY/индекс
+                // дрейфовал и морозил UI. Модель заполняется новейшими-первыми
+                // (updateMessageModel разворачивает срез).
+                verticalLayoutDirection: ListView.BottomToTop
                 // Пока зажат чекбокс drag-select, отключаем встроенный Flickable, иначе
                 // ListView перехватывает вертикальный жест и устраивает flick
                 // (визуально это и был тот «телепорт на страницу»).
@@ -1848,33 +2023,18 @@ Rectangle {
 
                 ScrollBar.vertical: ScrollBar {}
 
-                // «Прилипание к низу»: если пользователь стоит у последнего
-                // сообщения, при изменении высоты вьюпорта (открытие/закрытие
-                // виртуальной клавиатуры) список остаётся у низа, а не уезжает
-                // за обрез. Флаг обновляется только когда жест пролистывания
-                // действительно завершён, чтобы не сбрасываться во время скролла.
+                // «Прилипание к новейшему»: стоим ли у визуального низа (index 0).
+                // В инверт-ленте дно анкерится само (index 0 у нижнего края), поэтому
+                // НИКАКОГО дебаунс-пина на contentHeightChanged не нужно — это и была
+                // runaway-петля #39. На смену высоты вьюпорта (клавиатура) докручиваем
+                // к низу один раз, если стояли там.
                 property bool stickToBottom: true
-                // Высота делегатов с MessageText (Loader/Repeater/измерители) досчитывается
-                // на несколько polish-проходов позже, чем у простого Text, поэтому
-                // одиночного positionViewAtEnd после отправки мало — view встаёт на
-                // «низ», который потом подрастает. Пока стоим у низа и нет жеста —
-                // держим view у конца, пока contentHeight растёт.
-                //
-                // ВАЖНО (перф/лаг при входе в диалог): НЕ пинить на КАЖДЫЙ
-                // contentHeightChanged — за время устаканивания высот код-блоков их
-                // прилетает десятки, и каждый positionViewAtEnd — полный relayout
-                // ленты → заметное подтормаживание. Коалесцируем в ОДИН пин через
-                // таймер с restart: фактический positionViewAtEnd срабатывает один
-                // раз, через кадр после того, как поток изменений утих.
-                Timer {
-                    id: pinBottomTimer
-                    interval: 16
-                    onTriggered: if (listView.stickToBottom && !listView.moving) listView.positionViewAtEnd()
-                }
-                onHeightChanged: if (stickToBottom) pinBottomTimer.restart()
-                onContentHeightChanged: if (stickToBottom && !moving) pinBottomTimer.restart()
+                onHeightChanged: if (stickToBottom) Qt.callLater(root.pinToBottom)
                 onMovementEnded: stickToBottom = root.isListAtEnd()
                 onDraggingChanged: if (!dragging) stickToBottom = root.isListAtEnd()
+                // Долистал до визуального ВЕРХА = конец инверт-модели (старейшее), по Y
+                // это atYBeginning → раскрыть ещё страницу старых сообщений (#39).
+                onAtYBeginningChanged: if (atYBeginning && !root._loadingOlder) root.loadOlderMessages()
 
                 delegate: Item {
                     width: listView.width
@@ -1907,6 +2067,26 @@ Rectangle {
                     }
                     readonly property bool isSelected: root.selectionMode && root.selectedIds[model.id] === true
 
+                    // Анимация-шредер при удалении (по запросу из меню). Loader держит
+                    // Этот пузырь сейчас «режется» (в наборе shreddingIds) — одиночное
+                    // или множественное удаление. Реальное удаление делает общий таймер
+                    // root.shredCommitTimer после анимации; делегат только анимирует.
+                    readonly property bool isShredding: root.shreddingIds[model.id] === true
+                    // Восстанавливаем видимость пузыря, когда перестали резать (набор
+                    // очищен после удаления / делегат переиспользован ListView).
+                    onIsShreddingChanged: if (!isShredding && bubble) bubble.opacity = 1
+
+                    Loader {
+                        id: shredderLoader
+                        active: parent.isShredding
+                        anchors.fill: bubble
+                        z: 50
+                        sourceComponent: ShredderOverlay {
+                            sourceItem: bubble
+                            // Удаление — общий таймер; здесь ничего не делаем.
+                        }
+                    }
+
                 // Чекбокс-индикатор сбоку от пузыря (снаружи).
                 Rectangle {
                     id: selectionCheckbox
@@ -1931,8 +2111,8 @@ Rectangle {
                         visible: isSelected
                     }
 
-                    // Tap по чекбоксу — тоггл выделения. Press-and-drag —
-                    // Telegram-style: режим (add/remove) определяется тем, был
+                    // Tap по чекбоксу — тоггл выделения. Press-and-drag:
+                    // режим (add/remove) определяется тем, был
                     // ли стартовый чекбокс выбран в момент нажатия.
                     MouseArea {
                         anchors.fill: parent
@@ -2076,6 +2256,20 @@ Rectangle {
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                         hoverEnabled: false
                         onClicked: function(mouse) {
+                            // Ссылка под кликом? Открыть её (или скопировать inline-код),
+                            // не входя в меню/выделение. MouseArea перекрывает MessageText,
+                            // поэтому ссылку проверяем здесь — иначе она «не открывалась» (#28).
+                            if (showMessageText && msgText.visible) {
+                                const lp = mapToItem(msgText, mouse.x, mouse.y)
+                                const link = msgText.linkAt(lp.x, lp.y)
+                                if (link && link.length > 0) {
+                                    if (link.indexOf("copy:") === 0)
+                                        root.copyMessageText(decodeURIComponent(link.substring(5)))
+                                    else
+                                        Qt.openUrlExternally(link)
+                                    return
+                                }
+                            }
                             if (mouse.button === Qt.RightButton || (root.isMobileOs && !root.selectionMode)) {
                                 root.openMessageMenu(model.sender, model.sender_name, isMe, model.text, model.id,
                                                      isImage, isDownloading, attachmentName,
@@ -2405,15 +2599,35 @@ Rectangle {
             }
             }
 
-            BusyIndicator {
+            // Индикатор загрузки — ВРАЩАЮЩИЙСЯ ЛОГО Paranoia вместо базового кружка.
+            // Крутим через RotationAnimator: он работает на RENDER-потоке и продолжает
+            // анимироваться, ДАЖЕ когда GUI-поток заблокирован (синхронный FFI на
+            // загрузке) — обычная RotationAnimation/BusyIndicator в этот момент замерли бы.
+            Item {
                 id: messagesBusy
                 anchors.centerIn: parent
+                width: 52; height: 52
                 // Только начальная загрузка (пустая лента). Иначе крутилка лезла
                 // поверх уже показанных сообщений при каждом fetchMessages —
                 // в т.ч. при отправке вложений (fetchMessages → messagesLoading).
-                running: (Chat.messagesLoading || !root.messagesLoaded) && msgModel.count === 0
+                readonly property bool running: (Chat.messagesLoading || !root.messagesLoaded) && msgModel.count === 0
                 visible: running
                 z: 2
+
+                Image {
+                    anchors.fill: parent
+                    source: "qrc:/logo_symbol.svg"
+                    sourceSize.width: 104
+                    sourceSize.height: 104
+                    smooth: true
+                    fillMode: Image.PreserveAspectFit
+                    RotationAnimator on rotation {
+                        running: messagesBusy.running
+                        from: 0; to: 360
+                        duration: 1100
+                        loops: Animation.Infinite
+                    }
+                }
             }
 
             Text {
@@ -2517,7 +2731,7 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: { listView.stickToBottom = true; listView.positionViewAtEnd() }
+                    onClicked: { listView.stickToBottom = true; root.settleToBottom() }
                 }
 
                 ToolTip.visible: scrollToBottomArea.containsMouse
@@ -2677,8 +2891,11 @@ Rectangle {
         Rectangle {
             id: inputBar
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(Math.max(msgInput.implicitHeight + 32 + (root.hasPendingReply ? 58 : 0),
-                                                      root.hasPendingReply ? 118 : 60), 200)
+            // Высоту бара считаем по КАПНУТОЙ высоте текста (как у msgInputScroll, 124),
+            // а не по сырой implicitHeight — иначе при >~6 строк текст-вьюха стоит на
+            // 124, а бар рос до 200, давая растущие отступы вокруг текста (#38).
+            Layout.preferredHeight: Math.max(Math.min(msgInput.implicitHeight, 124) + 32 + (root.hasPendingReply ? 58 : 0),
+                                             root.hasPendingReply ? 118 : 60)
             color: Theme.bgDark
 
             Rectangle {
@@ -2690,8 +2907,8 @@ Rectangle {
             ColumnLayout {
                 id: inputContent
                 anchors.fill: parent
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
                 anchors.topMargin: 8
                 anchors.bottomMargin: 8
                 spacing: 6
@@ -2709,70 +2926,20 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    spacing: 8
+                    spacing: 6
 
-                    Rectangle {
-                        Layout.preferredWidth: 40
-                        Layout.preferredHeight: 40
-                        Layout.alignment: Qt.AlignVCenter
-                        radius: Theme.radiusSm
-                        color: attachArea.containsMouse ? Theme.bgCard : Theme.bgInput
-                        border.width: 1
-                        border.color: Theme.border
-
-                        AppIcon {
-                            anchors.centerIn: parent
-                            width: 20
-                            height: 20
-                            name: "plus"
-                            iconColor: Theme.accentHover
-                            strokeWidth: 2.2
-                        }
-
-                        MouseArea {
-                            id: attachArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: {
-                                const p = mapToItem(root, 0, 0)
-                                attachMenu.x = Math.max(8, p.x)
-                                attachMenu.y = Math.max(8, p.y - attachMenu.height - 6)
-                                attachMenu.open()
-                            }
-                        }
-                    }
-
-                    // Кнопка эмодзи — открывает эмодзи-пикер для вставки в текст.
-                    Rectangle {
-                        Layout.preferredWidth: 40
-                        Layout.preferredHeight: 40
-                        Layout.alignment: Qt.AlignVCenter
-                        radius: Theme.radiusSm
-                        color: emojiArea.containsMouse ? Theme.bgCard : Theme.bgInput
-                        border.width: 1
-                        border.color: Theme.border
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "🙂"
-                            font.pixelSize: 20
-                            font.family: Theme.fontFamily
-                        }
-
-                        MouseArea {
-                            id: emojiArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: inputEmojiPicker.open()
-                        }
-                    }
-
-                    ScrollView {
-                        id: msgInputScroll
+                    // Всё внутри ОДНОГО поля (#45): «+», поле ввода, смайлик и отправка —
+                    // кнопки оверлеями ВНУТРИ пилюли (как смайлик в #41), а не отдельными
+                    // колонками. Так диалогу/тексту больше места.
+                    Item {
+                        id: inputFieldWrap
                         Layout.fillWidth: true
                         Layout.preferredHeight: Math.min(Math.max(msgInput.implicitHeight, 40), 124)
                         Layout.alignment: Qt.AlignVCenter
+
+                    ScrollView {
+                        id: msgInputScroll
+                        anchors.fill: parent
                         clip: true
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                         ScrollBar.vertical.policy: ScrollBar.AsNeeded
@@ -2800,13 +2967,15 @@ Rectangle {
                             renderType: Text.NativeRendering
                             topPadding: 8
                             bottomPadding: 8
-                            leftPadding: 14
-                            rightPadding: 14
+                            // Слева внутри — «+», справа — смайлик и отправка (#45):
+                            // оставляем под них поле, чтобы текст не залезал под кнопки.
+                            leftPadding: 44
+                            rightPadding: 80
 
                             background: null
                             onTextChanged: {
                                 if (text.length > 0) root.sendLocked = false
-                                root.saveDraft()
+                                draftSaveTimer.restart()   // дебаунс: запись через 600мс после паузы
                                 spellUnderlines.requestPaint()
                             }
 
@@ -2902,6 +3071,11 @@ Rectangle {
 
                             // Правая кнопка на десктопе
                             onPressed: function(event) {
+                                // Зафиксировать текущее КОМПОЗ-слово (pre-edit от
+                                // предиктивного ввода) ДО перемещения курсора тапом —
+                                // иначе IME перетаскивает незакоммиченное слово в новую
+                                // позицию вместе с курсором (#46).
+                                Qt.inputMethod.commit()
                                 if (event.button === Qt.RightButton && !isMobileOs) {
                                     populateSpellContext(event.x, event.y)
                                     anchorInputMenu(event.x, event.y)
@@ -2924,7 +3098,12 @@ Rectangle {
                             }
 
                             onActiveFocusChanged: {
-                               if (activeFocus) Qt.inputMethod.show()
+                               if (activeFocus) {
+                                   // Тап по полю = пользователь хочет печатать →
+                                   // прячем эмодзи-панель и показываем клавиатуру (#42).
+                                   root.emojiPanelOpen = false
+                                   Qt.inputMethod.show()
+                               }
                             }
 
                             Keys.onPressed: function(event) {
@@ -2935,35 +3114,97 @@ Rectangle {
                                 }
                             }
                         }
-                    }
+                    }   // ScrollView
 
-                    // Send button
-                    Rectangle {
-                        // Активность по тексту ИЛИ по pre-edit'у (предикативный ввод
-                        // до коммита держит первое слово только в preeditText).
-                        readonly property bool hasContent: msgInput.text.trim().length > 0
-                                                           || (msgInput.preeditText && msgInput.preeditText.trim().length > 0)
-                        Layout.preferredWidth: 40
-                        Layout.preferredHeight: 40
-                        Layout.alignment: Qt.AlignVCenter
-                        radius: Theme.radiusSm
-                        color: root.sendLocked || !hasContent ? Theme.accentDim : (sendArea.containsMouse ? Theme.accentHover : Theme.accent)
-
-                        AppIcon {
-                            anchors.fill: parent
-                            name: "send"
-                            iconColor: parent.hasContent ? Theme.textPrimary : Theme.textSecondary
+                        // ── Кнопки ВНУТРИ поля (#45), все по нижнему краю пилюли ──────
+                        // «+» (вложения) — низ-лево.
+                        Rectangle {
+                            id: attachBtn
+                            anchors.left: parent.left
+                            anchors.bottom: parent.bottom
+                            anchors.leftMargin: 5
+                            anchors.bottomMargin: 5
+                            width: 32; height: 32
+                            radius: Theme.radiusSm
+                            color: attachArea.containsMouse ? Theme.bgCard : "transparent"
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 20; height: 20
+                                name: "plus"
+                                iconColor: Theme.accentHover
+                                strokeWidth: 2.2
+                            }
+                            MouseArea {
+                                id: attachArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    const p = mapToItem(root, 0, 0)
+                                    attachMenu.x = Math.max(8, p.x)
+                                    attachMenu.y = Math.max(8, p.y - attachMenu.height - 6)
+                                    attachMenu.open()
+                                }
+                            }
                         }
 
-                        MouseArea {
-                            id: sendArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            enabled: !root.sendLocked && parent.hasContent
-                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
-                            onClicked: sendBtn.clicked()
+                        // Отправка — низ-право.
+                        Rectangle {
+                            id: sendBtnVisual
+                            readonly property bool hasContent: msgInput.text.trim().length > 0
+                                                               || (msgInput.preeditText && msgInput.preeditText.trim().length > 0)
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.rightMargin: 5
+                            anchors.bottomMargin: 5
+                            width: 32; height: 32
+                            radius: Theme.radiusSm
+                            color: root.sendLocked || !hasContent ? Theme.accentDim : (sendArea.containsMouse ? Theme.accentHover : Theme.accent)
+                            AppIcon {
+                                anchors.fill: parent
+                                anchors.margins: 5
+                                name: "send"
+                                iconColor: parent.hasContent ? Theme.textPrimary : Theme.textSecondary
+                            }
+                            MouseArea {
+                                id: sendArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                enabled: !root.sendLocked && parent.hasContent
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                                onClicked: sendBtn.clicked()
+                            }
                         }
-                    }
+
+                        // Смайлик/клавиатура-toggle — низ-право, левее отправки (#41/#42).
+                        Rectangle {
+                            anchors.right: sendBtnVisual.left
+                            anchors.bottom: parent.bottom
+                            anchors.rightMargin: 4
+                            anchors.bottomMargin: 7
+                            width: 28; height: 28
+                            radius: Theme.radiusSm
+                            color: emojiArea.containsMouse ? Theme.bgCard : "transparent"
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 20; height: 20
+                                name: root.emojiPanelOpen
+                                      ? (root.isMobileOs ? "keyboard" : "chevronDown")
+                                      : "smile"
+                                iconColor: Theme.accentHover
+                                strokeWidth: 1.8
+                            }
+                            MouseArea {
+                                id: emojiArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.toggleEmojiPanel()
+                            }
+                        }
+                    }   // inputFieldWrap
+
+                    // (Кнопка отправки перенесена ВНУТРЬ поля — sendBtnVisual выше, #45.)
 
                     // Invisible button target for keyboard submit
                     Item {
@@ -2992,7 +3233,7 @@ Rectangle {
                             // Автопрокрутка вниз при отправке: гарантированно
                             // показываем только что отправленное сообщение.
                             listView.stickToBottom = true
-                            Qt.callLater(listView.positionViewAtEnd)
+                            Qt.callLater(root.settleToBottom)
                         }
 
                         onClicked: {
@@ -3011,6 +3252,19 @@ Rectangle {
                 }
             }
         }
+
+        // INLINE эмодзи-панель (#42) — занимает место клавиатуры.
+        // Открывается кнопкой 🙂 в поле ввода (toggle с клавиатурой); высота 0 когда
+        // закрыта, поэтому лента сообщений занимает всё место.
+        EmojiPanel {
+            id: emojiPanel
+            Layout.fillWidth: true
+            Layout.preferredHeight: root.emojiPanelOpen ? 300 : 0
+            visible: root.emojiPanelOpen
+            onPicked: function(emoji) {
+                msgInput.insert(msgInput.cursorPosition, emoji)
+            }
+        }
     }
 
     PhotoViewer {
@@ -3021,17 +3275,8 @@ Rectangle {
         }
     }
 
-    // ── Эмодзи-пикер для вставки в поле ввода ────────────────────────────
-    EmojiPicker {
-        id: inputEmojiPicker
-        anchors.centerIn: Overlay.overlay
-        heading: qsTr("Эмодзи")
-        closeOnPick: false   // можно вставить несколько подряд
-        onPicked: function(emoji) {
-            msgInput.insert(msgInput.cursorPosition, emoji)
-        }
-        onClosed: msgInput.forceActiveFocus()
-    }
+    // (Эмодзи для поля ввода — теперь inline EmojiPanel внизу, см. #42; старый
+    //  popup-пикер удалён. Для настройки реакций — отдельный EmojiPicker ниже.)
 
     // ── Настройка списка быстрых реакций ─────────────────────────────────
     Popup {

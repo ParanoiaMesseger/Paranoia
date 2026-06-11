@@ -17,6 +17,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- #30 in-app обновление: установка скачанного APK через системный диалог. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Управление audio-стеком во время звонка: переключение режима в
          MODE_IN_COMMUNICATION и speakerphone. Без этого permission'а
          setMode/setSpeakerphoneOn молча игнорируются и звук QAudioSink

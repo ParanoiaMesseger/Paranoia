@@ -141,9 +141,46 @@ Rectangle {
                     Layout.fillWidth: true
                     Layout.leftMargin: 20
                     Layout.rightMargin: 20
-                    text: qsTr("Скачать и установить")
+                    text: VersionInfo.downloading
+                          ? qsTr("Скачивание…")
+                          : (VersionInfo.canInstallInApp ? qsTr("Скачать и установить") : qsTr("Скачать"))
                     visible: VersionInfo.updateAvailable && VersionInfo.downloadUrl.length > 0
-                    onClicked: VersionInfo.openDownloadUrl()
+                    enabled: !VersionInfo.downloading
+                    // На Linux/Windows/Android — in-app скачивание+установка; иначе (iOS/macOS) — браузер/стор.
+                    onClicked: VersionInfo.canInstallInApp ? VersionInfo.downloadAndInstall()
+                                                           : VersionInfo.openDownloadUrl()
+                }
+
+                ProgressBar {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 20
+                    Layout.rightMargin: 20
+                    visible: VersionInfo.downloading
+                    from: 0; to: 1
+                    value: VersionInfo.downloadProgress
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 20
+                    Layout.rightMargin: 20
+                    text: VersionInfo.downloadStatus
+                    visible: text.length > 0
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                }
+
+                ParaButton {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 20
+                    Layout.rightMargin: 20
+                    text: qsTr("Отменить скачивание")
+                    visible: VersionInfo.downloading
+                    secondary: true
+                    onClicked: VersionInfo.cancelDownload()
                 }
 
                 RowLayout {

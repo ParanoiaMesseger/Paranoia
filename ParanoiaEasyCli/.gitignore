@@ -1,0 +1,17 @@
+# build
+/target/
+
+# локальный профиль/ключи/vault — НЕ коммитить (рантайм вынесен в
+# ~/.local/share/paranoia-mcp, см. tools/install_mcp.sh; это лишь стрэи)
+paranoia.db
+ADMIN_PUB
+DEVICE_KEY
+.paranoia-cli-data
+.paranoia_dialogues.json
+
+# MCP-конфиг содержит dev-PIN в env — НЕ коммитить
+.mcp.json
+
+# python
+tools/__pycache__/
+*.pyc
