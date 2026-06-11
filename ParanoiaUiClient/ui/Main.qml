@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import QtQuick.Window
 import ParanoiaUiClient
 
@@ -20,6 +21,9 @@ ApplicationWindow {
     readonly property bool hasShareTarget: sharePendingText.length > 0 || (sharePendingFiles && sharePendingFiles.length > 0)
     readonly property bool startOnMainPage: Backend.hasStoredClientProfiles || Backend.loggedIn || Backend.hasAdminAccess
     readonly property bool virtualKeyboardEnabled: VirtualKeyboardAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
+    // Авто-проверка обновлений при входе (раз за сессию) + плашка-уведомление.
+    property bool _updateCheckStarted: false
+    property bool _updatePromptShown: false
 
     onActiveChanged: {
         if (active) {
@@ -77,6 +81,11 @@ ApplicationWindow {
     function openMainPageIfReady() {
         if (!(Backend.loggedIn || Backend.hasAdminAccess))
             return;
+        // Авто-проверка обновлений при первом входе на главный экран.
+        if (!appWindow._updateCheckStarted) {
+            appWindow._updateCheckStarted = true;
+            VersionInfo.checkForUpdates();
+        }
         if (stackView.depth !== 1 && !appWindow.importNavigationPending)
             return;
 
@@ -427,6 +436,83 @@ ApplicationWindow {
         id: versionInfoPage
         VersionInfoPage {
             onBack: stackView.pop()
+        }
+    }
+
+    // Авто-уведомление о доступном обновлении (после проверки при входе).
+    Connections {
+        target: VersionInfo
+        function onUpdateCheckChanged() {
+            if (VersionInfo.updateAvailable && !VersionInfo.updateCheckInProgress
+                    && !appWindow._updatePromptShown) {
+                appWindow._updatePromptShown = true
+                updatePopup.open()
+            }
+        }
+    }
+
+    Popup {
+        id: updatePopup
+        anchors.centerIn: Overlay.overlay
+        // Адаптивная ширина: не шире экрана (минус поля).
+        width: Math.min(340, appWindow.width - 40)
+        padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color: Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+            Text {
+                Layout.fillWidth: true
+                text: qsTr("Доступно обновление")
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontMd
+                font.family: Theme.fontFamily
+                font.weight: Font.Medium
+                horizontalAlignment: Text.AlignHCenter
+            }
+            Text {
+                Layout.fillWidth: true
+                // preferredWidth=1 заставляет Layout НЕ использовать implicitWidth
+                // текста (иначе колонка растягивается на всю строку без переноса).
+                Layout.preferredWidth: 1
+                text: qsTr("Доступна новая версия %1\nОбновить сейчас?").arg(VersionInfo.latestVersion)
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: 1
+                    text: qsTr("Позже")
+                    secondary: true
+                    onClicked: updatePopup.close()
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: 1
+                    text: qsTr("Обновить")
+                    onClicked: {
+                        updatePopup.close()
+                        // Сначала стартуем загрузку (захватит валидный downloadUrl,
+                        // выставит downloading=true), ПОТОМ открываем страницу —
+                        // её onCompleted-проверка станет no-op (см. checkForUpdates).
+                        VersionInfo.downloadAndInstall()
+                        stackView.push(versionInfoPage)
+                    }
+                }
+            }
         }
     }
 

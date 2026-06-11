@@ -36,6 +36,15 @@ char *paranoia_derive_server_id(CSTR signing_key_b64);
 // NULL только при ошибке инициализации/панике. Освободить через paranoia_free_string.
 char *paranoia_check_reserve_url(CSTR url);
 
+// ── In-app обновление: HTTP через rustls (единый TLS-стек; работает на Android
+// без Qt-OpenSSL-бандла). Plain GET/download без маскировки.
+// GET → тело ответа (UTF-8) или NULL при ошибке/не-2xx. Освободить paranoia_free_string.
+char *paranoia_http_get(CSTR url);
+// Колбэк прогресса: возврат 0 => прервать загрузку; иначе продолжать.
+typedef int (*ParanoiaDownloadProgress)(uint64_t received, uint64_t total, void *user_data);
+// Скачать url в dest_path (rustls). 0=успех, -1=ошибка, -2=отменено. Блокирующая.
+int paranoia_http_download(CSTR url, CSTR dest_path, ParanoiaDownloadProgress progress, void *user_data);
+
 // ── Admin
 void paranoia_generate_keypair(char **out_secret, char **out_pubkey);
 

@@ -86,3 +86,13 @@ CMakeLists.txt.user*
 .rcc/
 .uic/
 /build*/
+
+# UI-профайлинг-харнес — локальный, в репозиторий не идёт (#40 dev-only)
+/profiling/
+/src/utils/profiling/
+
+# Рантайм-ключи/состояние (appData) — НИКОГДА не коммитить (стрэи из отладки).
+device_key.json
+pending_registration_key.json
+profiles.json
+*.crypt

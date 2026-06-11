@@ -5,7 +5,7 @@ import ParanoiaUiClient
 //  • обычный текст     → Text (MarkdownText, либо RichText если есть inline-код);
 //  • многострочный код → нативный Rectangle с подсветкой (НЕ полагаемся на фон
 //    <pre>/<table> в Qt RichText, который красит только первую строку);
-//  • inline `код`      → кликабельный «чип» (копируется по клику, как в Telegram).
+//  • inline `код`      → кликабельный «чип» (копируется по клику).
 //
 // ВАЖНО про ширину: корень — Item, а НЕ Column. У Column implicitWidth = ширина
 // детей; если привязать детей к ширине самого Column (= ширине пузыря), получается
@@ -72,6 +72,22 @@ Item {
     }
     function _hasInline(s) { return /`[^`\n]+`/.test(s || "") }
 
+    // Нужен ли сегменту дорогой RichText (QTextDocument + HTML-раскладка), или
+    // хватит дешёвого PlainText. RichText шейпится HarfBuzz'ом в разы дороже —
+    // именно он давал ~1.8с фриз на инкубации делегатов сообщений. Большинство
+    // сообщений — простой текст без разметки → PlainText. RichText включаем только
+    // при реальной разметке: inline-код, ссылки/картинки, **жирный**/*курсив*/~~~~,
+    // или увеличение эмодзи (<span font-size>, только когда не emoji-only).
+    function _segNeedsRich(s) {
+        s = s || ""
+        if (_hasInline(s)) return true
+        if (/https?:\/\/\S/.test(s)) return true   // голый URL → автолинк (RichText)
+        if (/\*\*[^*]+\*\*|__[^_]+__|(^|[^*])\*[^*\n]+\*|~~[^~]+~~|\[[^\]]+\]\([^)\s]+\)|!\[[^\]]*\]\([^)]+\)/.test(s))
+            return true
+        if (_emojiScale === 1 && _emojiRe) { _emojiRe.lastIndex = 0; if (_emojiRe.test(s)) return true }
+        return false
+    }
+
     readonly property var _codeKeywords: {
         const list = ("function return if else for while do switch case break continue var let const new "
             + "class struct enum public private protected static void int float double bool char string auto "
@@ -137,6 +153,20 @@ Item {
         // дефолтный синий): акцентный цвет темы.
         text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
                             '<a href="$2" style="color:' + Theme.accentHover + '">$1</a>')
+        // Автолинк голых http(s)-URL. Уже готовые <a>…</a> (markdown-ссылки выше)
+        // прячем в плейсхолдеры \x02, чтобы не линковать URL внутри href/текста
+        // повторно, линкуем остальные, восстанавливаем. Хвостовую пунктуацию
+        // (.,;:!?)»"') в ссылку не включаем. & к этому моменту уже &amp; (после _esc).
+        {
+            let _anchors = []
+            text = text.replace(/<a\b[^>]*>[\s\S]*?<\/a>/g, function(m) {
+                _anchors.push(m); return "\x02" + (_anchors.length - 1) + "\x02"
+            })
+            text = text.replace(/https?:\/\/[^\s<]*[^\s<.,;:!?)\]»"']/g, function(url) {
+                return '<a href="' + url + '" style="color:' + Theme.accentHover + '">' + url + '</a>'
+            })
+            text = text.replace(/\x02(\d+)\x02/g, function(m, i) { return _anchors[parseInt(i)] })
+        }
         text = text.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/__([^_]+)__/g, "<b>$1</b>")
         text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>")
         text = text.replace(/~~([^~]+)~~/g, "<s>$1</s>")
@@ -170,6 +200,24 @@ Item {
         if (matches.length === 1) return 6.0
         if (matches.length <= 3) return 3.0
         return 1
+    }
+
+    // Вернуть URL ссылки в точке (px,py) в координатах body, либо "" если ссылки нет.
+    // Зачем: в ChatPage MouseArea пузыря лежит ПОВЕРХ текста и перехватывает клики,
+    // из-за чего onLinkActivated самого Text не срабатывал — ссылки «не открывались»
+    // (#28). MouseArea теперь спрашивает linkAt и сам открывает ссылку. Маппим точку
+    // в нужный сегмент-Text и делегируем его встроенному linkAt.
+    function linkAt(px, py) {
+        for (let i = 0; i < col.children.length; ++i) {
+            const seg = col.children[i]
+            if (!seg || !seg.item || !seg.item.linkAt) continue   // Repeater/код-блок — пропускаем
+            const p = body.mapToItem(seg.item, px, py)
+            if (p.x >= 0 && p.y >= 0 && p.x <= seg.item.width && p.y <= seg.item.height) {
+                const link = seg.item.linkAt(p.x, p.y)
+                if (link && link.length > 0) return link
+            }
+        }
+        return ""
     }
 
     // ── Скрытые измерители естественной ширины ──────────────────────────
@@ -210,9 +258,13 @@ Item {
                 Component {
                     id: textComp
                     Text {
+                        // RichText только при реальной разметке (см. _segNeedsRich) —
+                        // иначе PlainText с сырым текстом: тот же результат, но без
+                        // дорогой QTextDocument-раскладки (фикс ~1.8с фриза).
+                        readonly property bool _rich: body._segNeedsRich(modelData.content)
                         width: body.width
-                        text: body._richText(modelData.content)
-                        textFormat: Text.RichText
+                        text: _rich ? body._richText(modelData.content) : modelData.content
+                        textFormat: _rich ? Text.RichText : Text.PlainText
                         color: body.textColor
                         linkColor: Theme.accentHover
                         font.pixelSize: body._emojiScale > 1

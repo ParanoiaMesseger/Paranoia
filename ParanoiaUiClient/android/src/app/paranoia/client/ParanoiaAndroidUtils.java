@@ -17,6 +17,8 @@ import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Log;
 
+import androidx.core.content.FileProvider;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -386,6 +388,24 @@ public final class ParanoiaAndroidUtils {
         int read;
         while ((read = input.read(buffer)) >= 0) {
             output.write(buffer, 0, read);
+        }
+    }
+
+    // #30: запрос установки скачанного APK через системный диалог пакетного
+    // установщика. Файл (в cache-каталоге) отдаётся через FileProvider-URI
+    // (authority "<pkg>.qtprovider"). Вызывается из VersionInfoBackend по JNI.
+    public static void installApk(Context context, String path) {
+        try {
+            File file = new File(path);
+            Uri uri = FileProvider.getUriForFile(
+                context, context.getPackageName() + ".qtprovider", file);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(intent);
+        } catch (Exception e) {
+            Log.e("ParanoiaAndroidUtils", "installApk failed: " + e.getMessage(), e);
         }
     }
 }

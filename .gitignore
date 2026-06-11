@@ -7,3 +7,12 @@ ExportKeyring.md
 /build_*
 *cache
 installer/packages/app.paranoia.client/data/
+
+# Claude Code — локальные настройки/рантайм, не для репозитория
+.claude/
+
+# Стрэи CLI/отладки (рантайм вынесен в ~/.local/share/paranoia-mcp)
+paranoia.db
+.paranoia-cli-data/
+DEVICE_KEY
+*.xwd

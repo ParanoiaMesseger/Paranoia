@@ -684,5 +684,61 @@ Canvas {
             ctx.stroke()
             return
         }
+
+        if (name === "smile") {
+            // Смайлик: окружность + два глаза + дуга-улыбка.
+            ctx.lineWidth = strokeWidth
+            ctx.strokeStyle = iconColor
+            ctx.fillStyle = iconColor
+            ctx.beginPath()
+            ctx.arc(12, 12, 8.2, 0, Math.PI * 2)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.arc(9, 10, 1.0, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.beginPath()
+            ctx.arc(15, 10, 1.0, 0, Math.PI * 2)
+            ctx.fill()
+            ctx.beginPath()
+            ctx.arc(12, 12, 4.2, Math.PI * 0.15, Math.PI * 0.85, false)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "keyboard") {
+            // Клавиатура: корпус + точки-клавиши + пробел.
+            ctx.lineWidth = strokeWidth
+            ctx.strokeStyle = iconColor
+            ctx.fillStyle = iconColor
+            ctx.beginPath()
+            ctx.moveTo(4, 7)
+            ctx.lineTo(20, 7)
+            ctx.lineTo(20, 17)
+            ctx.lineTo(4, 17)
+            ctx.closePath()
+            ctx.stroke()
+            const kbX = [7, 10, 13, 16]
+            for (let r = 0; r < 2; ++r)
+                for (let i = 0; i < kbX.length; ++i) {
+                    ctx.beginPath()
+                    ctx.arc(kbX[i], 10.5 + r * 2.6, 0.7, 0, Math.PI * 2)
+                    ctx.fill()
+                }
+            ctx.beginPath()
+            ctx.moveTo(9, 15)
+            ctx.lineTo(15, 15)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "chevronDown") {
+            // Шеврон вниз — «скрыть» панель (на ПК нет клавиатуры).
+            ctx.beginPath()
+            ctx.moveTo(5, 9)
+            ctx.lineTo(12, 16)
+            ctx.lineTo(19, 9)
+            ctx.stroke()
+            return
+        }
     }
 }

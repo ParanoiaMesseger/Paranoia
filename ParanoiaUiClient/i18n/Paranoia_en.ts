@@ -538,10 +538,6 @@
         <translation>Message…</translation>
     </message>
     <message>
-        <source>Эмодзи</source>
-        <translation>Emoji</translation>
-    </message>
-    <message>
         <source>Быстрые реакции</source>
         <translation>Quick reactions</translation>
     </message>
@@ -821,6 +817,17 @@
     <message>
         <source>Новых сообщений: %1</source>
         <translation>New messages: %1</translation>
+    </message>
+</context>
+<context>
+    <name>EmojiPanel</name>
+    <message>
+        <source>Поиск эмодзи…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Ничего не найдено</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
@@ -1120,6 +1127,27 @@ Delete the file manually: %1 (%2)</translation>
     <message>
         <source>Новых сообщений: %1</source>
         <translation>New messages: %1</translation>
+    </message>
+</context>
+<context>
+    <name>Main</name>
+    <message>
+        <source>Доступно обновление</source>
+        <translation>Update available</translation>
+    </message>
+    <message>
+        <source>Доступна новая версия %1
+Обновить сейчас?</source>
+        <translation>Version %1 is available
+Update now?</translation>
+    </message>
+    <message>
+        <source>Позже</source>
+        <translation>Later</translation>
+    </message>
+    <message>
+        <source>Обновить</source>
+        <translation>Update</translation>
     </message>
 </context>
 <context>
@@ -2257,6 +2285,10 @@ Delete the file manually: %1 (%2)</translation>
         <translation>Checking for updates…</translation>
     </message>
     <message>
+        <source>Проверка резервного источника обновлений…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
         <source>Не удалось проверить обновления. Откройте страницу релизов вручную.</source>
         <translation>Could not check for updates. Open the releases page manually.</translation>
     </message>
@@ -2275,6 +2307,50 @@ Delete the file manually: %1 (%2)</translation>
     <message>
         <source>Установлена актуальная версия %1.</source>
         <translation>You have the latest version %1.</translation>
+    </message>
+    <message>
+        <source>Резервный источник не содержит сборку для этой платформы.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Скачивание…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Запуск установки…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Загрузка отменена.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Ошибка загрузки. Откройте страницу релизов вручную.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Скачивание… %1%</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Открыт системный установщик.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Запущена установка — введите пароль администратора.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Не удалось запустить pkexec. Установите вручную: %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Запущен установщик.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Не удалось запустить установщик: %1</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
@@ -2300,8 +2376,20 @@ Delete the file manually: %1 (%2)</translation>
         <translation>Check for updates</translation>
     </message>
     <message>
+        <source>Скачивание…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
         <source>Скачать и установить</source>
         <translation>Download and install</translation>
+    </message>
+    <message>
+        <source>Скачать</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Отменить скачивание</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
         <source>GitHub</source>

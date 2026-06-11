@@ -272,6 +272,126 @@ pub extern "C" fn paranoia_check_reserve_url(url: *const c_char) -> *mut c_char 
     })
 }
 
+// ── #30/#37 in-app обновление: HTTP через rustls (единый TLS-стек; работает на
+// Android без Qt-OpenSSL-бандла). Plain GET/download без маскировки — ходим на
+// github.com / собственный хост обновлений.
+
+/// HTTP GET, вернуть тело ответа строкой (UTF-8). NULL при ошибке/не-2xx
+/// (см. paranoia_last_error). Освободить через paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_http_get(url: *const c_char) -> *mut c_char {
+    ffi_catch_ptr("http_get_error", || {
+        clear_last_error();
+        let url_str = ffi_try!(cstr_arg(url), invalid_argument_ptr());
+        if url_str.trim().is_empty() {
+            set_last_error("invalid_url");
+            return std::ptr::null_mut();
+        }
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(_) => {
+                set_last_error("runtime_error");
+                return std::ptr::null_mut();
+            }
+        };
+        let res: anyhow::Result<String> = rt.block_on(async {
+            let client = reqwest::Client::builder()
+                .user_agent(concat!("Paranoia/", env!("CARGO_PKG_VERSION")))
+                .build()?;
+            let resp = client.get(url_str.trim()).send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                anyhow::bail!("http status {}", status.as_u16());
+            }
+            Ok(resp.text().await?)
+        });
+        match res {
+            Ok(body) => string_to_c(body),
+            Err(e) => {
+                set_last_error(&format!("http_get: {}", anyhow_error_chain(&e)));
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Колбэк прогресса загрузки. received/total — байты (total=0 если неизвестен).
+/// Возврат 0 => прервать загрузку; иначе продолжать.
+pub type ParanoiaDownloadProgress =
+    extern "C" fn(received: u64, total: u64, user_data: *mut std::ffi::c_void) -> i32;
+
+/// Скачать `url` в файл `dest_path` через rustls, с колбэком прогресса.
+/// 0 — успех, -1 — ошибка (см. paranoia_last_error), -2 — отменено колбэком.
+/// Блокирующая: вызывать с воркер-потока.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_http_download(
+    url: *const c_char,
+    dest_path: *const c_char,
+    progress: Option<ParanoiaDownloadProgress>,
+    user_data: *mut std::ffi::c_void,
+) -> i32 {
+    ffi_catch_i32("http_download_error", || {
+        clear_last_error();
+        let url_str = match cstr_arg(url) {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("invalid_url");
+                return -1;
+            }
+        };
+        let dest = match cstr_arg(dest_path) {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("invalid_dest");
+                return -1;
+            }
+        };
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(_) => {
+                set_last_error("runtime_error");
+                return -1;
+            }
+        };
+        // raw-ptr не Send → переносим в async как usize.
+        let ud = user_data as usize;
+        let res: anyhow::Result<i32> = rt.block_on(async move {
+            use std::io::Write;
+            let client = reqwest::Client::builder()
+                .user_agent(concat!("Paranoia/", env!("CARGO_PKG_VERSION")))
+                .build()?;
+            let mut resp = client.get(url_str.trim()).send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                anyhow::bail!("http status {}", status.as_u16());
+            }
+            let total = resp.content_length().unwrap_or(0);
+            let mut file = std::fs::File::create(&dest)?;
+            let mut received: u64 = 0;
+            while let Some(chunk) = resp.chunk().await? {
+                file.write_all(&chunk)?;
+                received += chunk.len() as u64;
+                if let Some(cb) = progress {
+                    if cb(received, total, ud as *mut std::ffi::c_void) == 0 {
+                        drop(file);
+                        let _ = std::fs::remove_file(&dest);
+                        return Ok(-2);
+                    }
+                }
+            }
+            file.flush()?;
+            Ok(0)
+        });
+        match res {
+            Ok(code) => code,
+            Err(e) => {
+                set_last_error(&format!("download: {}", anyhow_error_chain(&e)));
+                -1
+            }
+        }
+    })
+}
+
 /// Вывести server_id из Ed25519 signing key.
 /// Возвращает hex SHA256("paranoia:server-id:v1\n" || public_key_bytes) или NULL при ошибке.
 /// Освободить через paranoia_free_string.
