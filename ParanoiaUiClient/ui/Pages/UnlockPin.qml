@@ -206,7 +206,7 @@ Rectangle {
 
                             width: (parent.width - 20) / 3
                             height: 54
-                            radius: Theme.radiusMd
+                            radius: height / 2          // скруглённые «пилюли»
                             color: keypadButton.modelData === "" ? "transparent" : pressArea.pressed ? Theme.accentDim : Theme.bgCard
                             border.color: keypadButton.modelData === "" ? "transparent" : Theme.border
                             border.width: keypadButton.modelData === "" ? 0 : 1

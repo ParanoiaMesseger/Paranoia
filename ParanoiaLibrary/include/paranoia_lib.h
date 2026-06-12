@@ -156,6 +156,12 @@ char *paranoia_receive_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR
 // Возвращает 0 при успехе и пишет результат в out_count.
 int paranoia_notify_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, uint64_t *out_count);
 
+// Как notify_count_keyring, но с long-poll: сервер держит запрос до нового
+// сообщения или long_poll_ms (капается серверным потолком). 0 = короткий опрос.
+// Блокирует до удержания сервера — вызывать на воркере (НЕ на GUI-потоке).
+int paranoia_notify_count_wait_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
+                                       uint32_t long_poll_ms, uint64_t *out_count);
+
 // Как notify_count, но без учёта сообщений, уже прочитанных мной на другом
 // устройстве (база = max(локальный seq, мой read-seq с сервера через arrived).
 int paranoia_notify_unread_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,

@@ -3,8 +3,11 @@ package app.paranoia.client;
 import android.Manifest;
 import android.app.Activity;
 import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.media.MediaScannerConnection;
+import android.os.Environment;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
@@ -323,6 +326,62 @@ public final class ParanoiaAndroidUtils {
         } catch (Exception e) {
             Log.w(TAG, "Cannot copy file to directory URI", e);
             return false;
+        }
+    }
+
+    // Сохранить файл в публичную галерею (фото) или Загрузки (прочее) через MediaStore
+    // (Android 10+) или прямой записью в публичную папку (pre-29). Возвращает
+    // человекочитаемый путь («Pictures/Paranoia/имя») или "" при ошибке.
+    public static String saveToMediaStore(Context context, String sourcePath, String fileName,
+                                          String mimeType, boolean isImage) {
+        if (context == null || sourcePath == null || sourcePath.isEmpty()) return "";
+        final String name = sanitizeFileName((fileName == null || fileName.isEmpty()) ? "attachment.bin" : fileName);
+        final String mime = (mimeType == null || mimeType.isEmpty())
+                ? (isImage ? "image/*" : "application/octet-stream") : mimeType;
+        final String relPath = (isImage ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS) + "/Paranoia";
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                ContentResolver resolver = context.getContentResolver();
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, relPath);
+                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                Uri collection = isImage
+                        ? MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                        : MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+                Uri item = resolver.insert(collection, values);
+                if (item == null) return "";
+                try (InputStream input = new FileInputStream(sourcePath);
+                     OutputStream output = resolver.openOutputStream(item, "w")) {
+                    if (output == null) { resolver.delete(item, null, null); return ""; }
+                    copy(input, output);
+                }
+                ContentValues done = new ContentValues();
+                done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(item, done, null, null);
+                return relPath + "/" + name;
+            }
+            // pre-29: прямая запись в публичную папку (legacy storage) + media-scan.
+            File dir = new File(Environment.getExternalStoragePublicDirectory(
+                    isImage ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS), "Paranoia");
+            dir.mkdirs();
+            File out = new File(dir, name);
+            for (int i = 1; out.exists() && i < 1000; i++) {
+                int dot = name.lastIndexOf('.');
+                String base = dot > 0 ? name.substring(0, dot) : name;
+                String ext = dot > 0 ? name.substring(dot) : "";
+                out = new File(dir, base + " (" + i + ")" + ext);
+            }
+            try (InputStream input = new FileInputStream(sourcePath);
+                 OutputStream output = new FileOutputStream(out)) {
+                copy(input, output);
+            }
+            MediaScannerConnection.scanFile(context, new String[] { out.getAbsolutePath() }, new String[] { mime }, null);
+            return relPath + "/" + out.getName();
+        } catch (Exception e) {
+            Log.w(TAG, "saveToMediaStore failed", e);
+            return "";
         }
     }
 

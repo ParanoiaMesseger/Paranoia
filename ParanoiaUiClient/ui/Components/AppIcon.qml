@@ -740,5 +740,16 @@ Canvas {
             ctx.stroke()
             return
         }
+
+        if (name === "expand") {
+            // Рамка-уголки «развернуть на весь экран» — четыре угловых скобки.
+            ctx.beginPath()
+            ctx.moveTo(4, 9);  ctx.lineTo(4, 4);   ctx.lineTo(9, 4)    // верх-лево
+            ctx.moveTo(15, 4); ctx.lineTo(20, 4);  ctx.lineTo(20, 9)   // верх-право
+            ctx.moveTo(20, 15);ctx.lineTo(20, 20); ctx.lineTo(15, 20)  // низ-право
+            ctx.moveTo(9, 20); ctx.lineTo(4, 20);  ctx.lineTo(4, 15)   // низ-лево
+            ctx.stroke()
+            return
+        }
     }
 }

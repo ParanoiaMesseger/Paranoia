@@ -1,6 +1,7 @@
 mod call_signal;
 mod config;
 mod cover;
+mod dialogue_notify;
 mod crypto;
 mod food_delivery_cover;
 mod nginx;
@@ -11,7 +12,8 @@ mod voip_stun;
 
 use crate::{
     call_signal::CallSignalStore, config::Config, cover::Cover,
-    food_delivery_cover::FoodDeliveryCover, schema_cover::SchemaCover, store::PacketStore,
+    dialogue_notify::DialogueNotifyStore, food_delivery_cover::FoodDeliveryCover,
+    schema_cover::SchemaCover, store::PacketStore,
 };
 use anyhow::Context;
 use axum::{
@@ -49,6 +51,8 @@ pub struct AppState {
     pub store: Arc<PacketStore>,
     pub cover: Arc<dyn Cover>,
     pub call_signals: Arc<CallSignalStore>,
+    /// Пробуждение long-poll `/notify` при новом сообщении (per-dialogue Notify).
+    pub dialogue_notify: Arc<DialogueNotifyStore>,
     /// Активный masking-профиль (для cover admin/reg-трафика через шлюз). `None`
     /// → admin/reg идут плоско по фиксированным путям (как раньше).
     pub masking_profile: Option<Arc<MaskingProfile>>,
@@ -76,6 +80,9 @@ async fn main() -> anyhow::Result<()> {
 
     let call_signals = Arc::new(CallSignalStore::new());
     let _gc = call_signal::spawn_gc(Arc::clone(&call_signals));
+
+    let dialogue_notify = Arc::new(DialogueNotifyStore::new());
+    let _dlg_gc = dialogue_notify::spawn_gc(Arc::clone(&dialogue_notify));
 
     // STUN/TURN-листенер на основном домене (отдельный UDP-порт; CDN/HTTPS не
     // пропустят UDP, поэтому развязка по портам — единственный практичный
@@ -172,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
         store: Arc::new(PacketStore::open(&store_path)?),
         cover,
         call_signals,
+        dialogue_notify,
         masking_profile: masking_profile.clone(),
         blob_nonces: tokio::sync::Mutex::new(routes::blob::NonceGuard::new(100_000)),
     });

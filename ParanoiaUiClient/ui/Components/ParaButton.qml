@@ -11,7 +11,7 @@ Button {
     implicitWidth: 200
 
     background: Rectangle {
-        radius: Theme.radiusMd
+        radius: 20          // скруглённая пилюля (в едином стиле)
         color: {
             if (!root.enabled)     return Theme.bgCard
             if (root.destructive)  return root.hovered ? Theme.error : Theme.errorBg
@@ -22,11 +22,16 @@ Button {
         border.color: root.destructive ? Theme.error : root.hovered ? Theme.accent : Theme.border
         Behavior on color { ColorAnimation { duration: 120 } }
 
+        // Угловые акценты-чёрточки утоплены от краёв на радиус скругления и со
+        // скруглёнными концами — чтобы не торчать за углы пилюли.
         Rectangle {
             width: parent.width * .34
             height: 2
+            radius: 1
             anchors.left: parent.left
+            anchors.leftMargin: 20
             anchors.bottom: parent.bottom
+            anchors.bottomMargin: 1
             color: root.secondary ? Theme.accentDim : Theme.bgDark
             opacity: root.enabled ? .9 : .25
         }
@@ -34,8 +39,11 @@ Button {
         Rectangle {
             width: 18
             height: 2
+            radius: 1
             anchors.right: parent.right
+            anchors.rightMargin: 20
             anchors.top: parent.top
+            anchors.topMargin: 1
             color: root.destructive ? Theme.error : Theme.accentHover
             opacity: root.hovered && root.enabled ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 90 } }

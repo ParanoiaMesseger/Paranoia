@@ -117,6 +117,7 @@ impl ClientCover for SchemaClientCover {
                 partner: core.partner.clone(),
                 seq: core.seq,
                 sig: encode_b64(&core.sig),
+                long_poll_ms: core.long_poll_ms,
             },
         )
     }

@@ -56,6 +56,12 @@ Rectangle {
         else root.openEmojiPanel()
     }
 
+    // Открыть длинное сообщение на весь экран для удобного чтения (кнопка-уголки
+    // в пузыре, видна только для «простыней» — см. isLongText в делегате).
+    function openTextViewer(text, senderName, outgoing, timeStr) {
+        textViewer.open(text, senderName, outgoing, timeStr)
+    }
+
     // Анимация удаления «шредер»: НАБОР id сообщений, чьи пузыри сейчас «режутся»
     // (поддерживает и одиночное, и множественное удаление). Делегаты с этими id
     // запускают ShredderOverlay; реальное удаление делает ОДИН общий таймер после
@@ -408,6 +414,13 @@ Rectangle {
     }
 
     function handleBackButton(): bool {
+        // Полноэкранное чтение перехватывает «назад»/свайп РАНЬШЕ выхода из диалога:
+        // сперва выходим из режима выделения (если включён), затем закрываем ридер.
+        if (textViewer.visible) {
+            if (textViewer.selectMode) textViewer.selectMode = false
+            else textViewer.close()
+            return true
+        }
         if (photoViewer.visible) {
             photoViewer.close()
             return true
@@ -705,6 +718,12 @@ Rectangle {
             const gid = String(message.group_id || "")
             if (gid.length > 0) return "grp:" + gid
         }
+        // Оптимистичная отправка: стабильный ключ на всё время жизни строки
+        // (sending → committed). Иначе при коммите id меняется (pending:→реальный) и
+        // строка пересоздаётся (повторное «всплытие»/мерцание). client_token переносится
+        // на committed в ChatBackend (dispatchOutbox + appendMessages).
+        const ct = String(message.client_token || "")
+        if (ct.length > 0) return "ct:" + ct
         const id = String(message.id || "")
         if (id.length > 0) return "id:" + id
         const seq = Number(message.seq || 0)
@@ -730,25 +749,157 @@ Rectangle {
         const slice = start > 0 ? messages.slice(start) : messages
         // Разворачиваем: index 0 = новейшее (для BottomToTop-ленты).
         const windowed = slice.slice().reverse()
-        if (msgModel.count === windowed.length) {
-            let sameOrder = true
-            for (let i = 0; i < windowed.length; ++i) {
-                if (messageKey(msgModel.get(i)) !== messageKey(windowed[i])) {
-                    sameOrder = false
-                    break
-                }
+        return root.reconcileModel(windowed)
+    }
+
+    // Лёгкая сигнатура ИЗМЕНЯЕМЫХ полей строки — чтобы set() трогал ТОЛЬКО реально
+    // изменившиеся сообщения (статус отправки, реакции, правка, превью), а видимые
+    // неизменные не дёргались (нет ре-рендера/реколлапса при чтении и приходе нового).
+    function _msgSig(m) {
+        if (!m) return ""
+        return String(m.id || "") + "" + String(m.status || "") + ""
+             + String(m.text || "") + "" + String(m.reactions_json || "") + ""
+             + String(m.edited || "") + "" + String(m.preview_source || "") + ""
+             + String(m.photos_json || "") + "" + String(m.kind || "")
+    }
+
+    // Инкрементальная сверка модели с окном (newest-first) — минимум операций
+    // remove/insert/move/set вместо разрушительного clear()+append(). Это:
+    //  • сохраняет существующие делегаты и позицию вьюпорта (ListView сам держит якорь
+    //    при insert/remove) → УБИРАЕТ рывок при приходе нового во время чтения, телепорт
+    //    при удалении в начале/середине и передёргивания (полный ребилд был их корнем);
+    //  • включает add/remove/displaced-transitions (анимация появления/удаления).
+    // Возврат: true = сделано инкрементально, ListView сам держит позицию (anchor-restore
+    // не нужен); false = пришлось полностью пересобрать (вход в новый диалог) → вызывающий
+    // восстановит позицию.
+    property bool _popNewest: false
+    function reconcileModel(windowed) {
+        const n = windowed.length
+        const prevCount = msgModel.count
+        if (n === 0) { if (prevCount > 0) msgModel.clear(); return false }
+
+        // Карта ключей нового окна (key → индекс).
+        const newKeys = ({})
+        for (let i = 0; i < n; ++i) newKeys[messageKey(windowed[i])] = i
+
+        // Нет пересечения со старой моделью (полная смена диалога) → дешевле rebuild.
+        if (prevCount > 0) {
+            let overlap = false
+            for (let i = 0; i < prevCount; ++i) {
+                if (newKeys[messageKey(msgModel.get(i))] !== undefined) { overlap = true; break }
             }
-            if (sameOrder) {
-                for (let i = 0; i < windowed.length; ++i)
-                    msgModel.set(i, windowed[i])
-                return true
+            if (!overlap) {
+                msgModel.clear()
+                for (let i = 0; i < n; ++i) msgModel.append(windowed[i])
+                return false
             }
         }
 
-        msgModel.clear()
-        for (let i = 0; i < windowed.length; ++i)
-            msgModel.append(windowed[i])
-        return false
+        // 1. Удалить строки, которых нет в новом окне (с конца — индексы не съезжают).
+        for (let i = msgModel.count - 1; i >= 0; --i) {
+            if (newKeys[messageKey(msgModel.get(i))] === undefined) msgModel.remove(i)
+        }
+        // 2. Прямой проход: выровнять позиции вставкой/перемещением + set изменившихся.
+        let insertedNewest = false
+        for (let i = 0; i < n; ++i) {
+            const wk = messageKey(windowed[i])
+            if (i < msgModel.count && messageKey(msgModel.get(i)) === wk) {
+                if (_msgSig(msgModel.get(i)) !== _msgSig(windowed[i])) msgModel.set(i, windowed[i])
+                continue
+            }
+            let j = -1
+            for (let k = i + 1; k < msgModel.count; ++k) {
+                if (messageKey(msgModel.get(k)) === wk) { j = k; break }
+            }
+            if (j >= 0) {
+                msgModel.move(j, i, 1)
+                if (_msgSig(msgModel.get(i)) !== _msgSig(windowed[i])) msgModel.set(i, windowed[i])
+            } else {
+                msgModel.insert(i, windowed[i])
+                if (i === 0) insertedNewest = true
+            }
+        }
+        // 3. Подрезать хвост (страховка).
+        while (msgModel.count > n) msgModel.remove(msgModel.count - 1)
+
+        // Анимация появления — только для реально нового новейшего (index 0) на ЖИВОМ
+        // апдейте (не на первичном наполнении: prevCount === 0). Драйвер — ОДНА root-
+        // анимация _revealValue 0→1 для делегата с ключом _revealKey. Исходящие — пилюля,
+        // входящие — дешифровка текста (см. делегат).
+        if (insertedNewest && prevCount > 0 && Date.now() >= root._animSuppressUntil) {
+            // Dedup-страховка: commit оптимистичной отправки может из-за гонки poll/commit
+            // прийти как ОТДЕЛЬНАЯ вставка (если client_token не сматчился) → анимация
+            // перезапускалась бы («дважды»). Тот же текст+направление за <4с — не
+            // перезапускаем. (На устройстве реконсиляция по тексту в appendMessages делает
+            // commit обычным set() и сюда повторно не заходит.)
+            const m0  = msgModel.get(0)
+            const sig = (m0.isMe ? "1" : "0") + "" + String(m0.text || "")
+            const dup = (sig === root._lastAnimSig && (Date.now() - root._lastAnimAt) < 4000)
+            // ВСЕГДА переносим ключ на текущий новейший делегат — иначе при коммите
+            // оптимистичной (committed мог прийти ОТДЕЛЬНОЙ вставкой из-за гонки poll/commit
+            // → делегат пересоздаётся с НОВЫМ ключом) анимация обрывалась бы мгновенно
+            // (_delegateKey != _revealKey) → визуально «анимации нет».
+            root._revealKey = messageKey(windowed[0])
+            if (!dup) {
+                // Реально новое — запускаем; дубль (commit того же) — только перенос ключа
+                // выше, БЕЗ перезапуска драйвера (анимация продолжается, не играет дважды).
+                root._lastAnimSig = sig
+                root._lastAnimAt  = Date.now()
+                root._popNewest   = true
+                popResetTimer.restart()
+                // Исходящая пилюля — бодрее; входящая дешифровка — медленно/читаемо.
+                revealDriver.duration = m0.isMe
+                    ? 300
+                    : Math.max(420, Math.min(1800, Math.round(String(m0.text || "").length * 22)))
+                revealDriver.restart()
+            }
+        }
+        return true
+    }
+    property string _lastAnimSig: ""
+    property double _lastAnimAt: 0
+    // До этого момента (мс, Date.now) анимация появления подавлена — ставится при ВХОДЕ
+    // в диалог, чтобы пачка непрочитанных не ломала раскладку дешифровкой (см. wasEmpty).
+    property double _animSuppressUntil: 0
+
+    // Снимает флаг «всплытия» после старта add-transition, чтобы последующие вставки
+    // (пагинация старых, рендер при скролле) не анимировались.
+    Timer { id: popResetTimer; interval: 220; repeat: false; onTriggered: root._popNewest = false }
+
+    // «Принтерный» reveal нового пузыря: _revealValue 0→1 (доля раскрытого текста
+    // сверху-вниз). Делегат с ключом == _revealKey тянет по нему шторку.
+    property string _revealKey: ""
+    property real _revealValue: 1.0
+    NumberAnimation {
+        id: revealDriver
+        target: root; property: "_revealValue"
+        from: 0.0; to: 1.0; duration: 1650; easing.type: Easing.OutCubic
+    }
+    // Тик «мерцания» нерасшифрованных символов (каракули меняются), пока идёт reveal.
+    property int _scrambleTick: 0
+    Timer {
+        running: revealDriver.running
+        interval: 45; repeat: true
+        onTriggered: root._scrambleTick = (root._scrambleTick + 1) % 100000
+    }
+    // «Дешифровка»: первые p*len символов — настоящие, остальные — псевдослучайные глифы
+    // (меняются с tick). Пробелы/переводы строк сохраняем — держит форму строк. Сверху-вниз
+    // (=по порядку строки, текст так и течёт). Псевдо-ГСЧ по (i,tick) — без Math.random,
+    // плавно и детерминированно на кадр.
+    readonly property string _scrGlyphs: "ABCDEF0123456789#$%&*<>/\\|=+?АБВГДЕЖЗИКЛ▒▓░"
+    function decryptStr(real, p, tick) {
+        const n = real.length
+        if (n === 0) return ""
+        const reveal = Math.floor(p * n)
+        const g = root._scrGlyphs, gl = g.length
+        let out = ""
+        for (let i = 0; i < n; ++i) {
+            const c = real.charAt(i)
+            if (i < reveal || c === " " || c === "\n" || c === "\t" || c === "\r") { out += c; continue }
+            const r = ((i + 1) * 2654435761 + tick * 40503 + (i << 4)) >>> 0
+            out += g.charAt(r % gl)
+        }
+        return out
     }
 
     // Раскрыть ещё страницу старых сообщений (когда долистал до визуального верха).
@@ -771,8 +922,28 @@ Rectangle {
     // позиционирование стабильно, без зависимости от оценочной contentHeight и без
     // дрейфа (в отличие от positionViewAtEnd на не-инверт. ленте — корень #39).
     function pinToBottom() {
-        if (listView)
-            listView.positionViewAtBeginning()
+        if (!listView || msgModel.count === 0) return
+        // ВНИЗ к новейшему. Для сообщения ВЫШЕ вьюпорта positionViewAtIndex(0, End)
+        // клампится к ВЕРХУ (видна первая строка — жалоба Иванова), positionViewAtEnd()
+        // уходит к СТАРЕЙШЕМУ, а contentY из оценочного contentHeight сразу после вставки
+        // занижен (delegate ещё не учтён). Самое надёжное — РЕАЛЬНАЯ геометрия делегата
+        // index 0 (новейшее, всегда реализован у низа): ставим его НИЗ (item.y+height) к
+        // нижнему краю вьюпорта. Если ещё не реализован — fallback realize'ит, следующий
+        // пин (callLater/таймер) доведёт по факт. геометрии.
+        // Применить отложенные изменения модели → contentHeight учитывает фактическую
+        // высоту нового делегата (иначе оценка отстаёт: низ нового сообщения торчит ниже
+        // originY+contentHeight, и clampListContentY режет target).
+        listView.forceLayout()
+        const item = listView.itemAtIndex(0)
+        if (item) {
+            // Низ новейшего (item.y+height) к нижнему краю вьюпорта. Берём максимум с
+            // contentHeight-границей на случай, если оценка всё ещё чуть меньше факт. низа.
+            const target = item.y + item.height - listView.height
+            const maxY = Math.max(listView.originY + listView.contentHeight - listView.height, target)
+            listView.contentY = Math.max(listView.originY, Math.min(target, maxY))
+        } else {
+            listView.positionViewAtIndex(0, ListView.End)
+        }
     }
 
     // Явный «к низу» (вход, кнопка «вниз», отправка). Один pin + пара отложенных —
@@ -782,6 +953,27 @@ Rectangle {
         listView.stickToBottom = true
         root.pinToBottom()
         Qt.callLater(root.pinToBottom)
+        // Повторный пин на время ОСЕДАНИЯ раскладки: высота нового тяжёлого делегата
+        // считается не мгновенно, а оценочный contentHeight (через него clampListContentY
+        // ограничивает target) догоняет постепенно; плюс оптимистичная отправка через
+        // ~0.5–1с коммитится (set() → высота снова меняется). Одного пина мало — новое
+        // высокое сообщение оставалось «первой строкой». Тикаем ~1.2с (ограниченно, не
+        // петля #39), гард stickToBottom: юзер листнул вверх — прекращаем.
+        root._pinTicks = 0
+        bottomPinTimer.restart()
+    }
+
+    property int _pinTicks: 0
+    // Дотягивает вид к низу, пока оседают высоты делегатов (см. settleToBottom).
+    Timer {
+        id: bottomPinTimer
+        interval: 80
+        repeat: true
+        onTriggered: {
+            if (listView && listView.stickToBottom) root.pinToBottom()
+            root._pinTicks++
+            if (root._pinTicks >= 15 || !listView || !listView.stickToBottom) stop()
+        }
     }
 
     // «У новейшего» = визуальный низ инверт-ленты. КВИРК BottomToTop: index 0
@@ -850,7 +1042,14 @@ Rectangle {
             const wasEmpty = msgModel.count === 0
             // Свежий вход в диалог → окно на дефолт (последние N), без накопленного
             // _windowCount от прошлого открытия (пагинация #39).
-            if (wasEmpty) root._windowCount = root._windowDefault
+            if (wasEmpty) {
+                root._windowCount = root._windowDefault
+                // Подавляем анимацию появления на ~1.5с после ВХОДА в диалог: непрочитанные
+                // догружаются разом и, дешифруясь, ломали раскладку инверт-ленты (наложение
+                // пузырей). Они просто появляются; дешифровка остаётся для сообщений,
+                // пришедших в УЖЕ открытый диалог. (repro Иванова: вход с новыми → наложение.)
+                root._animSuppressUntil = Date.now() + 1500
+            }
             // Следовать низу на входе в диалог И на всех догрузках, пока юзер сам не
             // пролистнул вверх (тогда stickToBottom станет false на его жесте). Раньше
             // решение бралось по сиюминутному isListAtEnd(): первый pin не успевал
@@ -1113,7 +1312,7 @@ Rectangle {
                                 required property string modelData
                                 width: reactionsContainer.cellSize
                                 height: reactionsContainer.cellSize
-                                radius: Theme.radiusSm
+                                radius: height / 2          // круглые кнопки реакций
                                 color: reactionArea.containsMouse ? Theme.bgInput : Theme.bgSecondary
                                 border.width: 1
                                 border.color: Theme.border
@@ -1140,7 +1339,7 @@ Rectangle {
                         Rectangle {
                             width: reactionsContainer.cellSize
                             height: reactionsContainer.cellSize
-                            radius: Theme.radiusSm
+                            radius: height / 2          // круглая кнопка настройки реакций
                             color: editReactionArea.containsMouse ? Theme.bgInput : Theme.bgSecondary
                             border.width: 1
                             border.color: Theme.border
@@ -1855,7 +2054,7 @@ Rectangle {
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    radius: Theme.radiusMd
+                    radius: 20          // как у поля ввода сообщений (скруглённая пилюля)
                     color: Theme.bgInput
                     border.color: Theme.border
                     border.width: 1
@@ -2021,7 +2220,43 @@ Rectangle {
 
                 model: ListModel { id: msgModel }
 
+                // Пред-реализуем ~2 экрана соседних делегатов. У тяжёлых rich-text/код-
+                // сообщений высота нестабильна (минимальная до реализации, реальная после);
+                // больший cacheBuffer держит соседей уже измеренными → оценка contentHeight
+                // далеко от низа меньше «прыгает», уходит самопрокрутка на 1-2 сообщения.
+                cacheBuffer: Math.round(Math.max(height, 600) * 2)
+
                 ScrollBar.vertical: ScrollBar {}
+
+                // ── Анимации блоков ленты ────────────────────────────────────
+                // add: новейшее (index 0) «всплывает» облачком (scale 0→1 БЕЗ overshoot —
+                //   overshoot читался как двойной дёрг). Гейт root._popNewest → ТОЛЬКО на
+                //   реально новом снизу, не на пагинации/первичном наполнении/скролле.
+                //   scale — визуальный, на раскладку не влияет → пин к низу не ломает.
+                add: Transition {
+                    enabled: root._popNewest
+                    // Мягкое проявление пузыря (часто гасится пином/forceLayout — тогда
+                    // сообщение просто появляется; это ОК). Анимация отправки убрана.
+                    // Входящие — «дешифровка» текста (делегат).
+                    NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 180; easing.type: Easing.OutCubic }
+                }
+                // addDisplaced: МГНОВЕННО. Новое снизу толкает остальных вверх — если их
+                // смещение анимировать, при отправке вся лента дёргается, а пин к низу
+                // гонится за движущимся контентом и «не доезжает» (сообщение висело
+                // серединкой). Ставим на места сразу, вид доводит settleToBottom.
+                addDisplaced: Transition {
+                    NumberAnimation { properties: "x,y"; duration: 0 }
+                    NumberAnimation { properties: "scale,opacity"; to: 1.0; duration: 0 }
+                }
+                // removeDisplaced: плавный глайд соседей вверх при удалении (в т.ч.
+                // множественном) — вместо телепорта.
+                removeDisplaced: Transition {
+                    NumberAnimation { properties: "x,y"; duration: 180; easing.type: Easing.OutQuad }
+                    NumberAnimation { properties: "scale,opacity"; to: 1.0; duration: 120 }
+                }
+                remove: Transition {
+                    NumberAnimation { property: "opacity"; to: 0.0; duration: 110 }
+                }
 
                 // «Прилипание к новейшему»: стоим ли у визуального низа (index 0).
                 // В инверт-ленте дно анкерится само (index 0 у нижнего края), поэтому
@@ -2039,6 +2274,9 @@ Rectangle {
                 delegate: Item {
                     width: listView.width
                     height: bubble.implicitHeight + 8
+                    // Пилюля-втекание масштабируется от нижнего угла со стороны отправителя
+                    // (у исходящих — низ-право, ближе к полю ввода). См. add-transition.
+                    transformOrigin: (model.isMe === true) ? Item.BottomRight : Item.BottomLeft
 
                     readonly property int delegateIndex: index
                     readonly property bool isSearchMatch: root.searchActive && root.searchMatchIndices.indexOf(delegateIndex) >= 0
@@ -2046,6 +2284,12 @@ Rectangle {
                                                            && root.searchCurrentIndex >= 0
                                                            && root.searchMatchIndices[root.searchCurrentIndex] === delegateIndex
                     readonly property bool isMe: model.isMe === true
+                    // Анимация появления (один root-драйвер root._revealValue 0→1, для
+                    // делегата с ключом == root._revealKey). Исходящие — пилюля втекает
+                    // (scale+проявление), входящие — принтер (шторка вниз раскрывает текст).
+                    readonly property string _delegateKey: root.messageKey(model)
+                    readonly property bool _animating: _delegateKey.length > 0 && _delegateKey === root._revealKey && root._revealValue < 1.0
+                    readonly property real _rv: _animating ? root._revealValue : 1.0
                     readonly property string mimeType: model.mime_type || ""
                     readonly property bool isImage: root.isImageMessage(model.kind, mimeType)
                     readonly property bool isPhotoGroup: model.kind === "photo_group"
@@ -2056,6 +2300,19 @@ Rectangle {
                     readonly property bool hasAttachment: model.kind === "file" || model.kind === "image" || model.kind === "voice" || isImage
                     readonly property bool showMessageText: !hasAttachment && !isPhotoGroup && (model.text || "").length > 0
                     readonly property bool showFileCard: hasAttachment && !isImage
+                    // «Простыня»: текст занимает больше ~10 строк на экране (высота уже
+                    // посчитана с учётом переноса при текущей ширине пузыря) → показываем
+                    // кнопку-уголки для чтения на весь экран.
+                    readonly property real _msgLineH: Math.round(Theme.fontMd * 1.3)
+                    readonly property bool isLongText: showMessageText && msgText.visible
+                                                       && msgText.implicitHeight > _msgLineH * 10
+                    // Ограничение высоты ОЧЕНЬ длинных пузырей inline (~18 строк). Делает
+                    // высоты делегатов ОГРАНИЧЕННЫМИ → оценка contentHeight в ListView
+                    // перестаёт «прыгать» при скролле тяжёлых сообщений (корень телепорта).
+                    // Полный текст — по кнопке-уголкам в полноэкранном ридере (уже есть).
+                    readonly property real _maxInlineH: _msgLineH * 18
+                    readonly property bool _clampText: showMessageText && msgText.visible
+                                                       && msgText.implicitHeight > _maxInlineH
                     readonly property string attachmentName: root.fileNameFor(model)
                     readonly property string previewSource: model.preview_source || ""
                     readonly property bool hasReply: (model.reply_to_id || "").length > 0
@@ -2238,18 +2495,43 @@ Rectangle {
                                       listView.width * 0.72)
                     implicitHeight: (isMe ? 0 : senderLabel.implicitHeight + 2)
                                   + (hasReply ? messageReplyPreview.implicitHeight + 6 : 0)
-                                  + (showMessageText ? msgText.implicitHeight : 0)
+                                  + (showMessageText ? (_clampText ? _maxInlineH : msgText.implicitHeight) : 0)
                                   + (isImage ? imagePreview.implicitHeight + 6 : 0)
                                   + (isPhotoGroup ? photoMosaic.implicitHeight + 6 : 0)
                                   + (showFileCard ? fileCard.implicitHeight + 6 : 0)
                                   + (hasReactions ? reactionsFlow.implicitHeight + 6 : 0)
                                   + metaRow.implicitHeight + 16
-                    radius: Theme.radiusMd
+                    // Скруглённый пузырь-«облачко»: углы крупные, но нижний угол со
+                    // СТОРОНЫ отправителя почти острый — «хвостик» (как у speech bubble).
+                    // Per-corner radius — Qt 6.7+. (Анимация втекания — scale делегата в
+                    // add-transition; _rv-морф пузыря убран как ненадёжный при пине.)
+                    radius: 18
+                    bottomRightRadius: isMe ? 2 : 18
+                    bottomLeftRadius:  isMe ? 18 : 2
                     color: isMe ? Theme.bgButton : Theme.bgSecondary
                     border.width: isSearchMatch ? (isSearchCurrent ? 3 : 2) : 1
                     border.color: isSearchMatch
                                   ? (isSearchCurrent ? Theme.accent : Theme.accentHover)
                                   : (isMe ? Theme.accentDim : Theme.border)
+
+                    // ВХОДЯЩИЕ: «принтер» — шторка цвета пузыря закрывает текст и уезжает
+                    // ВНИЗ (height: full→0) → текст проявляется сверху-вниз, как печать.
+                    // Верх шторки прямой (radius 0) — ровная строка печати.
+                    Rectangle {
+                        id: printerShade
+                        // Текстовые входящие расшифровываются scramble-оверлеем (ниже);
+                        // шторка остаётся для НЕтекстовых (вложения/фото).
+                        visible: !isMe && _animating && !showMessageText
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: parent.height * (1.0 - _rv)
+                        color: parent.color
+                        radius: 0
+                        bottomLeftRadius: parent.bottomLeftRadius
+                        bottomRightRadius: parent.bottomRightRadius
+                        z: 40
+                    }
 
                     MouseArea {
                         anchors.fill: parent
@@ -2329,8 +2611,51 @@ Rectangle {
                         raw: showMessageText ? model.text : ""
                         outgoing: isMe
                         textColor: isMe ? Theme.messageTextOutgoing : Theme.textPrimary
+                        // Очень длинный текст обрезаем по высоте (clip) → читать целиком в
+                        // полноэкранном ридере (кнопка-уголки). Стабилизирует высоты делегатов.
+                        height: _clampText ? _maxInlineH : implicitHeight
+                        clip: _clampText
+                        // На время «дешифровки» (входящий текст) прячем настоящий текст —
+                        // поверх рисуется scramble-оверлей. Раскладку держим (opacity, не visible).
+                        opacity: (!isMe && _animating) ? 0 : 1
                         onLinkActivated: function(url) { Qt.openUrlExternally(url) }
                         onCopyRequested: function(t) { root.copyMessageText(t) }
+                    }
+
+                    // ВХОДЯЩИЕ (текст): «дешифровка» — каракули осыпаются в настоящий текст
+                    // сверху-вниз (см. root.decryptStr / root._scrambleTick). Плоский Text,
+                    // тот же шрифт/ширина/перенос, что у msgText → форма строк совпадает.
+                    Text {
+                        visible: !isMe && _animating && showMessageText
+                        anchors.left: msgText.left
+                        anchors.right: msgText.right
+                        anchors.top: msgText.top
+                        height: msgText.height
+                        // Всегда клипуем: скрамбл-глифы могут переноситься на БОЛЬШЕ строк,
+                        // чем реальный текст → без клипа оверлей вылезал за пузырь на соседние
+                        // сообщения (наложение). Клип держит его в границах реального текста.
+                        clip: true
+                        text: root.decryptStr(model.text || "", _rv, root._scrambleTick)
+                        color: Theme.textPrimary
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.fontMd
+                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                        textFormat: Text.PlainText
+                    }
+
+                    // Затухание у низа обрезанного текста — намёк «есть продолжение»
+                    // (полный текст по кнопке-уголкам). Только когда текст реально обрезан.
+                    Rectangle {
+                        visible: _clampText
+                        anchors.left: msgText.left
+                        anchors.right: msgText.right
+                        anchors.top: msgText.bottom
+                        anchors.topMargin: -28
+                        height: 28
+                        gradient: Gradient {
+                            GradientStop { position: 0.0; color: "transparent" }
+                            GradientStop { position: 1.0; color: isMe ? Theme.bgButton : Theme.bgSecondary }
+                        }
                     }
 
                     PhotoMosaic {
@@ -2588,11 +2913,77 @@ Rectangle {
                             font.pixelSize: Theme.fontXs
                             font.family: Theme.fontFamily
                         }
-                        DeliveryStatusIcon {
+                        // Упавшая отправка: КРУПНАЯ кликабельная иконка-ретрай (надёжный
+                        // SVG-AppIcon, не Canvas — Canvas-✕ не рисовался на Android). Тап
+                        // перехватывает событие ДО MouseArea пузыря (иначе всплывало
+                        // контекст-меню), большая зона захвата (−12) — попасть пальцем.
+                        Item {
                             anchors.verticalCenter: parent.verticalCenter
-                            visible: isMe
+                            width: 22; height: 22
+                            visible: isMe && model.status === "failed"
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 17; height: 17
+                                name: "refresh"
+                                iconColor: Theme.error
+                                strokeWidth: 2.2
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -12
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: function(mouse) {
+                                    mouse.accepted = true
+                                    if ((model.client_token || "").length > 0) Chat.retrySend(model.client_token)
+                                }
+                            }
+                        }
+                        DeliveryStatusIcon {
+                            id: deliveryIcon
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: isMe && model.status !== "failed"
                             status: model.status
                             iconColor: root.deliveryStatusColor(model.status)
+                        }
+                    }
+
+                    // Кнопка-уголки «читать на весь экран» — в углу пузыря напротив
+                    // имени автора (верх-право). Только для длинных сообщений и вне
+                    // режима выделения.
+                    Rectangle {
+                        id: expandBtn
+                        visible: isLongText && !root.selectionMode
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.topMargin: 6
+                        anchors.rightMargin: 6
+                        width: 26
+                        height: 26
+                        radius: Theme.radiusSm
+                        z: 5
+                        opacity: expandArea.containsMouse ? 1.0 : 0.85
+                        color: expandArea.containsMouse ? Theme.bgCard
+                                                        : (isMe ? Theme.bgButton : Theme.bgSecondary)
+                        border.width: 1
+                        border.color: Theme.border
+
+                        AppIcon {
+                            anchors.centerIn: parent
+                            width: 15
+                            height: 15
+                            name: "expand"
+                            iconColor: isMe ? Theme.messageTextOutgoing : Theme.textSecondary
+                            strokeWidth: 1.8
+                        }
+
+                        MouseArea {
+                            id: expandArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: root.openTextViewer(model.text,
+                                                           isMe ? "" : root.displayName,
+                                                           isMe,
+                                                           root.formatTime(model.ts))
                         }
                     }
                 }
@@ -2894,8 +3285,8 @@ Rectangle {
             // Высоту бара считаем по КАПНУТОЙ высоте текста (как у msgInputScroll, 124),
             // а не по сырой implicitHeight — иначе при >~6 строк текст-вьюха стоит на
             // 124, а бар рос до 200, давая растущие отступы вокруг текста (#38).
-            Layout.preferredHeight: Math.max(Math.min(msgInput.implicitHeight, 124) + 32 + (root.hasPendingReply ? 58 : 0),
-                                             root.hasPendingReply ? 118 : 60)
+            Layout.preferredHeight: Math.max(Math.min(msgInput.implicitHeight, 124) + 16 + (root.hasPendingReply ? 58 : 0),
+                                             root.hasPendingReply ? 106 : 48)
             color: Theme.bgDark
 
             Rectangle {
@@ -2907,10 +3298,10 @@ Rectangle {
             ColumnLayout {
                 id: inputContent
                 anchors.fill: parent
-                anchors.leftMargin: 8
-                anchors.rightMargin: 8
-                anchors.topMargin: 8
-                anchors.bottomMargin: 8
+                anchors.leftMargin: 6
+                anchors.rightMargin: 2
+                anchors.topMargin: 4
+                anchors.bottomMargin: 4
                 spacing: 6
 
                 ReplyPreview {
@@ -2945,7 +3336,7 @@ Rectangle {
                         ScrollBar.vertical.policy: ScrollBar.AsNeeded
 
                         background: Rectangle {
-                            radius: Theme.radiusMd
+                            radius: 20          // почти круглая пилюля — в тон круглой кнопке отправки
                             color: Theme.bgInput
                             border.color: Theme.border
                             border.width: 1
@@ -2969,8 +3360,10 @@ Rectangle {
                             bottomPadding: 8
                             // Слева внутри — «+», справа — смайлик и отправка (#45):
                             // оставляем под них поле, чтобы текст не залезал под кнопки.
-                            leftPadding: 44
-                            rightPadding: 80
+                            // Зазоры урезаны под край кнопок: «+» теперь 26px (край x≈30),
+                            // смайлик слева ≈ w−62 — текст почти впритык, минимум потерь.
+                            leftPadding: 28
+                            rightPadding: 60
 
                             background: null
                             onTextChanged: {
@@ -3122,10 +3515,10 @@ Rectangle {
                             id: attachBtn
                             anchors.left: parent.left
                             anchors.bottom: parent.bottom
-                            anchors.leftMargin: 5
-                            anchors.bottomMargin: 5
-                            width: 32; height: 32
-                            radius: Theme.radiusSm
+                            anchors.leftMargin: 4
+                            anchors.bottomMargin: 7
+                            width: 26; height: 26
+                            radius: width / 2
                             color: attachArea.containsMouse ? Theme.bgCard : "transparent"
                             AppIcon {
                                 anchors.centerIn: parent
@@ -3155,10 +3548,10 @@ Rectangle {
                                                                || (msgInput.preeditText && msgInput.preeditText.trim().length > 0)
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
-                            anchors.rightMargin: 5
-                            anchors.bottomMargin: 5
-                            width: 32; height: 32
-                            radius: Theme.radiusSm
+                            anchors.rightMargin: 4
+                            anchors.bottomMargin: 6
+                            width: 28; height: 28
+                            radius: width / 2
                             color: root.sendLocked || !hasContent ? Theme.accentDim : (sendArea.containsMouse ? Theme.accentHover : Theme.accent)
                             AppIcon {
                                 anchors.fill: parent
@@ -3180,14 +3573,14 @@ Rectangle {
                         Rectangle {
                             anchors.right: sendBtnVisual.left
                             anchors.bottom: parent.bottom
-                            anchors.rightMargin: 4
+                            anchors.rightMargin: 2
                             anchors.bottomMargin: 7
-                            width: 28; height: 28
-                            radius: Theme.radiusSm
+                            width: 26; height: 26
+                            radius: width / 2
                             color: emojiArea.containsMouse ? Theme.bgCard : "transparent"
                             AppIcon {
                                 anchors.centerIn: parent
-                                width: 20; height: 20
+                                width: 24; height: 24
                                 name: root.emojiPanelOpen
                                       ? (root.isMobileOs ? "keyboard" : "chevronDown")
                                       : "smile"
@@ -3274,6 +3667,17 @@ Rectangle {
             root.openSaveDialog(messageId, filename)
         }
     }
+
+    // Полноэкранное чтение длинного текста (открывается из пузыря, см. openTextViewer).
+    TextMessageViewer {
+        id: textViewer
+        anchors.fill: parent
+        onCopyRequested: function(t) { root.copyMessageText(t) }
+    }
+
+    // (Анимация отправки исходящего убрана по просьбе Иванова — сообщение просто
+    //  появляется. Внутри-ленточные анимации гасил пин/forceLayout, overlay-вариант
+    //  не зашёл. Входящая «дешифровка» текста остаётся.)
 
     // (Эмодзи для поля ввода — теперь inline EmojiPanel внизу, см. #42; старый
     //  popup-пикер удалён. Для настройки реакций — отдельный EmojiPicker ниже.)

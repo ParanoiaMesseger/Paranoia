@@ -262,6 +262,7 @@ pub extern "C" fn paranoia_check_reserve_url(url: *const c_char) -> *mut c_char 
             partner: "availability-check".to_string(),
             seq: 0,
             sig: vec![0u8; 64],
+            long_poll_ms: 0,
         };
 
         let json = match rt.block_on(transport.probe(&core)) {
@@ -1253,6 +1254,47 @@ pub extern "C" fn paranoia_notify_count_keyring(
             keyring_json,
             -1,
             |h, dialogue| match h.rt.block_on(dialogue.notify_count()) {
+                Ok(count) => {
+                    unsafe { *out_count = count };
+                    0
+                }
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "notify_error",
+                    ));
+                    -1
+                }
+            },
+        )
+    })
+}
+
+/// Как [`paranoia_notify_count_keyring`], но с long-poll: сервер ДЕРЖИТ запрос до
+/// нового сообщения или `long_poll_ms` (капается серверным потолком). `0` —
+/// идентично короткому notify_count. Для foreground near-real-time приёма в
+/// открытом чате (вызывать на ВОРКЕРЕ — блокирует до удержания сервера).
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_notify_count_wait_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    long_poll_ms: u32,
+    out_count: *mut u64,
+) -> i32 {
+    ffi_catch_i32("notify_error", || {
+        clear_last_error();
+        if out_count.is_null() {
+            return invalid_argument_i32();
+        }
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            -1,
+            |h, dialogue| match h.rt.block_on(dialogue.notify_count_wait(long_poll_ms)) {
                 Ok(count) => {
                     unsafe { *out_count = count };
                     0
@@ -2875,6 +2917,7 @@ pub extern "C" fn paranoia_service_notify_count(
             partner,
             seq,
             sig,
+            long_poll_ms: 0, // TODO(long-poll 2b): параметризовать для Android-цикла
         };
 
         match rt.block_on(transport.notify(&core)) {

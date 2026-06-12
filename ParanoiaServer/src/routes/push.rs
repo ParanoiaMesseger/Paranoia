@@ -76,7 +76,12 @@ async fn do_push(state: &Arc<AppState>, req: PushRequest) -> ApiResponse {
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
     match state.store.push(&dialogue_id, req.seq, &payload_bytes) {
-        Ok(_) => ok("OK".into()),
+        Ok(_) => {
+            // Разбудить long-poll `/notify`, ждущих этот диалог (если такие есть).
+            // По dialogue_id будятся обе стороны — каждая пересчитает свои новые.
+            state.dialogue_notify.notify(&dialogue_id).await;
+            ok("OK".into())
+        }
         Err(e) => fail(format!("{e}")),
     }
 }

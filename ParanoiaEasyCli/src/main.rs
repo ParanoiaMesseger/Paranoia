@@ -23,7 +23,7 @@ mod dialogue_store;
 use dialogue_store::{
     MergeOutcome, ProfileDialogueStore, base64_entry_to_key, key_entry_from_base64,
     key_entry_from_hex, load_dialogue_store, merge_profile_keyring_entry, profile_id,
-    profile_keyring_entries, save_dialogue_store, set_dialogue_key,
+    profile_keyring_entries, resolve_peer_id, save_dialogue_store, set_dialogue_key,
 };
 
 const ADMIN_SECRETS: &str = "./ADMIN_SECRETS";
@@ -40,6 +40,11 @@ struct DeviceKeyFile {
 }
 
 fn read_pin() -> Result<String> {
+    // Неинтерактивно через env (как init_vault_for_cli) — нужно MCP-серверу и
+    // скриптам (нет tty). Иначе спрашиваем у пользователя.
+    if let Ok(pin) = std::env::var("PARANOIA_CLI_PIN") {
+        return Ok(pin);
+    }
     eprint!("Enter PIN: ");
     let pin = read_password().context("failed to read PIN")?;
     Ok(pin)
@@ -279,6 +284,10 @@ fn build_dialogue(
     peer: &str,
 ) -> Result<Dialogue> {
     let store = load_dialogue_store()?;
+    // Разрешаем peer по имени → server_id (ключ диалога — server_id, НЕ имя; иначе
+    // DialogueKey даст другой dialogue_id). Если peer уже server_id — без изменений.
+    let peer_owned = resolve_peer_id(&store, server_url, username, peer);
+    let peer = peer_owned.as_str();
     let dkey = DialogueKey::new(username, peer);
     let dcfg = if let Some(entries) = profile_keyring_entries(&store, server_url, username, peer) {
         let keyring = entries
@@ -324,25 +333,132 @@ async fn cmd_receive(
     username: &str,
     db_path: &str,
     peer: &str,
+    long_poll_ms: u32,
 ) -> Result<()> {
     let client = build_client(server_url, reserve_server_urls, username, db_path)?;
     let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    // Long-poll: сервер держит /notify до появления нового сообщения или таймаута.
+    // Best-effort — при ошибке (старый сервер/обрыв CDN) просто идём на обычный pull
+    // (это и есть авто-деградация на короткий поллинг). Возврат игнорируем: о наличии
+    // нового судит сам receive() ниже.
+    if long_poll_ms > 0 {
+        let _ = dialogue.notify_count_wait(long_poll_ms).await;
+    }
     let (msgs, decrypt_errors) = dialogue.receive().await?;
     if decrypt_errors > 0 {
         eprintln!(
             "Warning: {decrypt_errors} message(s) could not be decrypted (wrong session key?)"
         );
     }
+    // Формат строки СТРОГО `[ts] id=<id> <sender>: <text>` — его парсит MCP-сервер
+    // (paranoia_mcp.py MSG_RE). НЕ менять без синхронной правки regex.
     for m in msgs {
         match &m.content {
             MessageContent::Text(t) => {
-                println!("[{}] {}: {}", m.timestamp, m.sender, t);
+                println!("[{}] id={} {}: {}", m.timestamp, m.id, m.sender, t);
             }
             other => {
-                println!("[{}] {}: {:?}", m.timestamp, m.sender, other);
+                println!("[{}] id={} {}: {:?}", m.timestamp, m.id, m.sender, other);
             }
         }
     }
+    Ok(())
+}
+
+fn guess_mime(path: &str) -> String {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// Непрерывный приём: цикл receive. long_poll_ms>0 → сервер держит запрос
+/// (near-real-time); =0 → пауза interval сек между опросами.
+async fn cmd_watch(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+    interval: u64,
+    long_poll_ms: u32,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    loop {
+        if long_poll_ms > 0 {
+            // best-effort: при ошибке (обрыв/CDN режет) идём на обычный pull.
+            let _ = dialogue.notify_count_wait(long_poll_ms).await;
+        }
+        let (msgs, decrypt_errors) = dialogue.receive().await?;
+        if decrypt_errors > 0 {
+            eprintln!("Warning: {decrypt_errors} message(s) could not be decrypted");
+        }
+        for m in msgs {
+            match &m.content {
+                MessageContent::Text(t) => {
+                    println!("[{}] id={} {}: {}", m.timestamp, m.id, m.sender, t);
+                }
+                other => {
+                    println!("[{}] id={} {}: {:?}", m.timestamp, m.id, m.sender, other);
+                }
+            }
+        }
+        if long_poll_ms == 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
+        }
+    }
+}
+
+async fn cmd_send_file(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment.bin")
+        .to_string();
+    let mime = guess_mime(&filename);
+    let msgs = dialogue
+        .send_file_auto_with_progress(filename.clone(), mime, path, |_, _| {})
+        .await?;
+    let id = msgs
+        .first()
+        .map(|m| m.id.to_string())
+        .unwrap_or_default();
+    println!("Sent file: id={id} name={filename} parts={}", msgs.len());
+    Ok(())
+}
+
+async fn cmd_download(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+    message_id: &str,
+    out: &std::path::Path,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let out_str = out.to_str().context("invalid out path")?;
+    dialogue.download_attachment(message_id, out_str).await?;
+    println!("Downloaded: id={message_id} -> {out_str}");
     Ok(())
 }
 
@@ -542,6 +658,7 @@ fn profile_for_import<'a>(
             signing_key_b64: String::new(),
             signing_key_ct_b64: String::new(),
             dialogues: Default::default(),
+            names: Default::default(),
         });
     (profile, !existed)
 }
@@ -723,6 +840,45 @@ enum Commands {
         username: String,
         #[arg(long)]
         peer: String,
+        /// Long-poll: подождать появления нового сообщения до N мс (сервер держит
+        /// запрос), потом вытянуть. `0` (по умолч.) — мгновенно (короткий поллинг).
+        /// Сервер капает величину своим notify_long_poll_max_ms.
+        #[arg(long, default_value_t = 0)]
+        long_poll_ms: u32,
+    },
+    /// Непрерывное получение: цикл receive. С --long-poll-ms сервер держит запрос
+    /// (near-real-time); иначе пауза --interval между опросами (короткий поллинг).
+    Watch {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+        /// Пауза между опросами в режиме короткого поллинга, сек.
+        #[arg(long, default_value_t = 20)]
+        interval: u64,
+        /// Удержание long-poll, мс (0 = короткий поллинг с паузой --interval).
+        #[arg(long, default_value_t = 25000)]
+        long_poll_ms: u32,
+    },
+    /// Отправить файл/картинку (канал авто-выбирается по размеру).
+    SendFile {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Скачать вложение полученного сообщения по message-id в файл.
+    Download {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        message_id: String,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Очистка истории на сервере
     Clear {
@@ -871,13 +1027,67 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Receive { username, peer } => {
+        Commands::Receive {
+            username,
+            peer,
+            long_poll_ms,
+        } => {
             cmd_receive(
                 &cli.server_url,
                 &cli.reserve_server_urls,
                 &username,
                 &cli.db_path,
                 &peer,
+                long_poll_ms,
+            )
+            .await?;
+        }
+        Commands::Watch {
+            username,
+            peer,
+            interval,
+            long_poll_ms,
+        } => {
+            cmd_watch(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+                interval,
+                long_poll_ms,
+            )
+            .await?;
+        }
+        Commands::SendFile {
+            username,
+            peer,
+            path,
+        } => {
+            cmd_send_file(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+                &path,
+            )
+            .await?;
+        }
+        Commands::Download {
+            username,
+            peer,
+            message_id,
+            out,
+        } => {
+            cmd_download(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+                &message_id,
+                &out,
             )
             .await?;
         }

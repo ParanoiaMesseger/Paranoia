@@ -281,12 +281,15 @@ impl Cover for FoodDeliveryCover {
             .as_str()
             .ok_or_else(|| anyhow!("no auth"))?
             .to_string();
+        // Опционально (старые клиенты не шлют) — желаемое удержание long-poll.
+        let long_poll_ms = body["waitMs"].as_u64().unwrap_or(0) as u32;
 
         Ok(NotifyRequest {
             sender,
             partner,
             seq,
             sig,
+            long_poll_ms,
         })
     }
 

@@ -45,6 +45,10 @@ pub struct NotifyCore {
     pub partner: String,
     pub seq: u64,
     pub sig: String,
+    /// Желаемое удержание long-poll (мс); `0`/отсутствует — короткий поллинг.
+    /// Внутри AEAD-конверта cover'а; в подпись `/notify` НЕ входит (см. notify.rs).
+    #[serde(default)]
+    pub long_poll_ms: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

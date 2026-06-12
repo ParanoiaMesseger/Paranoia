@@ -118,6 +118,11 @@ public:
     int notify_count_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_count)
     { return ::paranoia_notify_count_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_count); }
 
+    // long-poll: сервер держит запрос до нового сообщения или long_poll_ms (0 = короткий опрос).
+    // Блокирует — вызывать на воркере.
+    int notify_count_wait_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, quint32 long_poll_ms, uint64_t &out_count)
+    { return ::paranoia_notify_count_wait_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), long_poll_ms, &out_count); }
+
     int notify_unread_count_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_count)
     { return ::paranoia_notify_unread_count_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_count); }
 

@@ -66,6 +66,13 @@ pub struct Config {
     /// (секунды). По истечении reaper физически удаляет блобы. По умолчанию 24 ч.
     #[serde(default = "default_ephemeral_retention_secs")]
     pub ephemeral_retention_secs: u64,
+    /// Потолок удержания long-poll `/notify` (мс). Клиент просит `long_poll_ms`,
+    /// сервер держит запрос до `min(long_poll_ms, этот потолок)` или появления
+    /// нового сообщения. `0` ВЫКЛЮЧАЕТ long-poll на сервере (всегда мгновенный
+    /// ответ — режим короткого поллинга, для CDN/прокси, режущих долгие запросы).
+    /// По умолчанию 25000 (< клиентского REQUEST_TIMEOUT 60с с запасом на прокси).
+    #[serde(default = "default_notify_long_poll_max_ms")]
+    pub notify_long_poll_max_ms: u32,
 }
 
 fn default_stun_bind() -> Option<String> {
@@ -82,6 +89,10 @@ fn default_large_file_max() -> u64 {
 
 fn default_ephemeral_retention_secs() -> u64 {
     24 * 60 * 60
+}
+
+fn default_notify_long_poll_max_ms() -> u32 {
+    25_000
 }
 
 impl Config {
@@ -155,6 +166,7 @@ impl Default for Config {
             max_history_file_size: default_max_history_file_size(),
             large_file_max: default_large_file_max(),
             ephemeral_retention_secs: default_ephemeral_retention_secs(),
+            notify_long_poll_max_ms: default_notify_long_poll_max_ms(),
         }
     }
 }
