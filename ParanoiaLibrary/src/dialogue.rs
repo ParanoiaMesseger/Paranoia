@@ -582,6 +582,29 @@ impl Dialogue {
             partner: partner.to_string(),
             seq,
             sig,
+            long_poll_ms: 0,
+        };
+
+        self.transport.notify(&core_notify).await
+    }
+
+    /// Как [`notify_count`], но с long-poll: сервер держит запрос до появления
+    /// нового сообщения или `long_poll_ms` (капается серверным потолком). `0` —
+    /// идентично короткому `notify_count`. Возвращает кол-во новых после seq.
+    /// Подпись та же (sender+partner+seq) — long_poll_ms в неё не входит.
+    pub async fn notify_count_wait(&self, long_poll_ms: u32) -> Result<u64> {
+        let username = &self.client_cfg.username;
+        let partner = self.partner();
+        let seq = self.store.get_last_pulled_seq(&self.key)?;
+
+        let msg = format!("{username}{partner}{seq}");
+        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
+        let core_notify = CoreNotify {
+            sender: username.clone(),
+            partner: partner.to_string(),
+            seq,
+            sig,
+            long_poll_ms,
         };
 
         self.transport.notify(&core_notify).await
@@ -607,6 +630,7 @@ impl Dialogue {
             partner: partner.to_string(),
             seq,
             sig,
+            long_poll_ms: 0,
         };
         self.transport.notify(&core_notify).await
     }

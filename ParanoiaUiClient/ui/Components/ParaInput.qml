@@ -55,7 +55,7 @@ Column {
     Rectangle {
         width: parent.width
         height: root.lineCount <= 1 ? 44 : root.lineCount * 22 + 16
-        radius: Theme.radiusMd
+        radius: 20          // как у поля ввода сообщений (скруглённая пилюля)
         color: Theme.bgInput
         border.color: root.hasError ? Theme.error : root._anyFocus ? Theme.accent : Theme.border
         border.width: 1
@@ -65,10 +65,15 @@ Column {
         }
 
         Rectangle {
+            // Утоплен от левого края на радиус скругления, чтобы не торчать за
+            // скруглённый угол пилюли; концы скруглены.
             anchors.left: parent.left
+            anchors.leftMargin: 20
             anchors.top: parent.top
+            anchors.topMargin: 1
             width: root._anyFocus ? parent.width * .42 : 24
             height: 2
+            radius: 1
             color: root.hasError ? Theme.error : Theme.accent
             opacity: root.hasError || root._anyFocus ? 1 : .35
             Behavior on width {

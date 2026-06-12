@@ -99,6 +99,7 @@ impl Cover for SchemaCover {
             partner: c.partner,
             seq: c.seq,
             sig: c.sig,
+            long_poll_ms: c.long_poll_ms,
         })
     }
 

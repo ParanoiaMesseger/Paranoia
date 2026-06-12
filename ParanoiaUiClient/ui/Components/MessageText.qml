@@ -18,6 +18,9 @@ Item {
     property string raw: ""
     property bool outgoing: false
     property color textColor: Theme.textPrimary
+    // Множитель шрифта обычного текста (1.0 = как в ленте). >1 — зум в полноэкранном
+    // чтении ([[TextMessageViewer]]). Эмодзи (_emojiScale) и код (моно) не трогаем.
+    property real fontScale: 1.0
 
     signal linkActivated(string url)   // настоящие ссылки
     signal copyRequested(string text)  // клик по inline/блоку кода
@@ -70,6 +73,11 @@ Item {
     function _esc(s) {
         return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     }
+    // Цвет QML → 6-значный #rrggbb (Qt CSS не парсит 8-значный #aarrggbb из toString).
+    function _hex6(c) {
+        function h(v) { var s = Math.round(v * 255).toString(16); return s.length < 2 ? "0" + s : s }
+        return "#" + h(c.r) + h(c.g) + h(c.b)
+    }
     function _hasInline(s) { return /`[^`\n]+`/.test(s || "") }
 
     // Нужен ли сегменту дорогой RichText (QTextDocument + HTML-раскладка), или
@@ -81,6 +89,8 @@ Item {
     function _segNeedsRich(s) {
         s = s || ""
         if (_hasInline(s)) return true
+        if (/(^|\n)#{1,6}[ \t]+\S/.test(s)) return true   // Markdown-заголовок → RichText
+        if (/(^|\n)[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*(?=\n|$)/.test(s)) return true  // разделитель
         if (/https?:\/\/\S/.test(s)) return true   // голый URL → автолинк (RichText)
         if (/\*\*[^*]+\*\*|__[^_]+__|(^|[^*])\*[^*\n]+\*|~~[^~]+~~|\[[^\]]+\]\([^)\s]+\)|!\[[^\]]*\]\([^)]+\)/.test(s))
             return true
@@ -149,6 +159,28 @@ Item {
         text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, function(m, alt) {
             return alt && alt.length > 0 ? "[" + alt + "]" : "[image]"
         })
+        // Markdown-заголовки в начале строки (#..###### + пробел) → крупный жирный.
+        // Размер задаём в ПИКСЕЛЯХ: Qt RichText игнорирует font-size в % и em
+        // (проверено), работают только px/pt. База = текущий размер шрифта тела
+        // (Theme.fontMd × fontScale), множитель по уровню (h1 ×1.5 … h6 ×1.06).
+        // Подчёркивание (setext `===`/`---`, `__`) НЕ поддерживаем намеренно — его
+        // нет в стандартном Markdown. Внутренняя разметка строки (**жирный**/*курсив*/
+        // ссылки/инлайн-код) обрабатывается ниже и применяется внутри span. Ведущий
+        // перенос (^|\n) сохраняем — он станет <br> в конце.
+        text = text.replace(/(^|\n)(#{1,6})[ \t]+([^\n]*\S)/g, function(m, pre, hashes, content) {
+            const base = Theme.fontMd * body.fontScale
+            const mult = [1.5, 1.38, 1.28, 1.2, 1.12, 1.06][hashes.length - 1]
+            const px = Math.round(base * mult)
+            return pre + '<span style="font-size:' + px + 'px"><b>' + content + '</b></span>'
+        })
+        // Горизонтальный разделитель: строка из 3+ одинаковых -, * или _ (CommonMark
+        // thematic break) → тонкая линия. Делаем ДО жирного/курсива, чтобы *** и ___
+        // не цеплялись их регэкспами. ⚠️ Цвет — 6-значный hex: Theme.border как строка
+        // даёт #aarrggbb (8 знаков), а Qt CSS background-color его НЕ парсит → при
+        // border:none линия невидима. Берём последние 6 символов (rrggbb).
+        text = text.replace(/(?:^|\n)[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*(?=\n|$)/g, function() {
+            return '<hr style="height:1px;background-color:' + body._hex6(Theme.border) + ';border:0">'
+        })
         // Цвет ссылки тоже задаём явно (linkColor в Qt 6.10 игнорируется, иначе
         // дефолтный синий): акцентный цвет темы.
         text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
@@ -171,6 +203,9 @@ Item {
         text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>")
         text = text.replace(/~~([^~]+)~~/g, "<s>$1</s>")
         text = text.replace(/\n/g, "<br>")
+        // Убираем лишние переносы вплотную к разделителю (у <hr> уже есть свой отступ) —
+        // иначе вокруг линии зияет 2-3 пустых строки.
+        text = text.replace(/(?:<br\s*\/?>\s*)*(<hr[^>]*>)(?:\s*<br\s*\/?>)*/g, "$1")
         if (_emojiScale === 1 && _emojiRe) {
             _emojiRe.lastIndex = 0
             text = text.replace(_emojiRe, '<span style="font-size:115%">$&</span>')
@@ -228,7 +263,8 @@ Item {
         wrapMode: Text.NoWrap
         font.family: Theme.fontFamily
         font.pixelSize: body._emojiScale > 1
-                        ? Math.round(Theme.fontMd * body._emojiScale) : Theme.fontMd
+                        ? Math.round(Theme.fontMd * body._emojiScale)
+                        : Math.round(Theme.fontMd * body.fontScale)
         text: body._measurePlain()
     }
     Text {
@@ -237,7 +273,7 @@ Item {
         textFormat: Text.PlainText
         wrapMode: Text.NoWrap
         font.family: Theme.monoFamily
-        font.pixelSize: Theme.fontSm
+        font.pixelSize: Math.round(Theme.fontSm * body.fontScale)
         text: body._measureCodePlain()
     }
 
@@ -268,7 +304,8 @@ Item {
                         color: body.textColor
                         linkColor: Theme.accentHover
                         font.pixelSize: body._emojiScale > 1
-                                        ? Math.round(Theme.fontMd * body._emojiScale) : Theme.fontMd
+                                        ? Math.round(Theme.fontMd * body._emojiScale)
+                                        : Math.round(Theme.fontMd * body.fontScale)
                         font.family: Theme.fontFamily
                         wrapMode: Text.WrapAtWordBoundaryOrAnywhere
                         lineHeight: body._emojiScale > 1 ? 1.1 : 1.3
@@ -290,7 +327,7 @@ Item {
                         implicitWidth: body.width
                         width: body.width
                         implicitHeight: codeText.implicitHeight + 20
-                        radius: Theme.radiusSm
+                        radius: 18          // заметно скруглённый блок (в тон скруглениям экранов)
                         color: Theme.codeBg
                         border.color: Theme.codeBorder
                         border.width: 1
@@ -303,7 +340,7 @@ Item {
                             textFormat: Text.RichText
                             color: Theme.codeText
                             font.family: Theme.monoFamily
-                            font.pixelSize: Theme.fontSm
+                            font.pixelSize: Math.round(Theme.fontSm * body.fontScale)
                             // КРИТИЧНО (фикс «namertvo»-фриза в диалогах с кодом): при
                             // создании делегата ListView body.width кратковременно ~0
                             // (измеритель ещё не разложен) → width≈0; WrapAnywhere при

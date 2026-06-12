@@ -67,6 +67,8 @@ impl ClientCover for FoodDeliveryClientCover {
             "operation": "checkOrders",
             "clientId": core.sender, "partnerId": core.partner,
             "cursor": core.seq, "auth": encode_b64(&core.sig),
+            // long-poll: сервер читает опц. waitMs (0/нет → короткий поллинг).
+            "waitMs": core.long_poll_ms,
         }))
     }
 

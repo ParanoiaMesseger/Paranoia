@@ -30,7 +30,7 @@ Rectangle {
 
     implicitHeight: keyLayout.implicitHeight + root.topPadding + root.bottomPadding
     color: root.backgroundColor
-    radius: Theme.radiusSm
+    radius: 16          // скруглённый блок (в едином стиле)
     border.color: root.borderColor
     clip: true
 
@@ -75,7 +75,7 @@ Rectangle {
                 implicitHeight: root.copyButtonHeight
                 width: root.copyButtonWidth
                 height: root.copyButtonHeight
-                radius: Theme.radiusSm
+                radius: height / 2
                 color: "transparent"
                 opacity: root.keyText.length > 0 ? 1 : 0.5
 

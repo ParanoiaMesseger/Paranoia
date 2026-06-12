@@ -204,7 +204,7 @@ Rectangle {
                             model: [qsTr("client — клиентские данные"), qsTr("admin — ключи администратора"), qsTr("full — всё")]
                             background: Rectangle {
                                 implicitHeight: 44
-                                radius: Theme.radiusSm
+                                radius: 20          // как у поля ввода (скруглённая пилюля)
                                 color: Theme.bgInput
                                 border.color: Theme.border
                             }
@@ -219,13 +219,13 @@ Rectangle {
                                 elide: Text.ElideRight
                             }
                             popup: Popup {
-                                y: profileCombo.height
+                                y: profileCombo.height + 4
                                 width: profileCombo.width
-                                padding: 0
+                                padding: 6          // отступ, чтобы скруглённые углы были видны вокруг списка
                                 background: Rectangle {
                                     color: Theme.bgSecondary
                                     border.color: Theme.border
-                                    radius: Theme.radiusSm
+                                    radius: 16
                                 }
                                 contentItem: ListView {
                                     id: profilePopupList

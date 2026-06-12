@@ -537,7 +537,7 @@ Rectangle {
                         Layout.rightMargin: 8
                         Layout.topMargin: 6
                         height: 36
-                        radius: Theme.radiusMd
+                        radius: 20          // как у поля ввода сообщений (скруглённая пилюля)
                         color: Theme.bgInput
                         border.width: 1
                         border.color: dialogSearchField.activeFocus ? Theme.accent : Theme.border

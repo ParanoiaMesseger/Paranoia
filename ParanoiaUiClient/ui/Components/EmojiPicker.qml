@@ -117,7 +117,7 @@ Popup {
                 Rectangle {
                     anchors.centerIn: parent
                     width: 40; height: 40
-                    radius: Theme.radiusSm
+                    radius: height / 2          // круглые кнопки эмодзи
                     color: cellArea.containsMouse ? Theme.bgInput : "transparent"
 
                     Text {
@@ -163,7 +163,7 @@ Popup {
                         required property int index
                         required property var modelData
                         width: 36; height: 36
-                        radius: Theme.radiusSm
+                        radius: height / 2          // круглые табы категорий
                         color: picker.currentCategory === index ? Theme.accentDim
                              : tabArea.containsMouse ? Theme.bgInput : "transparent"
                         border.width: picker.currentCategory === index ? 1 : 0

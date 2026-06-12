@@ -272,6 +272,25 @@ namespace
         clearPendingAndroidException();
         return ok;
     }
+
+    // Сохранить файл в публичную галерею/Загрузки через MediaStore (Java-хелпер).
+    // Возвращает человекочитаемый путь или "" при ошибке.
+    QString androidSaveToMediaStore(const QString &sourcePath, const QString &fileName, const QString &mimeType,
+                                    bool isImage)
+    {
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return QString();
+        const QJniObject jSrc    = QJniObject::fromString(sourcePath);
+        const QJniObject jName   = QJniObject::fromString(fileName);
+        const QJniObject jMime   = QJniObject::fromString(mimeType);
+        const QJniObject result  = QJniObject::callStaticObjectMethod(
+            "app/paranoia/client/ParanoiaAndroidUtils", "saveToMediaStore",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/String;",
+            context.object<jobject>(), jSrc.object<jstring>(), jName.object<jstring>(), jMime.object<jstring>(),
+            static_cast<jboolean>(isImage));
+        clearPendingAndroidException();
+        return result.isValid() ? result.toString() : QString();
+    }
 #else
     void requestAndroidFileAccessIfNeeded() {}
 #endif
@@ -354,14 +373,10 @@ void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId,
         emit sendError(ChatBackend::tr("Диалог не найден."));
         return;
     }
-    const QString peer         = m_activePeer;
-    const QString serverId     = session->serverId;
-    const QString peerServerId = dlg->peerServerId;
-    const QString keyringJson  = dlg->keyringJson();
-    const bool hasReply        = !replyToId.trimmed().isEmpty();
-    const QString replySummary = replyText.simplified().left(180);
-    const QString sendKey      = peer + QChar('\n') + text + QChar('\n') + replyToId + QChar('\n') + replySender;
-    const qint64 nowMs         = QDateTime::currentMSecsSinceEpoch();
+    const QString peer    = m_activePeer;
+    const qint64 nowMs    = QDateTime::currentMSecsSinceEpoch();
+    const QString sendKey = peer + QChar('\n') + text + QChar('\n') + replyToId + QChar('\n') + replySender;
+    // Анти-даблтап: не плодим вторую оптимистичную на тот же текст в пределах 1.5с.
     for (auto it = m_recentSendAtMs.begin(); it != m_recentSendAtMs.end();) {
         if (nowMs - it.value() > 10'000)
             it = m_recentSendAtMs.erase(it);
@@ -369,12 +384,129 @@ void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId,
             ++it;
     }
     if (nowMs - m_recentSendAtMs.value(sendKey, 0) < 1'500) return;
-    if (m_sendInFlightKeys.contains(sendKey)) return;
-    m_sendInFlightKeys.insert(sendKey);
     m_recentSendAtMs[sendKey] = nowMs;
 
+    // Оптимистичная вставка: сообщение видно в ленте СРАЗУ со статусом "sending" (…),
+    // реальная сетевая отправка идёт в фоне (dispatchOutbox). client_token — стабильный
+    // ключ строки на всё время жизни (sending → committed), чтобы QML делал set(), а не
+    // remove+insert (без повторного «всплытия» при коммите).
+    const QString clientToken = QStringLiteral("pending:txt:%1:%2")
+                                    .arg(nowMs)
+                                    .arg(qHash(text + replyToId + QString::number(nowMs)));
+    OutboxItem item;
+    item.peer        = peer;
+    item.text        = text;
+    item.replyToId   = replyToId;
+    item.replySender = replySender;
+    item.replyText   = replyText;
+    item.ts          = nowMs;
+    m_outbox.insert(clientToken, item);
+    insertOptimisticText(item, clientToken);
+    dispatchOutbox(clientToken);
+}
+
+void ChatBackend::insertOptimisticText(const OutboxItem &item, const QString &clientToken)
+{
+    const auto session   = SessionStore::instance()->activeSession();
+    const QString myId   = session ? (session->serverId.isEmpty() ? session->username : session->serverId) : QString();
+    QVariantMap msg;
+    msg["id"]                = clientToken;     // временный id = client_token
+    msg["client_token"]      = clientToken;     // стабильный ключ строки в QML
+    msg["sender"]            = myId;
+    msg["sender_name"]       = ChatBackend::tr("Вы");
+    msg["status"]            = QStringLiteral("sending");
+    msg["kind"]              = QStringLiteral("text");
+    msg["text"]              = item.text;
+    msg["ts"]                = item.ts;
+    msg["seq"]               = 0;
+    msg["isMe"]              = true;
+    msg["reactions_json"]    = QStringLiteral("[]");
+    if (!item.replyToId.trimmed().isEmpty()) {
+        msg["reply_to_id"]   = item.replyToId;
+        msg["reply_sender"]  = item.replySender;
+        msg["reply_text"]    = item.replyText;
+    }
+    m_messageCache[item.peer].append(std::move(msg));
+    if (item.peer == m_activePeer) emit messagesReceived(item.peer, m_messageCache[item.peer]);
+}
+
+void ChatBackend::markOutboxFailed(const QString &peer, const QString &clientToken)
+{
+    if (m_outbox.contains(clientToken)) m_outbox[clientToken].status = QStringLiteral("failed");
+    auto &cache = m_messageCache[peer];
+    for (auto &v : cache) {
+        QVariantMap m = v.toMap();
+        if (m.value(QStringLiteral("client_token")).toString() == clientToken) {
+            m["status"] = QStringLiteral("failed");
+            v           = m;
+            break;
+        }
+    }
+    if (peer == m_activePeer) emit messagesReceived(peer, cache);
+}
+
+void ChatBackend::reinjectOutbox(const QString &peer)
+{
+    auto &cache = m_messageCache[peer];
+    for (auto it = m_outbox.constBegin(); it != m_outbox.constEnd(); ++it) {
+        const OutboxItem &item = it.value();
+        if (item.peer != peer) continue;
+        const QString token = it.key();
+        // Уже есть в кэше (committed/оптимистичная не затёрта)? — пропускаем.
+        bool present = false;
+        for (const auto &v : cache) {
+            if (v.toMap().value(QStringLiteral("client_token")).toString() == token) { present = true; break; }
+        }
+        if (present) continue;
+        QVariantMap msg;
+        msg["id"]             = token;
+        msg["client_token"]   = token;
+        msg["sender"]         = QString();
+        msg["sender_name"]    = ChatBackend::tr("Вы");
+        msg["status"]         = item.status;
+        msg["kind"]           = QStringLiteral("text");
+        msg["text"]           = item.text;
+        msg["ts"]             = item.ts;
+        msg["seq"]            = 0;
+        msg["isMe"]           = true;
+        msg["reactions_json"] = QStringLiteral("[]");
+        if (!item.replyToId.trimmed().isEmpty()) {
+            msg["reply_to_id"]  = item.replyToId;
+            msg["reply_sender"] = item.replySender;
+            msg["reply_text"]   = item.replyText;
+        }
+        cache.append(std::move(msg));
+    }
+    std::sort(cache.begin(), cache.end(), [](const QVariant &lhs, const QVariant &rhs) {
+        return lhs.toMap()["ts"].toLongLong() < rhs.toMap()["ts"].toLongLong();
+    });
+}
+
+void ChatBackend::dispatchOutbox(const QString &clientToken)
+{
+    if (!m_outbox.contains(clientToken)) return;
+    const OutboxItem item = m_outbox.value(clientToken);
+    auto session          = SessionStore::instance()->activeSession();
+    if (!session) { markOutboxFailed(item.peer, clientToken); return; }
+    auto *dlg = session->findDialog(item.peer);
+    if (!dlg) { markOutboxFailed(item.peer, clientToken); return; }
+
+    const QString peer         = item.peer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    const QString text         = item.text;
+    const bool hasReply        = !item.replyToId.trimmed().isEmpty();
+    const QString replyToId    = item.replyToId;
+    const QString replySender  = item.replySender;
+    const QString replySummary = item.replyText.simplified().left(180);
+
+    // Гард от двойной сетевой отправки одного и того же токена (повторный retry-тап).
+    if (m_sendInFlightKeys.contains(clientToken)) return;
+    m_sendInFlightKeys.insert(clientToken);
+
     QPointer self(this);
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, text, keyringJson, sendKey,
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, text, keyringJson, clientToken,
                                           hasReply, replyToId, replySender, replySummary]() {
         if (!self) return;
         QString json;
@@ -394,23 +526,37 @@ void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId,
             }
         }
         if (json.isEmpty()) {
-            QMetaObject::invokeMethod(self, [self, err, sendKey]() {
+            QMetaObject::invokeMethod(self, [self, peer, err, clientToken]() {
                 if (!self) return;
-                self->m_sendInFlightKeys.remove(sendKey);
-                self->m_recentSendAtMs.remove(sendKey);
+                self->m_sendInFlightKeys.remove(clientToken);
+                // НЕ удаляем из m_outbox — сообщение остаётся в очереди для retrySend.
+                self->markOutboxFailed(peer, clientToken);
                 if (err == "duplicate_seq" || err == "invalid_seq")
-                    emit self->sendError(ChatBackend::tr("Ошибка синхронизации seq. Повторите отправку после обновления диалога."));
+                    emit self->sendError(ChatBackend::tr("Ошибка синхронизации seq. Обновите диалог и повторите."));
                 else if (err == "server_unavailable")
-                    emit self->sendError(ChatBackend::tr("Сервер недоступен. Проверьте соединение."));
+                    emit self->sendError(ChatBackend::tr("Сервер недоступен. Сообщение в очереди — нажмите для повтора."));
                 else
-                    emit self->sendError(ChatBackend::tr("Ошибка отправки сообщения."));
+                    emit self->sendError(ChatBackend::tr("Не удалось отправить. Нажмите на сообщение для повтора."));
             });
             return;
         }
-        QMetaObject::invokeMethod(self, [self, peer, json, sendKey]() {
+        QMetaObject::invokeMethod(self, [self, peer, json, clientToken]() {
             if (!self) return;
-            self->m_sendInFlightKeys.remove(sendKey);
-            self->appendMessages(peer, self->parseMessages(json));
+            self->m_sendInFlightKeys.remove(clientToken);
+            self->m_outbox.remove(clientToken);
+            // Реконсиляция через appendMessages (НЕ удаляем вручную!): committed несёт тот
+            // же client_token, а appendMessages сопоставит его с pending-оптимистичной (по
+            // id-pending+тексту) и заменит ЕЁ in-place → QML видит ТОТ ЖЕ ключ строки →
+            // set() (статус sending→sent, без повторной анимации). Ручное удаление по
+            // client_token ломало гонку с poll-веткой (могло снести уже-committed запись и
+            // вызвать ре-инсерт = двойная анимация).
+            QVariantList committed = self->parseMessages(json);
+            for (auto &v : committed) {
+                QVariantMap m        = v.toMap();
+                m["client_token"]    = clientToken;
+                v                    = m;
+            }
+            self->appendMessages(peer, committed);
             if (peer == self->m_activePeer) {
                 self->fetchMessages();
                 self->refreshArrivedStatus();
@@ -418,6 +564,24 @@ void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId,
             }
         });
     });
+}
+
+void ChatBackend::retrySend(const QString &clientToken)
+{
+    if (!m_outbox.contains(clientToken)) return;
+    const OutboxItem item = m_outbox.value(clientToken);
+    // Вернуть строку в статус "sending" (…) и перезапустить отправку.
+    auto &cache = m_messageCache[item.peer];
+    for (auto &v : cache) {
+        QVariantMap m = v.toMap();
+        if (m.value(QStringLiteral("client_token")).toString() == clientToken) {
+            m["status"] = QStringLiteral("sending");
+            v           = m;
+            break;
+        }
+    }
+    if (item.peer == m_activePeer) emit messagesReceived(item.peer, cache);
+    dispatchOutbox(clientToken);
 }
 
 void ChatBackend::sendReaction(const QString &targetId, const QString &emoji)
@@ -821,6 +985,84 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
             }
         });
     });
+}
+
+void ChatBackend::saveAttachmentToDefault(const QString &messageId)
+{
+    if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) return;
+    // Картинка или файл? + имя/mime из кэша.
+    bool isImg = false;
+    QString filename = QStringLiteral("attachment.bin");
+    QString mime;
+    for (const auto &cached : m_messageCache.value(m_activePeer)) {
+        const QVariantMap msg = cached.toMap();
+        if (msg.value(QStringLiteral("id")).toString() != messageId) continue;
+        mime  = msg.value(QStringLiteral("mime_type")).toString();
+        isImg = isImageAttachment(msg.value(QStringLiteral("kind")).toString(), mime);
+        const QString fn  = msg.value(QStringLiteral("filename")).toString();
+        const QString txt = msg.value(QStringLiteral("text")).toString();
+        filename          = !fn.isEmpty() ? fn : (!txt.isEmpty() ? txt : filename);
+        break;
+    }
+    filename = safeAttachmentName(filename);
+
+#if defined(Q_OS_ANDROID)
+    // Android (scoped storage): нельзя просто писать в публичную папку → расшифровываем
+    // во временный файл, затем кладём в галерею/Загрузки через MediaStore (Java-хелпер).
+    requestAndroidFileAccessIfNeeded();
+    const QString tmpPath = temporaryAttachmentPath();
+    if (tmpPath.isEmpty()) return;
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, messageId, tmpPath,
+                                          filename, mime, isImg]() {
+        if (!self) return;
+        int rc = -1;
+        QString err;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (!session->ffi) {
+                err = "client_not_ready";
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                rc = session->ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, tmpPath);
+                if (rc != 0) err = ParanoiaFFI::last_error();
+            }
+        }
+        QString savedPath;
+        if (rc == 0) savedPath = androidSaveToMediaStore(tmpPath, filename, mime, isImg);
+        QFile::remove(tmpPath);
+        QMetaObject::invokeMethod(self, [self, peer, messageId, filename, savedPath, rc, err]() {
+            if (!self) return;
+            if (rc == 0 && !savedPath.isEmpty()) {
+                emit self->attachmentSaved(savedPath);
+                emit self->attachmentDownloaded(messageId, filename);
+                if (peer == self->m_activePeer) self->loadHistory(peer);
+            } else {
+                emit self->receiveError(ChatBackend::tr("Не удалось сохранить файл: ")
+                                        + (rc != 0 ? userFacingAttachmentError(err) : ChatBackend::tr("MediaStore")));
+            }
+        });
+    });
+#else
+    // Десктоп: фото → Изображения/Paranoia, файлы → Загрузки/Paranoia (saveAttachment с
+    // путём-ПАПКОЙ сам подберёт уникальное имя файла).
+    const QString base = QStandardPaths::writableLocation(
+        isImg ? QStandardPaths::PicturesLocation : QStandardPaths::DownloadLocation);
+    const QString dir = (base.isEmpty()
+                             ? QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                             : base)
+                        + QStringLiteral("/Paranoia");
+    QDir().mkpath(dir);
+    saveAttachment(messageId, dir);
+#endif
 }
 
 void ChatBackend::emitCachedMessages()
@@ -1534,7 +1776,12 @@ void ChatBackend::pollActiveChat()
                 error  = "client_not_ready";
             } else {
                 const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                const int rc         = session->ffi->notify_count_keyring(serverId, peerId, keyringJson, count);
+                // КОРОТКИЙ опрос: FFI держит общий session->ffiMutex на время вызова.
+                // НЕЛЬЗЯ использовать здесь long-poll (notify_count_wait_keyring) — он
+                // удерживал бы мьютекс до 25с, блокируя ВСЕ остальные FFI (история/
+                // отправка/превью) → фриз UI. Long-poll для near-real-time требует
+                // ОТДЕЛЬНОГО соединения/handle, не общего ffiMutex (см. #35).
+                const int rc = session->ffi->notify_count_keyring(serverId, peerId, keyringJson, count);
                 if (rc != 0) {
                     failed = true;
                     error  = ParanoiaFFI::last_error();
@@ -1662,11 +1909,16 @@ void ChatBackend::loadHistory(const QString &peer)
             self->m_seenIds[peer].clear();
             self->m_appliedReactionIds[peer].clear();
             if (messages.isEmpty()) {
-                emit self->messagesReceived(peer, QVariantList{});
+                self->reinjectOutbox(peer);   // вернуть недоставленные после очистки кэша
+                emit self->messagesReceived(peer, self->m_messageCache[peer]);
                 emit self->dialogsChanged();
                 return;
             }
             self->appendMessages(peer, messages);
+            // Вернуть не отправленные (failed/в очереди) — loadHistory затёр кэш, а в FFI
+            // их нет; иначе при перезаходе в диалог они пропадали.
+            self->reinjectOutbox(peer);
+            if (peer == self->m_activePeer) emit self->messagesReceived(peer, self->m_messageCache[peer]);
         });
     });
 }
@@ -1711,6 +1963,22 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
                 return cachedHasSeq && cachedSeq == seq;
             });
         }
+        // Гонка poll/commit: committed (с сервера, БЕЗ client_token) может прийти РАНЬШЕ,
+        // чем dispatchOutbox заменит оптимистичную. Без матча он вставился бы как НОВОЕ
+        // сообщение → у QML «двойная» анимация появления + скачок ключа (ct:→id:). Поэтому
+        // committed своего исходящего текста сопоставляем с pending-оптимистичной по тексту:
+        // берём её как found → заменяем in-place, ниже переносим client_token (ключ строки
+        // стабилен sending→committed, анимация одна).
+        if (found == cache.end() && !myId.isEmpty()
+            && map.value(QStringLiteral("kind")).toString() == QStringLiteral("text")
+            && map.value(QStringLiteral("sender")).toString() == myId) {
+            const QString txt = map.value(QStringLiteral("text")).toString();
+            found             = std::ranges::find_if(cache, [&txt](const QVariant &cached) {
+                const QVariantMap c = cached.toMap();
+                return c.value(QStringLiteral("id")).toString().startsWith(QStringLiteral("pending:txt:"))
+                    && c.value(QStringLiteral("text")).toString() == txt;
+            });
+        }
         if (found != cache.end()) {
             QVariantMap updated        = map;
             const QVariantMap existing = found->toMap();
@@ -1718,6 +1986,11 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
                 updated[QStringLiteral("reaction_events")] = existing.value(QStringLiteral("reaction_events"));
             if (existing.contains(QStringLiteral("reactions_json")))
                 updated[QStringLiteral("reactions_json")] = existing.value(QStringLiteral("reactions_json"));
+            // Сохраняем стабильный ключ строки оптимистичной отправки: серверные
+            // обновления (fetchMessages) приходят без client_token — без переноса ключ
+            // в QML сменился бы (ct:→id:) и сообщение «перевсплыло» бы заново.
+            if (!updated.contains(QStringLiteral("client_token")) && existing.contains(QStringLiteral("client_token")))
+                updated[QStringLiteral("client_token")] = existing.value(QStringLiteral("client_token"));
             *found = updated;
         } else {
             if (!id.isEmpty()) seen.insert(id);

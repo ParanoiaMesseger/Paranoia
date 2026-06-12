@@ -32,6 +32,10 @@ public:
     Q_INVOKABLE void openChat(const QString &peer);
     Q_INVOKABLE void stopChat();
     Q_INVOKABLE void sendText(const QString &text);
+    /// Повторная отправка ранее упавшего (status=failed) исходящего сообщения по его
+    /// client_token (тап по крестику в пузыре). Возвращает статус в "sending" и
+    /// перезапускает сетевую отправку из сохранённой записи аутбокса.
+    Q_INVOKABLE void retrySend(const QString &clientToken);
     Q_INVOKABLE void sendTextReply(const QString &text, const QString &replyToId, const QString &replySender,
                                    const QString &replyText);
     Q_INVOKABLE void sendReaction(const QString &targetId, const QString &emoji);
@@ -43,6 +47,10 @@ public:
     Q_INVOKABLE void sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QString &caption);
     Q_INVOKABLE void fetchMessages();
     Q_INVOKABLE void saveAttachment(const QString &messageId, const QString &targetUrlOrPath);
+    /// Сохранить вложение ОДНИМ ТАПОМ в папку по умолчанию (фото → Изображения/Paranoia,
+    /// файлы → Загрузки/Paranoia), без диалога выбора. QML вызывает это с 0.2.14; C++-
+    /// реализация была потеряна (незакоммичена) → скачивание молча падало. Восстановлено.
+    Q_INVOKABLE void saveAttachmentToDefault(const QString &messageId);
     Q_INVOKABLE void ensureImagePreview(const QString &messageId);
     /// Синхронно перерисовать модель из ТЕКУЩЕГО кэша (без FFI-раунда). Нужно
     /// для мгновенного показа оптимистичной мозаики при старте отправки.
@@ -152,6 +160,28 @@ private:
     // лавиной, без дебаунса каждый setBytes → loadHistory → recompose (мерцание).
     bool m_previewRefreshPending = false;
     QMap<QString, qint64> m_recentSendAtMs;
+    // Аутбокс оптимистичной отправки: исходящее сразу показывается в ленте со статусом
+    // "sending" (client_token = синтетический id), а реальная сетевая отправка идёт в
+    // фоне. На успехе оптимистичная запись заменяется на committed (по client_token,
+    // без дублей/re-pop); на ошибке — помечается "failed" и остаётся в аутбоксе для
+    // повторной отправки (retrySend). Это и есть «сообщение появляется сразу с …».
+    struct OutboxItem {
+        QString peer;
+        QString text;
+        QString replyToId;
+        QString replySender;
+        QString replyText;
+        qint64  ts = 0;
+        QString status = QStringLiteral("sending");   // sending | failed
+    };
+    QMap<QString, OutboxItem> m_outbox;   // client_token → запись
+    void insertOptimisticText(const OutboxItem &item, const QString &clientToken);
+    void dispatchOutbox(const QString &clientToken);
+    void markOutboxFailed(const QString &peer, const QString &clientToken);
+    // Возвращает в кэш не отправленные (оставшиеся в m_outbox) сообщения этого peer'а
+    // после перестройки истории (loadHistory чистит кэш) — иначе недоставленные
+    // «сбрасывались» при выходе/входе в диалог.
+    void reinjectOutbox(const QString &peer);
     bool m_receiveInFlight          = false;
     bool m_receiveAgainAfterCurrent = false;
     int m_messageLoadingJobs        = 0;

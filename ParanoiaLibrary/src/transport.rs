@@ -38,6 +38,10 @@ pub struct CoreNotify {
     pub partner: String,
     pub seq: u64,
     pub sig: Vec<u8>,
+    /// Желаемое удержание long-poll (мс). `0` — мгновенный ответ (короткий
+    /// поллинг). Сервер капает величину своим `notify_long_poll_max_ms`. НЕ входит
+    /// в подпись (тело под cover-AEAD, величина капается и прав не даёт).
+    pub long_poll_ms: u32,
 }
 
 /// Внутренний запрос /map: получить карту живых seq в диалоге.

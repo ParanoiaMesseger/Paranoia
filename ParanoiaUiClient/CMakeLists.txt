@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.14 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.15 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -541,6 +541,7 @@ qt_add_qml_module(Paranoia
     ui/Components/ParaHeader.qml
     ui/Components/ParaInput.qml
     ui/Components/PhotoViewer.qml
+    ui/Components/TextMessageViewer.qml
     ui/Components/PhotoMosaic.qml
     ui/Components/ReplyPreview.qml
     ui/Components/Toggle.qml

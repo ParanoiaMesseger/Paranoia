@@ -23,6 +23,11 @@ pub struct ProfileDialogueStore {
     pub signing_key_ct_b64: String,
     #[serde(default)]
     pub dialogues: HashMap<String, Vec<StoredKeyEntry>>,
+    /// server_id (= ключ dialogues) → отображаемое имя собеседника. Позволяет
+    /// указывать `--peer` по имени, а не по hex-server_id. Формат совпадает с
+    /// рантайм-стором (его пишет импорт профиля). Пусто — резолв по имени недоступен.
+    #[serde(default)]
+    pub names: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +77,30 @@ pub fn profile_id(server_url: &str, username: &str) -> String {
     hasher.update(b"\n");
     hasher.update(username.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Разрешить `peer` (имя ИЛИ hex-server_id) в server_id через профильный
+/// `names`-словарь. Если peer уже ключ dialogues/names — вернуть как есть; если
+/// это отображаемое имя — найти соответствующий server_id; иначе вернуть peer без
+/// изменений (трактуем как прямой server_id). Регистр имени учитывается как есть.
+pub fn resolve_peer_id(
+    store: &DialogueKeyStore,
+    server_url: &str,
+    username: &str,
+    peer: &str,
+) -> String {
+    let id = profile_id(server_url, username);
+    if let Some(profile) = store.profiles.get(&id) {
+        if profile.dialogues.contains_key(peer) || profile.names.contains_key(peer) {
+            return peer.to_string();
+        }
+        for (sid, name) in &profile.names {
+            if name == peer {
+                return sid.clone();
+            }
+        }
+    }
+    peer.to_string()
 }
 
 pub fn profile_keyring_entries(
