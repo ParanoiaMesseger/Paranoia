@@ -16,4 +16,9 @@ namespace paranoia::voip
     // NotifyOthersOnDeactivation, чтобы фоновые приложения (музыка и т. п.)
     // снова могли вернуть звук.
     void iosAudioSessionDeactivate();
+
+    // Сменить маршрут вывода на лету: route=1 (Speaker) → overridePort=Speaker
+    // (громкая связь); route=0 (Earpiece) → overridePort=None (вернёт вывод на
+    // разговорный динамик, либо на гарнитуру если подключена). Безопасно на не-iOS.
+    void iosAudioSessionSetRoute(int route);
 }

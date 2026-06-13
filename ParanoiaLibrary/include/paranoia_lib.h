@@ -180,6 +180,25 @@ int paranoia_service_notify_count(CSTR server_url, CSTR reserve_server_urls_json
                                   CSTR partner_server_id, uint64_t seq,
                                   uint64_t *out_count);
 
+// Как paranoia_service_notify_count, но с long-poll: сервер держит запрос до
+// нового сообщения в диалоге либо до long_poll_ms (капается сервером). Эндпоинт
+// тот же /notify (маскировку не трогаем). Фон-сервис гоняет это per-диалог
+// параллельно → мгновенные сообщения. 0=ok, иначе см. paranoia_last_error.
+int paranoia_service_notify_count_wait(CSTR server_url, CSTR reserve_server_urls_json,
+                                       CSTR signing_key_b64, CSTR sender_server_id,
+                                       CSTR partner_server_id, uint64_t seq,
+                                       uint32_t long_poll_ms, uint64_t *out_count);
+
+// STATELESS опрос входящих звонков для notifications-сервиса (фон, без сессии).
+// Аналог paranoia_call_poll, но без ParanoiaHandle (см. voip_ffi.rs::paranoia_service_call_poll).
+//   signing_key_b64 — Ed25519 seed (32 байта, base64); user — свой server-id;
+//   peers_keys_json — [{"peer","master_key_b64"}] для расшифровки офферов.
+// Возвращает JSON-массив [{sender,kind,payload_json,ts_ms}] (освобождать
+// paranoia_free_string) либо NULL при ошибке (paranoia_last_error).
+char *paranoia_service_call_poll(CSTR server_url, CSTR reserve_server_urls_json,
+                                 CSTR signing_key_b64, CSTR user,
+                                 CSTR peers_keys_json, unsigned int long_poll_ms);
+
 // Обновить локальные статусы прочтения через GET /arrived.
 // Возвращает 0 при успехе и пишет количество изменённых сообщений в out_changed.
 int paranoia_arrived_get_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,

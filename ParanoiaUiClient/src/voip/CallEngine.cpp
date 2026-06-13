@@ -226,6 +226,7 @@ namespace paranoia::voip
         local_port_              = 0;
         mic_muted_               = false;
         received_audio_packet_   = false;
+        last_audio_rx_ms_.store(0, std::memory_order_relaxed);
         last_remote_video_ts_ms_ = 0;
         if (remote_video_active_) {
             remote_video_active_ = false;
@@ -273,13 +274,19 @@ namespace paranoia::voip
             if (ctx.isValid()) {
                 QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaAndroidUtils", "setVoiceCallMode",
                                                    "(Landroid/content/Context;ZZ)V", ctx.object<jobject>(),
-                                                   jboolean(JNI_TRUE), jboolean(JNI_TRUE) /* speakerphone */);
+                                                   jboolean(JNI_TRUE),
+                                                   jboolean(audio_route_ == RouteSpeaker ? JNI_TRUE : JNI_FALSE));
                 if (env->ExceptionCheck()) env->ExceptionClear();
             }
         }
 #elif defined(Q_OS_IOS)
         iosAudioSessionConfigureForVoiceCall();
 #endif
+        // Синхронизируем фактический вывод с выбранным маршрутом: audio_route_
+        // переживает звонки (помним выбор пользователя), а iOS-configure форсит
+        // speaker — без этого вызова на 2-м звонке UI показывал бы earpiece, а звук
+        // шёл бы в громкую. На Android — безвредно (mode уже выставлен выше).
+        applyAudioRoute();
 
         playback_ = std::make_unique<AudioPlayback>(this);
         connect(playback_.get(), &AudioPlayback::error, this, &CallEngine::errorOccurred);
@@ -610,6 +617,34 @@ namespace paranoia::voip
         emit micMutedChanged();
     }
 
+    void CallEngine::setAudioRoute(int route)
+    {
+        const int r = (route == RouteSpeaker) ? RouteSpeaker : RouteEarpiece;
+        if (audio_route_ == r) return;
+        audio_route_ = r;
+        applyAudioRoute();
+        emit audioRouteChanged();
+    }
+
+    void CallEngine::applyAudioRoute()
+    {
+        const bool speaker = (audio_route_ == RouteSpeaker);
+#if defined(Q_OS_ANDROID)
+        QJniEnvironment env;
+        const auto ctx = QNativeInterface::QAndroidApplication::context();
+        if (ctx.isValid()) {
+            QJniObject::callStaticMethod<void>("app/paranoia/client/ParanoiaAndroidUtils", "setSpeakerphone",
+                                               "(Landroid/content/Context;Z)V", ctx.object<jobject>(),
+                                               jboolean(speaker ? JNI_TRUE : JNI_FALSE));
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+#elif defined(Q_OS_IOS)
+        iosAudioSessionSetRoute(audio_route_);
+#else
+        Q_UNUSED(speaker);
+#endif
+    }
+
     bool CallEngine::start(const QString &localBind, const QString &peerAddr, const QString &masterKeyB64,
                            const QString &sessionIdB64, int role)
     {
@@ -664,6 +699,7 @@ namespace paranoia::voip
             // новые пакеты текущего звонка начнут отбрасываться как «поздние».
             return;
         }
+        last_audio_rx_ms_.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_relaxed);
         if (!received_audio_packet_) {
             received_audio_packet_ = true;
             markMediaReceived();

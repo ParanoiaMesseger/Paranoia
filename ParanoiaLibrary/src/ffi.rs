@@ -2936,6 +2936,81 @@ pub extern "C" fn paranoia_service_notify_count(
     })
 }
 
+/// Как [`paranoia_service_notify_count`], но с LONG-POLL: сервер ДЕРЖИТ запрос до
+/// нового сообщения в этом диалоге либо до `min(long_poll_ms, server_cap)`. Нужен
+/// фон-сервису Android, чтобы ловить сообщения МГНОВЕННО (per-диалог long-poll),
+/// а не раз в цикл коротким опросом. Эндпоинт тот же `/notify` (уже маскирован) —
+/// сервер/маскировку НЕ трогаем, только параметризуем long_poll_ms (как у звонков).
+/// Полностью stateless: ключи/сервер передаются явно, без SQLCipher/vault.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_service_notify_count_wait(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    signing_key_b64: *const c_char,
+    sender_server_id: *const c_char,
+    partner_server_id: *const c_char,
+    seq: u64,
+    long_poll_ms: u32,
+    out_count: *mut u64,
+) -> i32 {
+    ffi_catch_i32("service_notify_error", || {
+        clear_last_error();
+        if out_count.is_null() {
+            return invalid_argument_i32();
+        }
+        let server = ffi_try!(cstr_arg(server_url), invalid_argument_i32());
+        let reserves = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_i32()
+        );
+        let sk_b64 = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_i32());
+        let sender = ffi_try!(cstr_arg(sender_server_id), invalid_argument_i32());
+        let partner = ffi_try!(cstr_arg(partner_server_id), invalid_argument_i32());
+
+        let sk_bytes = match decode_b64_32(&sk_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                set_last_error("invalid_signing_key: expected 32 bytes base64");
+                return -1;
+            }
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        let msg = format!("{sender}{partner}{seq}");
+        let sig = crate::crypto::sign(&signing_key, msg.as_bytes());
+
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(_) => {
+                set_last_error("runtime_error");
+                return -1;
+            }
+        };
+        let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
+        let transport = crate::transport::Transport::new(&server, reserves.iter(), cover);
+        let core = crate::transport::CoreNotify {
+            sender,
+            partner,
+            seq,
+            sig,
+            long_poll_ms,
+        };
+
+        match rt.block_on(transport.notify(&core)) {
+            Ok(count) => {
+                unsafe { *out_count = count };
+                0
+            }
+            Err(e) => {
+                set_last_error(&classify_network_error(
+                    &anyhow_error_chain(&e),
+                    "service_notify_error",
+                ));
+                -1
+            }
+        }
+    })
+}
+
 fn atomic_write_bytes(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
     let p = std::path::Path::new(path);
     if let Some(parent) = p.parent() {

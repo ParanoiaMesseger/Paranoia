@@ -78,6 +78,11 @@ private:
     };
 
     QTimer m_pollTimer;
+    // Пока приложение на переднем плане — периодически продлеваем foreground-флаг
+    // фон-сервиса (у того TTL). Если UI-процесс упадёт/будет убит «активным», флаг
+    // не продлится и сервис в течение TTL сам возобновит фоновый опрос (иначе флаг
+    // залип бы в true и уведомления молча пропадали до следующего открытия app).
+    QTimer m_foregroundHeartbeat;
     QString m_activePeer;
     QMap<QString, quint64> m_notifiedPendingByPeer;
     QMap<QString, quint64> m_locallyReceivedPendingByPeer;

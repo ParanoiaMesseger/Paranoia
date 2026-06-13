@@ -148,6 +148,10 @@ public:
     Q_INVOKABLE bool setDialogAvatar(const QString &peer, const QString &fileUrl);
     /// Убрать локальный аватар (вернуть букву).
     Q_INVOKABLE void clearDialogAvatar(const QString &peer);
+    /// Аватар диалога как data-URL (`data:image/png;base64,…`) для прямого
+    /// присвоения в `Image.source`, либо пустая строка если аватара нет.
+    /// Нужен экрану звонка (там нет модели диалога — берём по peer).
+    Q_INVOKABLE QString dialogAvatar(const QString &peer) const;
 
     Q_INVOKABLE QVariantMap exportProfile(const QString &profileType, const QStringList &peers,
                                           const QString &receiverPubkeyB64, const QString &filePath);

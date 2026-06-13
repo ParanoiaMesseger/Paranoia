@@ -270,7 +270,7 @@ Rectangle {
                             Layout.fillWidth: true
                             height: Math.min(160, Math.max(160, exportDialogList.contentHeight + 2))
                             color: Theme.bgSecondary
-                            radius: Theme.radiusSm
+                            radius: Theme.radiusLg
                             border.color: Theme.border
                             visible: profileCombo.currentIndex !== 1
                             clip: true

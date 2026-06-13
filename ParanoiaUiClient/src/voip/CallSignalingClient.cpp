@@ -1,5 +1,7 @@
 #include "CallSignalingClient.hpp"
 
+#include "platform/PlatformNotifications.hpp"
+
 #include <QCoreApplication>
 #include <QDebug>
 #include <QJsonDocument>
@@ -151,9 +153,33 @@ namespace paranoia::voip
         emit runningChanged();
     }
 
+    void CallSignalingClient::injectEnvelope(const QString &envelopeJson)
+    {
+        if (envelopeJson.isEmpty()) return;
+        QJsonParseError perr{};
+        const auto doc = QJsonDocument::fromJson(envelopeJson.toUtf8(), &perr);
+        if (perr.error != QJsonParseError::NoError) {
+            qWarning().noquote() << "CallSignalingClient: injectEnvelope parse:" << perr.errorString();
+            return;
+        }
+        if (doc.isObject()) {
+            dispatch(doc.object());
+        } else if (doc.isArray()) {
+            for (const auto &v : doc.array())
+                if (v.isObject()) dispatch(v.toObject());
+        }
+    }
+
     void CallSignalingClient::workerLoop()
     {
         while (!stop_.load()) {
+            if (!offerPollingEnabled_.load()) {
+                // Фон без активного звонка — НЕ опрашиваем call_poll (drain-эндпоинт:
+                // отдаём офферы фон-сервису, он покажет баннер). Поток жив, просто
+                // ждём повторного включения (foreground/входящий через handoff).
+                QThread::msleep(400);
+                continue;
+            }
             const auto snapshot = pollSnapshot();
             if (!snapshot.handle || snapshot.user.isEmpty()) {
                 emit pollFailed(QStringLiteral("CallSignalingClient: handle or user not set"));
@@ -185,8 +211,21 @@ namespace paranoia::voip
             if (!doc.array().isEmpty())
                 qInfo().noquote() << "CallSignalingClient: polled" << doc.array().size() << "signal(s) for"
                                   << logId(snapshot.user);
-            for (const auto &v : doc.array())
-                if (v.isObject() && isCurrentGeneration(snapshot.generation)) dispatch(v.toObject());
+            for (const auto &v : doc.array()) {
+                if (!v.isObject() || !isCurrentGeneration(snapshot.generation)) continue;
+                const QJsonObject env = v.toObject();
+                // Гонка перехода в фон: long-poll стартовал в foreground, а пока висел,
+                // приложение ушло в фон. Оффер мы УЖЕ сдрейнили — фон-сервис его не
+                // получит. Не показываем невидимый экран, а отдаём конверт фон-сервису
+                // на баннер (тот же handoff: тап → inject → экран/авто-приём).
+                if (!offerPollingEnabled_.load() && env.value(QStringLiteral("kind")).toInt(-1) == 0) {
+                    const QString envJson = QString::fromUtf8(QJsonDocument(env).toJson(QJsonDocument::Compact));
+                    qInfo().noquote() << "CallSignalingClient: backgrounded mid-poll — handing offer to service";
+                    PlatformNotifications::handoffIncomingCallToService(envJson);
+                    continue;
+                }
+                dispatch(env);
+            }
         }
     }
 
@@ -221,6 +260,7 @@ namespace paranoia::voip
                                     streamsContainVideo(payload.value(QStringLiteral("streams"))), reason);
                 break;
             case 2: // Hangup
+                rememberHangup(callId);
                 emit hangupReceived(sender, callId, reason);
                 break;
             case 3: // Ice
@@ -229,6 +269,21 @@ namespace paranoia::voip
             default: break;
         }
         Q_UNUSED(ts);
+    }
+
+    void CallSignalingClient::rememberHangup(const QString &callId)
+    {
+        if (callId.isEmpty()) return;
+        QMutexLocker lock(&hangups_mutex_);
+        if (recent_hangups_.size() > 256) recent_hangups_.clear();
+        recent_hangups_.insert(callId);
+    }
+
+    bool CallSignalingClient::wasRecentlyHungUp(const QString &callId) const
+    {
+        if (callId.isEmpty()) return false;
+        QMutexLocker lock(&hangups_mutex_);
+        return recent_hangups_.contains(callId);
     }
 
 } // namespace paranoia::voip

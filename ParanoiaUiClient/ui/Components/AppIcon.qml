@@ -560,6 +560,32 @@ Canvas {
             return
         }
 
+        if (name === "speaker") {
+            // Громкая связь: конус-динамик + две звуковые волны.
+            ctx.lineWidth = strokeWidth
+            ctx.strokeStyle = iconColor
+            ctx.fillStyle = fillColor
+            ctx.beginPath()
+            ctx.moveTo(3, 9)
+            ctx.lineTo(7, 9)
+            ctx.lineTo(11, 5)
+            ctx.lineTo(11, 19)
+            ctx.lineTo(7, 15)
+            ctx.lineTo(3, 15)
+            ctx.closePath()
+            ctx.fill()
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(14, 9)
+            ctx.quadraticCurveTo(16.5, 12, 14, 15)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(16.5, 6.5)
+            ctx.quadraticCurveTo(20.5, 12, 16.5, 17.5)
+            ctx.stroke()
+            return
+        }
+
         if (name === "backspace") {
             ctx.beginPath()
             ctx.moveTo(3, 12)

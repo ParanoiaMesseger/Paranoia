@@ -74,7 +74,8 @@ QtObject {
     // ── Radius ───────────────────────────────────────────
     readonly property int radiusSm: 3
     readonly property int radiusMd: 10
-    readonly property int radiusLg: 10
+    // Радиус «окон» (попапы/меню/диалоги). Единый и заметно скруглённый.
+    readonly property int radiusLg: 16
 
     // ── Typography ───────────────────────────────────────
     readonly property int fontXs:    11

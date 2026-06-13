@@ -190,6 +190,36 @@ Rectangle {
              + d.getMinutes().toString().padStart(2, '0')
     }
 
+    // Полночь указанной даты (для подсчёта «целых суток» между датами без влияния времени).
+    function _dayStartMs(ts) {
+        let d = new Date(ts)
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+    }
+
+    // Ключ календарного дня (для группировки сообщений по дням в ленте).
+    function dayKey(ts) {
+        let d = new Date(ts)
+        return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate()
+    }
+
+    // Подпись разделителя-пилюли над первым сообщением дня:
+    //   сегодня → «Сегодня», вчера → «Вчера», в пределах недели → день недели,
+    //   этот год → «23 апреля», прошлый год и старше → «23 апреля 2025».
+    function formatDaySeparator(ts) {
+        let d = new Date(ts)
+        let now = new Date()
+        let diffDays = Math.round((_dayStartMs(now.getTime()) - _dayStartMs(ts)) / 86400000)
+        if (diffDays <= 0) return qsTr("Сегодня")
+        if (diffDays === 1) return qsTr("Вчера")
+        if (diffDays < 7) {
+            let w = Qt.locale().toString(d, "dddd")
+            return w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w
+        }
+        if (d.getFullYear() === now.getFullYear())
+            return Qt.locale().toString(d, "d MMMM")
+        return Qt.locale().toString(d, "d MMMM yyyy")
+    }
+
     function deliveryStatusColor(status) {
         if (status === "read") return Theme.messageMetaOutgoing
         if (status === "delivered") return Theme.messageMetaOutgoing
@@ -298,6 +328,75 @@ Rectangle {
         errorTimer.restart()
     }
 
+    // Собрать медиа/файлы/ссылки из списка сообщений. Работает и с composed-строками
+    // (photo_group → photos_json), и с сырыми (отдельные kind=="image"). Вход —
+    // oldest-first; на выходе разворачиваем в newest-first (как лента).
+    function buildAttachmentData(src) {
+        var media = []
+        var files = []
+        var links = []
+        var urlRe = /(https?:\/\/[^\s<>"'`]+)/g
+        src = src || []
+        for (var i = 0; i < src.length; ++i) {
+            var m = src[i]
+            if (m.kind === "photo_group") {
+                var photos = []
+                try { photos = JSON.parse(m.photos_json || "[]") } catch (e) { photos = [] }
+                for (var j = 0; j < photos.length; ++j) {
+                    var p = photos[j]
+                    if (!p.id || p.id.length === 0) continue
+                    // local — file:// своих фото (показывается сразу); ready — превью уже
+                    // в провайдере (file:// или image://secure). Иначе галерея ДОТЯНЕТ
+                    // превью по id (ensureGalleryPreview) — старые фото тоже попадают.
+                    var pLocal = (p.source && p.source.indexOf("file://") === 0) ? p.source : ""
+                    media.push({ id: p.id, local: pLocal, ready: (p.source && p.source.length > 0) === true,
+                                 filename: (p.name && p.name.length > 0) ? p.name : "attachment.bin",
+                                 ts: m.ts, size: p.size || 0 })
+                }
+            } else if (root.isImageMessage(m.kind, m.mime_type)) {
+                var iLocal = m.local_preview || ""
+                var iProv  = m.preview_source || ""
+                media.push({ id: m.id, local: iLocal, ready: (iLocal.length > 0 || iProv.length > 0),
+                             filename: (m.filename && m.filename.length > 0) ? m.filename : "attachment.bin",
+                             ts: m.ts, size: m.size || 0 })
+            } else if (m.kind === "file") {
+                files.push({ id: m.id, name: root.fileNameFor(m), size: m.size,
+                             mime: m.mime_type || "", ts: m.ts })
+            }
+            // Ссылки из текста любого сообщения (и подписи к вложению).
+            var t = m.text || ""
+            if (t.length > 0) {
+                var match
+                urlRe.lastIndex = 0
+                while ((match = urlRe.exec(t)) !== null) {
+                    links.push({ url: match[1], ts: m.ts, id: m.id,
+                                 snippet: t.replace(/\s+/g, " ").trim() })
+                }
+            }
+        }
+        media.reverse(); files.reverse(); links.reverse()
+        return { media: media, files: files, links: links }
+    }
+
+    // Открыть экран «Вложения диалога». Сразу показываем то, что уже загружено
+    // (мгновенно), и параллельно дотягиваем ПОЛНУЮ историю диалога с сервера/БД —
+    // когда придёт, обновляем экран (см. onAttachmentsHistoryLoaded).
+    // Типизированная (Item) ссылка — QML авто-обнулит её при уничтожении страницы
+    // (pop), поэтому onAttachmentsHistoryLoaded не тронет «мёртвый» объект.
+    property Item _sharedMediaPage: null
+    function openSharedMedia() {
+        var d = root.buildAttachmentData(root._allMessages)
+        root._sharedMediaPage = stackView.push(sharedMediaComponent, {
+            peerName: root.displayName,
+            peerId: root.peer,
+            mediaItems: d.media,
+            fileItems: d.files,
+            linkItems: d.links,
+            loadingMore: true
+        })
+        Chat.loadAllForAttachments(root.peer)
+    }
+
     // Маршрутизация выбранных фото: одно без подписи — обычной отправкой; иначе —
     // фото-группой (мозаика) с подписью из поля ввода.
     function sendSelectedPhotos(files) {
@@ -356,7 +455,8 @@ Rectangle {
                 // Свои фото — локальный исходник (мгновенно, без image://secure/
                 // скачивания и без мигания при коммите); чужие — через провайдер.
                 groups[gid].photos.push({ id: m.id, source: m.local_preview || m.preview_source || "",
-                                          name: m.filename || "", key: "", status: m.status })
+                                          name: m.filename || "", key: "", status: m.status,
+                                          size: m.size || 0 })
                 committedCount[gid] = (committedCount[gid] || 0) + 1
             } else {
                 out.push(m)
@@ -749,6 +849,14 @@ Rectangle {
         const slice = start > 0 ? messages.slice(start) : messages
         // Разворачиваем: index 0 = новейшее (для BottomToTop-ленты).
         const windowed = slice.slice().reverse()
+        // Пилюля-разделитель дня крепится к САМОМУ СТАРОМУ сообщению дня (рисуется НАД
+        // ним → визуально вверху дневного блока). В newest-first окне это строка, у
+        // которой следующая (i+1, ещё старее) — другой день, либо это верх загруженного.
+        for (let di = 0; di < windowed.length; ++di) {
+            const isDayTop = (di === windowed.length - 1)
+                          || root.dayKey(windowed[di].ts) !== root.dayKey(windowed[di + 1].ts)
+            windowed[di].daySep = isDayTop ? root.formatDaySeparator(windowed[di].ts) : ""
+        }
         return root.reconcileModel(windowed)
     }
 
@@ -761,6 +869,7 @@ Rectangle {
              + String(m.text || "") + "" + String(m.reactions_json || "") + ""
              + String(m.edited || "") + "" + String(m.preview_source || "") + ""
              + String(m.photos_json || "") + "" + String(m.kind || "")
+             + "" + String(m.daySep || "")
     }
 
     // Инкрементальная сверка модели с окном (newest-first) — минимум операций
@@ -1077,6 +1186,26 @@ Rectangle {
             })
             if (root.searchActive) root.recomputeSearchMatches()
         }
+        function onAttachmentsHistoryLoaded(peer, messages) {
+            if (peer !== root.peer) return
+            if (!root._sharedMediaPage) return
+            var d = root.buildAttachmentData(messages)
+            var newTotal = d.media.length + d.files.length + d.links.length
+            var page = root._sharedMediaPage
+            var curTotal = page.mediaItems.length + page.fileItems.length + page.linkItems.length
+            // НЕ понижаем: если полная выгрузка вернула пусто/меньше (ошибка дешифра
+            // одного старого сообщения роняет всю выборку в FFI) — оставляем мгновенный
+            // снимок, иначе галерея «опустела бы». Применяем только если данных БОЛЬШЕ.
+            if (newTotal >= curTotal) {
+                page.mediaItems = d.media
+                page.fileItems = d.files
+                page.linkItems = d.links
+            }
+            page.loadingMore = false
+        }
+        function onGalleryPreviewReady(messageId) {
+            if (root._sharedMediaPage) root._sharedMediaPage.markPreviewReady(messageId)
+        }
         function onSendError(msg) {
             errorText.text = msg
             errorBar.visible = true
@@ -1264,7 +1393,7 @@ Rectangle {
 
         background: Rectangle {
             color: Theme.bgCard
-            radius: Theme.radiusMd
+            radius: Theme.radiusLg
             border.width: 1
             border.color: Theme.border
         }
@@ -1556,7 +1685,7 @@ Rectangle {
 
         background: Rectangle {
             color: Theme.bgCard
-            radius: Theme.radiusMd
+            radius: Theme.radiusLg
             border.width: 1
             border.color: Theme.border
         }
@@ -1669,7 +1798,7 @@ Rectangle {
 
         background: Rectangle {
             color: Theme.bgCard
-            radius: Theme.radiusMd
+            radius: Theme.radiusLg
             border.width: 1
             border.color: Theme.border
         }
@@ -1723,7 +1852,7 @@ Rectangle {
         z: 901
         background: Rectangle {
             color: Theme.bgCard
-            radius: Theme.radiusMd
+            radius: Theme.radiusLg
             border.width: 1
             border.color: Theme.border
         }
@@ -1877,8 +2006,8 @@ Rectangle {
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 8
-                anchors.rightMargin: 16
-                spacing: 8
+                anchors.rightMargin: 6
+                spacing: 3
                 visible: !root.selectionMode
 
                 // Back button
@@ -1976,10 +2105,16 @@ Rectangle {
                     }
                 }
 
+                // Три кнопки в своём Row (spacing 0) — внешний spacing их больше не
+                // растягивает; стоят плотной группой у правого края.
+                RowLayout {
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 0
+
                 // Поиск по диалогу
                 Rectangle {
-                    Layout.preferredWidth: 40
-                    Layout.preferredHeight: 40
+                    Layout.preferredWidth: 30
+                    Layout.preferredHeight: 34
                     Layout.alignment: Qt.AlignVCenter
                     radius: Theme.radiusSm
                     color: searchHeaderArea.containsMouse ? Theme.bgCard : "transparent"
@@ -2006,9 +2141,39 @@ Rectangle {
                     }
                 }
 
+                // Вложения диалога (медиа/файлы/ссылки)
+                Rectangle {
+                    Layout.preferredWidth: 30
+                    Layout.preferredHeight: 34
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: Theme.radiusSm
+                    color: mediaHeaderArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: mediaHeaderArea.containsMouse ? 1 : 0
+                    border.color: Theme.border
+
+                    AppIcon {
+                        anchors.centerIn: parent
+                        width: 22; height: 22
+                        name: "image"
+                        iconColor: Theme.accentHover
+                        strokeWidth: 2
+                    }
+
+                    MouseArea {
+                        id: mediaHeaderArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.openSharedMedia()
+                    }
+                }
+
                 // Видна только если voip собран. Наличие master_key проверяется перед стартом вызова.
                 CallButton {
                     visible: VoIPAvailable
+                    Layout.preferredWidth: 30
+                    Layout.preferredHeight: 34
+                    Layout.alignment: Qt.AlignVCenter
                     onClicked: {
                         if (!VoIPAvailable) return
                         const mk = CallSignaling.masterKeyFor(root.peer)
@@ -2027,6 +2192,7 @@ Rectangle {
                         stackView.push(root.callPageComponent, { mode: "outgoing", peerName: root.peer })
                     }
                 }
+                } // конец Row из трёх кнопок
             }
         }
 
@@ -2119,7 +2285,7 @@ Rectangle {
                     Layout.preferredWidth: 32
                     Layout.preferredHeight: 32
                     Layout.alignment: Qt.AlignVCenter
-                    radius: Theme.radiusSm
+                    radius: 16
                     color: prevArea.containsMouse ? Theme.bgCard : "transparent"
                     border.width: 1
                     border.color: Theme.border
@@ -2144,7 +2310,7 @@ Rectangle {
                     Layout.preferredWidth: 32
                     Layout.preferredHeight: 32
                     Layout.alignment: Qt.AlignVCenter
-                    radius: Theme.radiusSm
+                    radius: 16
                     color: nextArea.containsMouse ? Theme.bgCard : "transparent"
                     border.width: 1
                     border.color: Theme.border
@@ -2169,7 +2335,7 @@ Rectangle {
                     Layout.preferredWidth: 32
                     Layout.preferredHeight: 32
                     Layout.alignment: Qt.AlignVCenter
-                    radius: Theme.radiusSm
+                    radius: 16
                     color: searchCloseArea.containsMouse ? Theme.bgCard : "transparent"
                     border.width: 1
                     border.color: Theme.border
@@ -2273,7 +2439,12 @@ Rectangle {
 
                 delegate: Item {
                     width: listView.width
-                    height: bubble.implicitHeight + 8
+                    // Разделитель-пилюля дня (если есть) добавляется НАД пузырём, увеличивая
+                    // высоту строки сверху; пузырь остаётся в нижней части (см. verticalCenterOffset).
+                    readonly property string daySepLabel: model.daySep || ""
+                    readonly property bool hasDaySep: daySepLabel.length > 0
+                    readonly property real daySepH: hasDaySep ? 38 : 0
+                    height: bubble.implicitHeight + 8 + daySepH
                     // Пилюля-втекание масштабируется от нижнего угла со стороны отправителя
                     // (у исходящих — низ-право, ближе к полю ввода). См. add-transition.
                     transformOrigin: (model.isMe === true) ? Item.BottomRight : Item.BottomLeft
@@ -2476,6 +2647,30 @@ Rectangle {
                         Chat.ensureImagePreview(model.id)
                 }
 
+                // Разделитель-пилюля дня по центру над первым сообщением каждого дня.
+                Rectangle {
+                    id: daySepPill
+                    visible: hasDaySep
+                    anchors.top: parent.top
+                    anchors.topMargin: 7
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    height: 24
+                    width: daySepText.implicitWidth + 24
+                    radius: height / 2
+                    color: Theme.bgSecondary
+                    opacity: 0.92
+                    border.width: 1
+                    border.color: Theme.border
+                    Text {
+                        id: daySepText
+                        anchors.centerIn: parent
+                        text: daySepLabel
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSm
+                        font.bold: true
+                    }
+                }
+
                 Rectangle {
                     id: bubble
                     anchors.right: isMe ? parent.right : undefined
@@ -2483,6 +2678,9 @@ Rectangle {
                     anchors.rightMargin: isMe ? 12 : 0
                     anchors.leftMargin:  isMe ? 0  : 12
                     anchors.verticalCenter: parent.verticalCenter
+                    // Доп. высота разделителя добавлена СВЕРХУ → сдвигаем центр пузыря вниз
+                    // на половину, сохраняя прежние 4px-поля сверху/снизу самого пузыря.
+                    anchors.verticalCenterOffset: daySepH / 2
 
                     width: Math.min(Math.max(showMessageText ? msgText.implicitWidth : 0,
                                              hasReply ? messageReplyPreview.implicitWidth : 0,
@@ -2959,7 +3157,7 @@ Rectangle {
                         anchors.rightMargin: 6
                         width: 26
                         height: 26
-                        radius: Theme.radiusSm
+                        radius: 13   // скруглённая (в тон облачку), не «квадрат»
                         z: 5
                         opacity: expandArea.containsMouse ? 1.0 : 0.85
                         color: expandArea.containsMouse ? Theme.bgCard
@@ -3666,6 +3864,12 @@ Rectangle {
         onSaveRequested: function(messageId, filename) {
             root.openSaveDialog(messageId, filename)
         }
+    }
+
+    // Экран «Вложения диалога» (медиа/файлы/ссылки) — пушится в общий stackView.
+    Component {
+        id: sharedMediaComponent
+        SharedMediaPage {}
     }
 
     // Полноэкранное чтение длинного текста (открывается из пузыря, см. openTextViewer).

@@ -268,6 +268,12 @@ namespace paranoia::voip
         /// Последний наблюдённый Rust peer-адрес (для дедупа в rx_path detection).
         QString last_observed_peer_;
 
+        /// Таймаут звонка (single-shot): входящий, который никто не принял/отклонил
+        /// и инициатор не отбил (его app мог упасть → нет Hangup), не должен звенеть
+        /// вечно — иначе state застревает в "incoming", callActive не сбрасывается,
+        /// и in-app сигналинг продолжает опрашивать офферы в фоне (мешая фон-сервису).
+        /// На истечении: incoming → reject(timeout); outgoing → hangup(timeout).
+        QTimer ring_timeout_timer_;
         /// Periodic re-probe тиков для попытки переехать на лучший путь.
         QTimer reprobe_timer_;
         /// Polls Rust peer (auto-discovered source) для определения rx_path.

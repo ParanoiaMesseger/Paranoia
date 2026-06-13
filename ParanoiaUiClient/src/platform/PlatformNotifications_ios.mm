@@ -19,6 +19,8 @@ namespace
     NSString *const kOpenPeerKey            = @"paranoia.ios.open_peer";
     NSString *const kUserInfoProfileIdKey   = @"profileId";
     NSString *const kUserInfoPeerKey        = @"peer";
+    NSString *const kPendingCallOfferKey    = @"paranoia.ios.pending_call_offer";
+    NSString *const kPendingCallAnswerKey   = @"paranoia.ios.pending_call_answer";
 
     // Сохраняет target открытия чата в NSUserDefaults. Используется и при
     // тёплом тапе (didReceiveNotificationResponse:), и переживает cold start —
@@ -64,6 +66,11 @@ didReceiveNotificationResponse:(UNNotificationResponse *)response
     if ([peer isKindOfClass:NSString.class]) {
         persistOpenTarget(profileId, peer);
     }
+    // «Ответить» в баннере вызова → авто-приём после загрузки сессии (без второго
+    // тапа на экране). Тап по телу баннера флаг не ставит — там кнопки выбора.
+    if ([response.actionIdentifier isEqualToString:@"PARANOIA_CALL_ANSWER"]) {
+        [NSUserDefaults.standardUserDefaults setBool:YES forKey:kPendingCallAnswerKey];
+    }
     completionHandler();
 }
 @end
@@ -76,11 +83,19 @@ namespace
         return delegate;
     }
 
-    bool supportsContinuedProcessing()
+    // Фоновый опрос — через BGProcessingTask (iOS 13+): это API, ПАРНОЕ к уже
+    // объявленному в Info.plist режиму UIBackgroundModes=processing (поэтому НЕ
+    // нужна правка plist). ВАЖНО: BGAppRefreshTask потребовал бы режим 'fetch',
+    // которого в plist НЕТ → submitTaskRequest падал бы BGTaskSchedulerErrorCodeNotPermitted
+    // и задача НЕ запускалась (это и был регресс — фон-уведомления пропали).
+    // BGContinuedProcessingTask (iOS26) — для user-initiated work, для периодич.
+    // опроса не годится. Система всё равно сама решает частоту (без push реал-тайма
+    // не будет), но задача снова FIRING'ит в окнах системы.
+    bool supportsBackgroundTasks()
     {
-        if (@available(iOS 26.0, *)) {
-            return NSClassFromString(@"BGContinuedProcessingTaskRequest") != Nil &&
-                   NSClassFromString(@"BGTaskScheduler") != Nil;
+        if (@available(iOS 13.0, *)) {
+            return NSClassFromString(@"BGTaskScheduler") != Nil &&
+                   NSClassFromString(@"BGProcessingTaskRequest") != Nil;
         }
         return false;
     }
@@ -108,7 +123,7 @@ namespace
 
     void showLegacyIosWarningOnce()
     {
-        if (supportsContinuedProcessing()) return;
+        if (supportsBackgroundTasks()) return;
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         if ([defaults boolForKey:kWarningShownKey]) return;
 
@@ -164,7 +179,7 @@ namespace
 
     void registerPollingTask()
     {
-        if (!supportsContinuedProcessing()) return;
+        if (!supportsBackgroundTasks()) return;
         id scheduler = sharedTaskScheduler();
         SEL registerSelector = NSSelectorFromString(@"registerForTaskWithIdentifier:usingQueue:launchHandler:");
         if (scheduler == nil || ![scheduler respondsToSelector:registerSelector]) return;
@@ -179,43 +194,39 @@ namespace
 
     void schedulePollingTask()
     {
-        if (!supportsContinuedProcessing()) return;
+        if (!supportsBackgroundTasks()) return;
         id scheduler = sharedTaskScheduler();
         if (scheduler == nil) return;
 
-        Class requestClass = NSClassFromString(@"BGContinuedProcessingTaskRequest");
+        // BGProcessingTaskRequest — парный к UIBackgroundModes=processing (без правки
+        // plist). initWithIdentifier:, setRequiresNetworkConnectivity:YES (нужна сеть
+        // для опроса), setRequiresExternalPower:NO (не только на зарядке).
+        Class requestClass = NSClassFromString(@"BGProcessingTaskRequest");
         if (requestClass == Nil) return;
 
         id allocatedRequest = [requestClass alloc];
-        id request = nil;
-        SEL visibleInitSelector = NSSelectorFromString(@"initWithIdentifier:title:subtitle:");
-        if ([allocatedRequest respondsToSelector:visibleInitSelector]) {
-            request = ((id (*)(id, SEL, NSString *, NSString *, NSString *))objc_msgSend)(
-                allocatedRequest,
-                visibleInitSelector,
-                kPollingTaskIdentifier,
-                @"Paranoia",
-                NSLocalizedString(@"Проверка новых сообщений", @"background task title"));
-        } else {
-            SEL legacyInitSelector = NSSelectorFromString(@"initWithIdentifier:");
-            if (![allocatedRequest respondsToSelector:legacyInitSelector]) {
-                NSLog(@"Paranoia: BGContinuedProcessingTaskRequest has no supported initializer");
-                return;
-            }
-            request = ((id (*)(id, SEL, NSString *))objc_msgSend)(allocatedRequest,
-                                                                   legacyInitSelector,
-                                                                   kPollingTaskIdentifier);
+        SEL initSelector = NSSelectorFromString(@"initWithIdentifier:");
+        if (![allocatedRequest respondsToSelector:initSelector]) {
+            NSLog(@"Paranoia: BGProcessingTaskRequest has no initWithIdentifier:");
+            return;
         }
+        id request = ((id (*)(id, SEL, NSString *))objc_msgSend)(allocatedRequest, initSelector,
+                                                                 kPollingTaskIdentifier);
         if (request == nil) return;
 
-        NSDate *earliest = [NSDate dateWithTimeIntervalSinceNow:10 + arc4random_uniform(231)];
+        // Просим как можно скорее (система всё равно решает сама).
+        NSDate *earliest = [NSDate dateWithTimeIntervalSinceNow:60];
         SEL earliestSelector = NSSelectorFromString(@"setEarliestBeginDate:");
         if ([request respondsToSelector:earliestSelector]) {
             ((void (*)(id, SEL, NSDate *))objc_msgSend)(request, earliestSelector, earliest);
         }
-        SEL networkSelector = NSSelectorFromString(@"setRequiresNetworkConnectivity:");
-        if ([request respondsToSelector:networkSelector]) {
-            ((void (*)(id, SEL, BOOL))objc_msgSend)(request, networkSelector, YES);
+        SEL netSelector = NSSelectorFromString(@"setRequiresNetworkConnectivity:");
+        if ([request respondsToSelector:netSelector]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(request, netSelector, YES);
+        }
+        SEL powerSelector = NSSelectorFromString(@"setRequiresExternalPower:");
+        if ([request respondsToSelector:powerSelector]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(request, powerSelector, NO);
         }
 
         NSError *error = nil;
@@ -244,6 +255,27 @@ namespace
                                                                                                __unused NSError *error) {}];
     }
 
+    // Категория входящего вызова с кнопками Ответить/Сбросить (#6). «Ответить» —
+    // foreground (открывает приложение → штатный экран звонка подхватит оффер);
+    // «Сбросить» — просто гасит уведомление (звонок без push живёт коротко).
+    void ensureCallCategory()
+    {
+        UNNotificationAction *answer = [UNNotificationAction
+            actionWithIdentifier:@"PARANOIA_CALL_ANSWER"
+                           title:NSLocalizedString(@"Ответить", @"answer incoming call")
+                         options:UNNotificationActionOptionForeground];
+        UNNotificationAction *dismiss = [UNNotificationAction
+            actionWithIdentifier:@"PARANOIA_CALL_DISMISS"
+                           title:NSLocalizedString(@"Сбросить", @"reject incoming call")
+                         options:UNNotificationActionOptionDestructive];
+        UNNotificationCategory *cat = [UNNotificationCategory
+            categoryWithIdentifier:@"PARANOIA_CALL"
+                           actions:@[answer, dismiss]
+                 intentIdentifiers:@[]
+                           options:UNNotificationCategoryOptionNone];
+        [UNUserNotificationCenter.currentNotificationCenter setNotificationCategories:[NSSet setWithObject:cat]];
+    }
+
     // Дублирующая C-строка для возврата через extern "C" интерфейс — caller
     // (PlatformNotifications.cpp) обязан освободить через paranoia_ios_free_string.
     char *duplicateUtf8(NSString *value)
@@ -258,6 +290,7 @@ namespace
 extern "C" void paranoia_ios_register_background_tasks()
 {
     requestLocalNotificationPermission();
+    ensureCallCategory();
     registerPollingTask();
     showLegacyIosWarningOnce();
 }
@@ -294,6 +327,53 @@ extern "C" void paranoia_ios_show_message_count(unsigned long long count, const 
                                                                            content:content
                                                                            trigger:nil];
     [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
+}
+
+// Локальный баннер входящего вызова (#6). Кнопки — из категории PARANOIA_CALL.
+// callId нужен лишь для уникального идентификатора запроса (один звонок — один баннер).
+extern "C" void paranoia_ios_show_incoming_call(const char *callId)
+{
+    UNMutableNotificationContent *content = [UNMutableNotificationContent new];
+    content.title = NSLocalizedString(@"Входящий вызов", @"incoming call title");
+    content.body  = NSLocalizedString(@"Нажмите «Ответить», чтобы принять", @"incoming call body");
+    content.sound = UNNotificationSound.defaultSound;
+    content.categoryIdentifier = @"PARANOIA_CALL";
+    content.userInfo = @{ @"incomingCall": @YES };
+
+    NSString *cid = (callId != nullptr && callId[0] != '\0') ? @(callId) : @"x";
+    NSString *reqId = [@"paranoia.incoming_call." stringByAppendingString:cid];
+    UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:reqId
+                                                                           content:content
+                                                                           trigger:nil];
+    [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
+}
+
+// Handoff входящего звонка (#6): фоновый call-poll (в Qt-процессе) сохраняет
+// расшифрованный конверт; при открытии приложение забирает и скармливает в
+// CallSignaling.injectEnvelope (сервер `drain`-ит оффер, повторный poll пуст).
+extern "C" void paranoia_ios_store_pending_call_offer(const char *json)
+{
+    if (json == nullptr || json[0] == '\0') return;
+    [NSUserDefaults.standardUserDefaults setObject:@(json) forKey:kPendingCallOfferKey];
+}
+
+extern "C" bool paranoia_ios_take_pending_call_offer(char **out_json)
+{
+    if (out_json == nullptr) return false;
+    *out_json = nullptr;
+    NSString *offer = [NSUserDefaults.standardUserDefaults stringForKey:kPendingCallOfferKey];
+    if (offer.length == 0) return false;
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:kPendingCallOfferKey];
+    *out_json = duplicateUtf8(offer);
+    return true;
+}
+
+extern "C" bool paranoia_ios_take_pending_call_answer()
+{
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (![defaults boolForKey:kPendingCallAnswerKey]) return false;
+    [defaults removeObjectForKey:kPendingCallAnswerKey];
+    return true;
 }
 
 extern "C" void paranoia_ios_clear_delivered_notifications()

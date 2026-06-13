@@ -142,6 +142,21 @@ namespace paranoia::voip
         rx_path_poll_timer_.setInterval(500);
         rx_path_poll_timer_.setTimerType(Qt::CoarseTimer);
         connect(&rx_path_poll_timer_, &QTimer::timeout, this, &CallController::pollRxPath);
+
+        // Таймаут «звонок не дозвонился/не приняли». 60с ринга — и сбрасываем,
+        // чтобы state не залип в incoming/outgoing (иначе callActive не гаснет).
+        ring_timeout_timer_.setInterval(60000);
+        ring_timeout_timer_.setSingleShot(true);
+        ring_timeout_timer_.setTimerType(Qt::CoarseTimer);
+        connect(&ring_timeout_timer_, &QTimer::timeout, this, [this]() {
+            if (state_ == QStringLiteral("incoming")) {
+                qInfo().noquote() << "CallController: incoming call timed out — auto-rejecting";
+                rejectIncomingCall(QStringLiteral("timeout"));
+            } else if (state_ == QStringLiteral("outgoing")) {
+                qInfo().noquote() << "CallController: outgoing call timed out — hanging up";
+                hangupCall(QStringLiteral("timeout"));
+            }
+        });
     }
 
     void CallController::setEngine(CallEngine *engine) { engine_ = engine; }
@@ -185,7 +200,15 @@ namespace paranoia::voip
     void CallController::setState(const QString &s)
     {
         if (state_ == s) return;
+        qInfo().noquote() << "CallController: state" << state_ << "->" << s << "call" << logId(call_id_);
         state_ = s;
+        // Ринг-таймаут активен только пока звонок «звонит» (incoming/outgoing);
+        // как только running/idle — снимаем.
+        if (s == QStringLiteral("incoming") || s == QStringLiteral("outgoing")) {
+            ring_timeout_timer_.start();
+        } else {
+            ring_timeout_timer_.stop();
+        }
         emit callStateChanged();
     }
 
@@ -398,8 +421,19 @@ namespace paranoia::voip
                                  const QStringList &candidates, bool peerWantsVideo, qint64 /*createdTsMs*/)
     {
         if (state_ != QStringLiteral("idle")) {
-            // Уже занят — пошлём Hangup, чтобы peer знал, что мы не доступны.
-            // Делаем это «вручную», не трогая текущее состояние.
+            // Дубль ТОГО ЖЕ звонка (повторная доставка оффера: handoff + in-app
+            // poll, или re-deliver сервером) — просто игнорируем, НЕ шлём busy,
+            // иначе отобьём собственный активный/звонящий вызов.
+            if (callId == call_id_) {
+                qInfo().noquote() << "CallController: duplicate offer for active call" << logId(callId)
+                                  << "— ignoring";
+                return;
+            }
+            // Уже занят ДРУГИМ звонком — пошлём Hangup, чтобы peer знал, что мы не
+            // доступны. Делаем это «вручную», не трогая текущее состояние.
+            qWarning().noquote() << "CallController: rejecting incoming offer" << logId(callId) << "from"
+                                 << logId(fromPeer) << "— BUSY, current state" << state_ << "active call"
+                                 << logId(call_id_);
             if (handle_) {
                 QJsonObject p;
                 p.insert(QStringLiteral("call_id"), callId);
@@ -907,6 +941,38 @@ namespace paranoia::voip
         // Чтобы индикатор не врал и promoteBestPath не "застревал" на мнимом
         // direct, держим rx_path=None пока хоть один media-пакет не пришёл.
         const bool mediaConfirmedNow = engine_->mediaReceived();
+        // Защитная сетка для исходящего: если media УЖЕ течёт (расшифрованный RTP
+        // от peer'а), значит он принял звонок — даже если Answer-сигнал к нам не
+        // дошёл (его мог «увести» фон-сервис из drain-эндпоинта, или сигнал/UI
+        // разъехались по гонке на ПЕРВОМ звонке). Не держим UI в «Подключение»:
+        // двигаем state в running по факту медиа. setState идемпотентен; на
+        // happy-path сюда не попадаем (onAnswer уже сделал running).
+        if (mediaConfirmedNow && state_ == QStringLiteral("outgoing")) {
+            qInfo().noquote() << "CallController: media flowing while still 'outgoing' — promoting to running"
+                              << "(answer signal lost or raced)";
+            if (engine_) engine_->attachAudio(); // идемпотентно (capture_ уже есть → no-op)
+            setState(QStringLiteral("running"));
+            emit callConnected();
+        }
+        // Защитная сетка завершения: если разговор шёл (media была), но входящий
+        // аудио-поток оборвался дольше порога — peer положил трубку, а Hangup-сигнал
+        // к нам не дошёл (его «увёл» фон-сервис из drain-эндпоинта, либо сеть). DTX
+        // выключен → в живом звонке кадры идут каждые 20мс, поэтому такая «дыра»
+        // достоверна. Завершаем сами (и шлём свой Hangup — no-op если peer уже ушёл,
+        // чистый teardown если это был обрыв сети). Чинит «сброс не доходит вообще».
+        if (state_ == QStringLiteral("running") && engine_->mediaReceived()) {
+            const qint64 lastRx = engine_->lastAudioRxMs();
+            if (lastRx > 0) {
+                const qint64 gap = QDateTime::currentMSecsSinceEpoch() - lastRx;
+                constexpr qint64 kMediaLossMs = 6000;
+                if (gap > kMediaLossMs) {
+                    qInfo().noquote() << "CallController: incoming media stalled" << gap
+                                      << "ms — ending call (remote hangup not received)";
+                    hangupCall(QStringLiteral("media_timeout"));
+                    return;
+                }
+            }
+        }
         if (peer == last_observed_peer_ && (rx_path_ != CallPath::None || !mediaConfirmedNow)) return;
         last_observed_peer_ = peer;
         CallPath newRx = CallPath::None;
