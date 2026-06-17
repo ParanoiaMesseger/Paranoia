@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "paranoia-cover"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "anyhow",
  "base64",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "paranoia-lib"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "anyhow",
  "argon2",

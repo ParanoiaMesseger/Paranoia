@@ -1,12 +1,18 @@
 #include "NotificationCoordinator.hpp"
 
 #include "platform/PlatformNotifications.hpp"
+#include "session/Dialog.hpp"
 #include "session/ServerSession.hpp"
 #include "session/SessionStore.hpp"
 #include <ParanoiaFFI>
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QSet>
 #include <QDebug>
 #include <QGuiApplication>
 #include <QMutexLocker>
@@ -30,6 +36,12 @@ NotificationCoordinator::NotificationCoordinator(QObject *parent) : QObject(pare
     if (applicationIsActive()) PlatformNotifications::clearAccumulatedNotifications();
     m_pollTimer.setSingleShot(true);
     connect(&m_pollTimer, &QTimer::timeout, this, &NotificationCoordinator::onPollTimer);
+    // Heartbeat короче серверного TTL (Java: 150с) — продлеваем foreground пока живы.
+    m_foregroundHeartbeat.setInterval(60'000);
+    connect(&m_foregroundHeartbeat, &QTimer::timeout, this, []() {
+        PlatformNotifications::setApplicationForeground(true);
+    });
+    if (applicationIsActive()) m_foregroundHeartbeat.start();
     connect(qApp, &QGuiApplication::applicationStateChanged, this, &NotificationCoordinator::onApplicationStateChanged);
     if (QNetworkInformation::loadDefaultBackend()) {
         if (auto *networkInfo = QNetworkInformation::instance()) {
@@ -57,6 +69,7 @@ NotificationCoordinator::NotificationCoordinator(QObject *parent) : QObject(pare
 NotificationCoordinator::~NotificationCoordinator()
 {
     m_pollTimer.stop();
+    m_foregroundHeartbeat.stop();
     PlatformNotifications::setBackgroundPollCallback({});
 #if defined(Q_OS_ANDROID)
     PlatformNotifications::setApplicationForeground(false);
@@ -211,6 +224,8 @@ void NotificationCoordinator::onApplicationStateChanged(Qt::ApplicationState sta
 {
     m_applicationActive.store(state == Qt::ApplicationActive, std::memory_order_relaxed);
     PlatformNotifications::setApplicationForeground(applicationIsActive());
+    if (applicationIsActive()) m_foregroundHeartbeat.start();
+    else m_foregroundHeartbeat.stop();
     m_notifyRetryCount = 0;
     if (state == Qt::ApplicationActive) {
         // При любом выходе на передний план — даже если приложение открыто иконкой,
@@ -485,6 +500,63 @@ void NotificationCoordinator::runBackgroundPollFromService()
 #endif
         return;
     }
+#if defined(Q_OS_IOS)
+    // Входящие звонки в фоне (#6, iOS). На iOS опрос идёт В Qt-процессе, поэтому
+    // используем in-process handle сессии: один call_poll (long-poll 30с) на сессию,
+    // ключи диалогов — из session->dialogs (как в VoipSystem). На оффер (kind 0) —
+    // локальный баннер с кнопками. БЕЗ push. Dedup по call_id, чтобы не звенеть дважды.
+    {
+        static QSet<QString> seenCallIds;
+        QSet<QString> doneSessions;
+        for (const auto &target : targets) {
+            if (!target.session) continue;
+            const QString user = target.session->serverId;
+            if (user.isEmpty() || doneSessions.contains(user)) continue;
+            doneSessions.insert(user);
+
+            QJsonArray peers;
+            for (const Dialog &d : target.session->dialogs) {
+                if (d.peerServerId.isEmpty() || d.keyring.isEmpty()) continue;
+                QJsonObject pk;
+                pk["peer"]           = d.peerServerId;
+                pk["master_key_b64"] = QString::fromUtf8(d.keyring.last().key.toBase64());
+                peers.append(pk);
+            }
+            if (peers.isEmpty()) continue;
+            const QString peersJson =
+                QString::fromUtf8(QJsonDocument(peers).toJson(QJsonDocument::Compact));
+
+            QString callJson;
+            {
+                QMutexLocker locker(&target.session->ffiMutex);
+                if (!target.session->ffi) continue;
+                callJson = target.session->ffi->callPoll(user, peersJson, 30000);
+            }
+            if (callJson.isEmpty()) continue;
+            QJsonParseError perr{};
+            const auto doc = QJsonDocument::fromJson(callJson.toUtf8(), &perr);
+            if (perr.error != QJsonParseError::NoError || !doc.isArray()) continue;
+            for (const auto &v : doc.array()) {
+                const auto env = v.toObject();
+                if (env.value("kind").toInt(-1) != 0) continue; // только Offer
+                const auto payload =
+                    QJsonDocument::fromJson(env.value("payload_json").toString().toUtf8()).object();
+                QString callId = payload.value("call_id").toString();
+                if (callId.isEmpty())
+                    callId = env.value("sender").toString() + ":"
+                             + QString::number(env.value("ts_ms").toVariant().toLongLong());
+                if (seenCallIds.contains(callId)) continue;
+                seenCallIds.insert(callId);
+                // Сохраняем расшифрованный конверт для handoff: при открытии VoipSystem
+                // заберёт и скормит в CallSignaling.injectEnvelope (сервер уже drain'нул).
+                PlatformNotifications::storePendingCallOffer(
+                    QString::fromUtf8(QJsonDocument(env).toJson(QJsonDocument::Compact)));
+                PlatformNotifications::showIncomingCall(callId);
+            }
+        }
+    }
+#endif
+
     quint64 total = 0;
     int failures  = 0;
     QString firstError;

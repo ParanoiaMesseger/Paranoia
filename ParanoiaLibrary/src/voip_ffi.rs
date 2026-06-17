@@ -558,6 +558,132 @@ pub extern "C" fn paranoia_call_poll(
     })
 }
 
+/// STATELESS опрос входящих звонков для фонового Android-сервиса (без сессии/
+/// ParanoiaHandle, отдельный процесс `:notifications`). Аналог `paranoia_call_poll`,
+/// но Transport/подпись строятся из явных параметров (как `paranoia_service_notify_count`):
+///   • `signing_key_b64` — Ed25519 seed (32 байта, base64);
+///   • `user` — свой server-id;
+///   • `peers_keys_json` — `[{"peer","master_key_b64"}]` для расшифровки офферов.
+/// Возвращает JSON-массив конвертов `[{sender,kind,payload_json,ts_ms}]` (как call_poll)
+/// либо null при ошибке (детали в paranoia_last_error). Строку освобождать paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_service_call_poll(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    signing_key_b64: *const c_char,
+    user: *const c_char,
+    peers_keys_json: *const c_char,
+    long_poll_ms: u32,
+) -> *mut c_char {
+    ffi_catch_ptr("service_call_poll_panic", || {
+        let server = match unsafe { cstr(server_url) } {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                set_last_error("invalid_server");
+                return ptr::null_mut();
+            }
+        };
+        let reserves: Vec<String> = match unsafe { cstr(reserve_server_urls_json) } {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(&s).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let sk_b64 = match unsafe { cstr(signing_key_b64) } {
+            Some(s) => s,
+            None => {
+                set_last_error("invalid_signing_key");
+                return ptr::null_mut();
+            }
+        };
+        let user_s = match unsafe { cstr(user) } {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                set_last_error("invalid_user");
+                return ptr::null_mut();
+            }
+        };
+        let peers_json = match unsafe { cstr(peers_keys_json) } {
+            Some(s) => s,
+            None => {
+                set_last_error("invalid_peers_keys");
+                return ptr::null_mut();
+            }
+        };
+        let entries: Vec<PeerKeyEntry> = serde_json::from_str(&peers_json).unwrap_or_default();
+        let mut by_peer = std::collections::HashMap::with_capacity(entries.len());
+        for e in entries {
+            if let Some(k) = decode_b64_32(&e.master_key_b64) {
+                by_peer.insert(e.peer, k);
+            }
+        }
+
+        let sk_bytes = match decode_b64_32(&sk_b64) {
+            Some(b) => b,
+            None => {
+                set_last_error("invalid_signing_key: expected 32 bytes base64");
+                return ptr::null_mut();
+            }
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+
+        let rt = match Runtime::new() {
+            Ok(r) => r,
+            Err(_) => {
+                set_last_error("runtime_error");
+                return ptr::null_mut();
+            }
+        };
+        let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
+        let transport = crate::transport::Transport::new(&server, reserves.iter(), cover);
+
+        // nonce/подпись — точь-в-точь как в paranoia_call_poll (иначе сервер 401).
+        static SVC_POLL_NONCE: AtomicU64 = AtomicU64::new(0);
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let ctr = SVC_POLL_NONCE.fetch_add(1, Ordering::Relaxed) & 0xFFFF;
+        let nonce_full = (ms << 16) | ctr;
+        let signed = format!("{user_s}{nonce_full}{long_poll_ms}");
+        let sig = crate::crypto::sign(&signing_key, signed.as_bytes());
+        let core = CoreCallPoll {
+            user: user_s,
+            nonce: nonce_full,
+            long_poll_ms,
+            sig,
+        };
+
+        let items: Vec<CallEnvelopeIn> = match rt.block_on(transport.call_poll(&core)) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("service_call_poll_failed: {e}"));
+                return ptr::null_mut();
+            }
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for env in items {
+            let key = match by_peer.get(&env.sender) {
+                Some(k) => k,
+                None => continue,
+            };
+            let plain = match signaling_open(key, &env.payload) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let payload_str = match std::str::from_utf8(&plain) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+            out.push(serde_json::json!({
+                "sender": env.sender,
+                "kind": env.kind,
+                "payload_json": payload_str,
+                "ts_ms": env.ts_ms,
+            }));
+        }
+        string_to_c(serde_json::Value::Array(out).to_string())
+    })
+}
+
 // ── UDP сессия ─────────────────────────────────────────────────────────
 
 /// Callback входящего расшифрованного Opus-фрейма (voice-поток). Вызывается из

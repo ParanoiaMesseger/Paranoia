@@ -437,12 +437,35 @@ void VersionInfoBackend::installDownloadedFile(const QString &filePath)
         context.object(), jPath.object());
     setDownloadStatus(tr("Открыт системный установщик."));
 #elif defined(Q_OS_LINUX)
-    // pkexec dpkg -i <file> — графический запрос пароля администратора (polkit).
-    const bool started = QProcess::startDetached(
-        QStringLiteral("pkexec"), {QStringLiteral("dpkg"), QStringLiteral("-i"), filePath});
-    setDownloadStatus(started
-                          ? tr("Запущена установка — введите пароль администратора.")
-                          : tr("Не удалось запустить pkexec. Установите вручную: %1").arg(filePath));
+    // pkexec (graphic polkit-запрос пароля) → ставим .deb. `dpkg -i` сам НЕ тянет
+    // зависимости (частая причина «пароль ввёл, а не установилось»), поэтому при
+    // его неуспехе добиваем `apt-get -f install -y`. Путь передаём позиционным $1
+    // (без проблем с пробелами/кавычками). Раньше был startDetached → ошибка dpkg
+    // была не видна; теперь ждём завершения и показываем результат/код.
+    auto *proc = new QProcess(this);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, proc, filePath](int code, QProcess::ExitStatus) {
+                const QString out = QString::fromUtf8(proc->readAll()).trimmed();
+                if (code == 0) {
+                    setDownloadStatus(tr("Обновление установлено. Перезапустите приложение."));
+                } else {
+                    const QString tail = out.right(300);
+                    setDownloadStatus(tr("Установка не удалась (код %1). %2\nМожно вручную: sudo dpkg -i %3")
+                                          .arg(code)
+                                          .arg(tail)
+                                          .arg(filePath));
+                }
+                proc->deleteLater();
+            });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, filePath](QProcess::ProcessError) {
+        setDownloadStatus(tr("Не удалось запустить pkexec. Установите вручную: sudo dpkg -i %1").arg(filePath));
+        proc->deleteLater();
+    });
+    setDownloadStatus(tr("Запущена установка — введите пароль администратора."));
+    proc->start(QStringLiteral("pkexec"),
+                {QStringLiteral("sh"), QStringLiteral("-c"),
+                 QStringLiteral("dpkg -i \"$1\" || apt-get -f install -y"), QStringLiteral("sh"), filePath});
 #elif defined(Q_OS_WIN)
     // Запуск установщика (IFW).
     const bool started = QProcess::startDetached(filePath, {});

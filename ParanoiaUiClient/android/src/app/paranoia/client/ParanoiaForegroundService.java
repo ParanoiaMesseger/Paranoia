@@ -45,30 +45,110 @@ public final class ParanoiaForegroundService extends Service {
     private static final String ACTION_POLL_NOW = "app.paranoia.client.POLL_NOW";
     private static final String ACTION_SET_SNAPSHOT = "app.paranoia.client.SET_SNAPSHOT";
     private static final String ACTION_CLEAR_SNAPSHOT = "app.paranoia.client.CLEAR_SNAPSHOT";
+    // UI сообщает, что САМ опрашивает звонки (foreground/активный звонок). Доставляем
+    // ИНТЕНТОМ (а не cross-process prefs — те ненадёжны: :notifications читает свой
+    // устаревший кэш), чтобы фон-сервис писал флаг в СВОЁМ процессе и читал верно.
+    private static final String ACTION_SET_UI_CALL_POLLING = "app.paranoia.client.SET_UI_CALL_POLLING";
+    private static final String EXTRA_UI_CALL_POLLING = "app.paranoia.client.UI_CALL_POLLING";
     private static final String EXTRA_APP_FOREGROUND = "app.paranoia.client.APP_FOREGROUND";
     private static final String EXTRA_SNAPSHOT_JSON = "app.paranoia.client.SNAPSHOT_JSON";
     private static final int POLL_ALARM_REQUEST = 2027;
     private static final String PREFS = "paranoia_notifications";
     private static final String PREF_APP_FOREGROUND = "app_foreground";
+    // Дедлайн (elapsedRealtime, ms) до которого флаг foreground считается валидным.
+    // UI шлёт heartbeat раз в 60с; TTL 150с даёт запас на 1 пропуск. Если UI-процесс
+    // упал/убит «активным», флаг истечёт и сервис возобновит фоновый опрос (раньше
+    // флаг залипал в true → уведомления молча терялись до перезапуска приложения).
+    private static final String PREF_APP_FOREGROUND_UNTIL = "app_foreground_until";
+    private static final long APP_FOREGROUND_TTL_MS = 150_000L;
     private static final String PREF_SERVICE_REQUESTED = "service_requested";
     private static final String PREF_OPEN_PROFILE_ID = "open_profile_id";
     private static final String PREF_OPEN_PEER = "open_peer";
+    // Отложенный конверт входящего звонка (#6 handoff): фон-процесс пишет в prefs
+    // (cross-process), UI-процесс забирает при открытии и поднимает экран вызова.
+    private static final String PREF_CALL_OFFER = "pending_call_offer";
+    // Время сохранения оффера (elapsedRealtime, ms). Оффер «протухает»: звонок
+    // звенит недолго, а несработавший/сброшенный оффер мог залежаться в prefs и
+    // потом инжектнуться в открытое приложение, заняв состояние мёртвым звонком →
+    // реальные входящие отбивались как BUSY. Старше TTL — выбрасываем.
+    private static final String PREF_CALL_OFFER_TS = "pending_call_offer_ts";
+    // call_id показанного/сохранённого оффера — чтобы по Hangup(kind=2) понять, что
+    // ИМЕННО этот звонок отменён, и погасить баннер + стереть оффер (иначе на входе
+    // в приложение инжектился экран уже отменённого звонка).
+    private static final String PREF_CALL_OFFER_CALLID = "pending_call_offer_callid";
+    private static final long CALL_OFFER_TTL_MS = 60_000L;
+    // Дедлайн (elapsedRealtime, ms), пока которого ОПРОС ЗВОНКОВ ведёт UI-процесс
+    // (его in-app сигналинг активен: foreground или идёт звонок). Фон-сервис в это
+    // время НЕ опрашивает call_poll — иначе два поллера дерутся за drain-эндпоинт
+    // и UI-клиент «съедал» оффер, показывая невидимый экран вместо баннера.
+    // UI шлёт heartbeat (~30с), TTL 90с — переживает 1-2 пропуска; на падении UI
+    // флаг истекает и фон-сервис снова берёт звонки на себя.
+    private static final String PREF_UI_CALL_POLLING_UNTIL = "ui_call_polling_until";
+    private static final long UI_CALL_POLLING_TTL_MS = 90_000L;
     private static final String TAG = "ParanoiaService";
     private static final int FOREGROUND_NOTIFICATION_ID = 1001;
     private static final int MESSAGE_NOTIFICATION_ID = 1002;
+    // Входящие звонки в фоне (#6): баннер высокого приоритета с кнопками.
+    private static final String CALL_CHANNEL_ID = "paranoia_calls";
+    private static final int CALL_NOTIFICATION_ID = 1003;
+    private static final String ACTION_CALL_DISMISS = "app.paranoia.client.CALL_DISMISS";
+    private static final String EXTRA_CALL_ID = "app.paranoia.client.CALL_ID";
+    // Конверт оффера передаём в UI ИМЕННО через intent-extra (надёжный
+    // cross-process канал; SharedPreferences между процессами ненадёжен) +
+    // prefs как fallback для тёплого резюма.
+    private static final String EXTRA_CALL_OFFER = "app.paranoia.client.CALL_OFFER";
+    // Флаг «пользователь нажал ОТВЕТИТЬ в баннере» (а не просто тапнул тело):
+    // после ввода PIN звонок принимается автоматически, без второго тапа на экране.
+    private static final String EXTRA_CALL_ANSWER = "app.paranoia.client.CALL_ANSWER";
+    // Уже показанные офферы (по call_id) — чтобы один звонок не звенел на каждом poll'е.
+    private static final java.util.Set<String> SEEN_CALL_IDS =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+    // МГНОВЕННЫЕ СООБЩЕНИЯ: per-диалог message long-poll параллельно с call-poll'ом.
+    // Отдельный пул (cached, растёт под число диалогов; long-poll возвращается за
+    // ≤15с server-cap / ≤60с request-timeout — потоки НЕ виснут). Set — диалоги, по
+    // которым сейчас висит long-poll, чтобы не плодить дубли.
+    private static final java.util.concurrent.ExecutorService MSG_EXECUTOR =
+            java.util.concurrent.Executors.newCachedThreadPool();
+    private static final java.util.Set<String> MSG_INFLIGHT =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    // Высшая «увиденная» seq по диалогу: long-poll опрашивает с НЕЁ (а не с фикс.
+    // snapshot.seq), иначе при бэклоге непрочитанных сервер сразу возвращает count>0
+    // → tight-loop / задержка новых на бэкофф. Двигая seq за уже посчитанные, ждём
+    // ГЕНУИННО новые → мгновенно даже при непрочитанных. Уведомление-итог всё равно
+    // считает pollNotifications от реальной last_pulled seq.
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> MSG_SEEN_SEQ =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long MSG_LONG_POLL_MS = 15_000L;
     private static final long POLL_INTERVAL_MS = 60_000L;
     // Если poll не завершился за это время — считаем его зависшим (несмотря на
     // 60s request-timeout в Rust) и разрешаем стартовать новый. Зависший поток
     // утечёт, но cached pool не даст ему заблокировать следующие опросы.
-    private static final long POLL_HARD_TIMEOUT_MS = 120_000L;
+    // Совпадает с потолком wakelock'а (75с): если poll завис, не блокируем
+    // следующий цикл дольше необходимого (раньше 120с > 60с интервала → каждый
+    // второй опрос мог пропускаться tryBeginPoll на медленной сети).
+    private static final long POLL_HARD_TIMEOUT_MS = 75_000L;
 
-    private static final ExecutorService POLL_EXECUTOR = Executors.newCachedThreadPool();
+    // ОГРАНИЧЕННЫЙ пул: при "тихой" потере сети (TCP blackhole) нативный вызов мог
+    // висеть минутами; cached-pool плодил бы новые потоки без предела →
+    // OutOfMemoryError: pthread_create. Guard'ы (tryBeginPoll/tryBeginCallPoll)
+    // и так держат не более 1 msg- + 1 call-poll одновременно; 4 слота с запасом.
+    private static final ExecutorService POLL_EXECUTOR = Executors.newFixedThreadPool(4);
     // Время старта текущего poll'а (мс), 0 = poll не идёт. Раньше тут был
     // AtomicBoolean — но один зависший сетевой вызов оставлял его в true
     // навсегда, и сервис переставал опрашивать совсем.
     private static final AtomicLong pollStartedAtMs = new AtomicLong(0L);
+    // ОТДЕЛЬНЫЙ in-flight для call-poll (#6): его 30-сек long-poll НЕ должен держать
+    // слот опроса СООБЩЕНИЙ — иначе при медленной сети следующий msg-poll
+    // пропускался tryBeginPoll и уведомления опаздывали (регрессия). Свой guard
+    // + свой wakelock полностью расцепляют звонки от сообщений.
+    private static final AtomicLong callPollStartedAtMs = new AtomicLong(0L);
     private static volatile boolean started = false;
     private static volatile boolean appForeground = false;
+    // true ТОЛЬКО когда snapshot пуст из-за ЯВНОГО logout/clear из UI. Пустой
+    // snapshot из-за рестарта процесса (ещё не пришёл) — НЕ повод останавливать
+    // сервис (раньше любой пустой snapshot → stop() + сброс service_requested →
+    // сервис умирал навсегда). Различаем «временно пусто» и «осознанно очищено».
+    private static volatile boolean snapshotExplicitlyCleared = false;
     private static volatile boolean nativeLibraryLoaded = false;
     private static volatile boolean nativeLibraryLoadAttempted = false;
     private static volatile boolean paranoiaInitialized = false;
@@ -82,6 +162,14 @@ public final class ParanoiaForegroundService extends Service {
     private static native long paranoiaServiceNotifyCount(String serverUrl, String reserveUrlsJson,
                                                           String signingKeyB64, String senderServerId,
                                                           String partnerServerId, long seq);
+    // Как notifyCount, но long-poll: сервер держит до нового сообщения / longPollMs.
+    private static native long paranoiaServiceNotifyCountWait(String serverUrl, String reserveUrlsJson,
+                                                              String signingKeyB64, String senderServerId,
+                                                              String partnerServerId, long seq, int longPollMs);
+    // Stateless опрос входящих звонков → JSON-массив [{sender,kind,payload_json,ts_ms}] или null.
+    private static native String paranoiaServiceCallPoll(String serverUrl, String reserveUrlsJson,
+                                                         String signingKeyB64, String user,
+                                                         String peerKeysJson, int longPollMs);
     private static native String paranoiaLastError();
 
     // ── Snapshot модель ────────────────────────────────────────────────────
@@ -114,13 +202,16 @@ public final class ParanoiaForegroundService extends Service {
         final String signingKeyB64;
         final String senderServerId;
         final List<DialogHint> dialogs;
+        // JSON-массив [{peer,master_key_b64}] для фонового опроса звонков (call_poll).
+        final String peerKeysJson;
         ProfileHint(String serverUrl, String reserveUrlsJson, String signingKeyB64,
-                    String senderServerId, List<DialogHint> dialogs) {
+                    String senderServerId, List<DialogHint> dialogs, String peerKeysJson) {
             this.serverUrl = serverUrl;
             this.reserveUrlsJson = reserveUrlsJson;
             this.signingKeyB64 = signingKeyB64;
             this.senderServerId = senderServerId;
             this.dialogs = Collections.unmodifiableList(dialogs);
+            this.peerKeysJson = peerKeysJson;
         }
     }
 
@@ -182,7 +273,11 @@ public final class ParanoiaForegroundService extends Service {
 
     public static void setApplicationForeground(Context context, boolean foreground) {
         appForeground = foreground;
-        prefs(context).edit().putBoolean(PREF_APP_FOREGROUND, foreground).commit();
+        long until = foreground ? android.os.SystemClock.elapsedRealtime() + APP_FOREGROUND_TTL_MS : 0L;
+        prefs(context).edit()
+                .putBoolean(PREF_APP_FOREGROUND, foreground)
+                .putLong(PREF_APP_FOREGROUND_UNTIL, until)
+                .commit();
         if (foreground) {
             cancelMessageNotification(context);
         }
@@ -267,20 +362,46 @@ public final class ParanoiaForegroundService extends Service {
         Log.i(TAG, "onStartCommand action=" + action);
         if (ACTION_SET_SNAPSHOT.equals(action)) {
             handleSnapshotIntent(intent);
+            // Непустой snapshot пришёл → это НЕ logout; пустой publish трактуем как очистку.
+            snapshotExplicitlyCleared = SNAPSHOT.get() == null || SNAPSHOT.get().isEmpty();
         } else if (ACTION_CLEAR_SNAPSHOT.equals(action)) {
             SNAPSHOT.set(Snapshot.empty());
+            snapshotExplicitlyCleared = true;
             Log.i(TAG, "snapshot cleared by UI");
+        } else if (ACTION_CALL_DISMISS.equals(action)) {
+            NotificationManager m = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (m != null) m.cancel(CALL_NOTIFICATION_ID);
+            // Сброшенный звонок не должен потом инжектнуться в открытое приложение.
+            prefs(this).edit().remove(PREF_CALL_OFFER).remove(PREF_CALL_OFFER_TS).remove(PREF_CALL_OFFER_CALLID).apply();
+            Log.i(TAG, "incoming call dismissed by user");
+        } else if (ACTION_SET_UI_CALL_POLLING.equals(action)) {
+            // Пишем флаг в СВОЁМ (:notifications) процессе → uiOwnsCallPolling() читает
+            // верно. true → UI сам опрашивает (мы не лезем); false → UI отдал звонки
+            // нам, и fall-through triggerPollAndReschedule СРАЗУ стартует наш чейн
+            // (без ожидания следующего 60-сек будильника).
+            boolean uiActive = intent.getBooleanExtra(EXTRA_UI_CALL_POLLING, false);
+            long until = uiActive ? android.os.SystemClock.elapsedRealtime() + UI_CALL_POLLING_TTL_MS : 0L;
+            prefs(this).edit().putLong(PREF_UI_CALL_POLLING_UNTIL, until).commit();
         }
         if (intent != null && intent.hasExtra(EXTRA_APP_FOREGROUND)) {
             appForeground = intent.getBooleanExtra(EXTRA_APP_FOREGROUND, appForeground);
-            prefs(this).edit().putBoolean(PREF_APP_FOREGROUND, appForeground).commit();
+            long until = appForeground ? android.os.SystemClock.elapsedRealtime() + APP_FOREGROUND_TTL_MS : 0L;
+            prefs(this).edit()
+                    .putBoolean(PREF_APP_FOREGROUND, appForeground)
+                    .putLong(PREF_APP_FOREGROUND_UNTIL, until)
+                    .commit();
         } else {
             appForeground = isApplicationForeground(this);
         }
         ensureChannels(this);
         Notification notification = buildForegroundNotification();
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // Android 15 (SDK 35) ограничивает dataSync FGS 6 часами/сутки →
+                // onTimeout убивает наш постоянный сервис. remoteMessaging — тип FGS
+                // для мессенджеров, без этого лимита и без runtime-prerequisites.
+                startForeground(FOREGROUND_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(FOREGROUND_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
             } else {
                 startForeground(FOREGROUND_NOTIFICATION_ID, notification);
@@ -299,9 +420,14 @@ public final class ParanoiaForegroundService extends Service {
 
     @Override
     public void onDestroy() {
-        cancelPollAlarm(this);
         started = false;
         stopForeground(true);
+        // Отменяем watchdog-alarm ТОЛЬКО при явном стопе (logout). При неявном
+        // уничтожении (OEM/system pressure) alarm ОСТАВЛЯЕМ — он разбудит и
+        // перезапустит сервис (раньше cancel здесь убивал восстановление навсегда).
+        if (!serviceRequested(this)) {
+            cancelPollAlarm(this);
+        }
         super.onDestroy();
     }
 
@@ -309,7 +435,10 @@ public final class ParanoiaForegroundService extends Service {
     public void onTaskRemoved(Intent rootIntent) {
         Log.i(TAG, "task removed: keep notification service running");
         appForeground = false;
-        prefs(this).edit().putBoolean(PREF_APP_FOREGROUND, false).commit();
+        prefs(this).edit()
+                .putBoolean(PREF_APP_FOREGROUND, false)
+                .putLong(PREF_APP_FOREGROUND_UNTIL, 0L)
+                .commit();
         triggerPollAndReschedule();
         super.onTaskRemoved(rootIntent);
     }
@@ -331,6 +460,10 @@ public final class ParanoiaForegroundService extends Service {
     }
 
     private void triggerPollAndReschedule() {
+        // Отменяем прежний alarm ДО постановки нового: иначе при повторном
+        // onStartCommand (start/snapshot/foreground-toggle) к ещё-не-сработавшему
+        // alarm'у добавляется новый → два alarm'а, интервал опроса дрейфует.
+        cancelPollAlarm(this);
         runAutonomousPoll();
         schedulePollAlarm(this, POLL_INTERVAL_MS);
     }
@@ -344,7 +477,7 @@ public final class ParanoiaForegroundService extends Service {
     // Используем именно BroadcastReceiver, а не PendingIntent.getForegroundService:
     // OEM-агрессивные battery saver'ы (Transsion Hiber, MIUI) часто блокируют
     // запуск FGS из background даже для уже-запущенного сервиса, тогда как
-    // broadcast'ы с RTC_WAKEUP проходят через эти ограничения и временно
+    // broadcast'ы с ELAPSED_REALTIME_WAKEUP проходят через эти ограничения и временно
     // снимают app standby. Получатель сам подтягивает CPU через wake lock и
     // делегирует работу POLL_EXECUTOR'у.
     private static PendingIntent pollAlarmIntent(Context context) {
@@ -360,6 +493,13 @@ public final class ParanoiaForegroundService extends Service {
         @Override
         public void onReceive(Context context, Intent intent) {
             final Context appContext = context.getApplicationContext();
+            // «Сбросить» из баннера входящего вызова — гасим уведомление и выходим.
+            if (intent != null && ACTION_CALL_DISMISS.equals(intent.getAction())) {
+                NotificationManager m = (NotificationManager) appContext.getSystemService(Context.NOTIFICATION_SERVICE);
+                if (m != null) m.cancel(CALL_NOTIFICATION_ID);
+                Log.i(TAG, "incoming call dismissed by user");
+                return;
+            }
             Log.i(TAG, "alarm received, dispatching poll");
             // Сразу планируем следующий alarm, чтобы цикл не сломался, если
             // текущий poll зависнет в сети или native-вызове.
@@ -375,7 +515,8 @@ public final class ParanoiaForegroundService extends Service {
                 wakeLock.acquire(75_000L);
             }
 
-            if (!tryBeginPoll()) {
+            final long pollToken = tryBeginPoll();
+            if (pollToken == 0L) {
                 if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
                 return;
             }
@@ -387,9 +528,9 @@ public final class ParanoiaForegroundService extends Service {
                 @Override
                 public void run() {
                     try {
-                        processPollResult(appContext, pollNotifications(appContext));
+                        executeFullPoll(appContext);
                     } finally {
-                        endPoll();
+                        endPoll(pollToken);
                         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
                     }
                 }
@@ -398,26 +539,111 @@ public final class ParanoiaForegroundService extends Service {
     }
 
     // Разрешает старт нового poll'а, если предыдущего нет либо он висит дольше
-    // POLL_HARD_TIMEOUT_MS (считаем мёртвым). Возвращает true, если право на
-    // poll получено.
-    private static boolean tryBeginPoll() {
-        final long now = System.currentTimeMillis();
+    // POLL_HARD_TIMEOUT_MS (считаем мёртвым). Возвращает ТОКЕН старта (монотонное
+    // время, !=0) или 0L, если poll уже идёт. Токен нужен endPoll'у: лок снимаем
+    // ТОЛЬКО если он всё ещё наш (compareAndSet). Иначе зависший по хард-таймауту
+    // старый поток, завершившись, обнулял бы лок, уже принадлежащий новому poll'у
+    // → параллельные накладывающиеся опросы.
+    private static long tryBeginPoll() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now == 0L) now = 1L;
         while (true) {
             final long started = pollStartedAtMs.get();
             if (started != 0L && now - started < POLL_HARD_TIMEOUT_MS) {
-                return false;
+                return 0L;
             }
             if (pollStartedAtMs.compareAndSet(started, now)) {
                 if (started != 0L) {
                     Log.w(TAG, "previous poll exceeded hard timeout; starting a fresh one");
                 }
-                return true;
+                return now;
             }
         }
     }
 
-    private static void endPoll() {
-        pollStartedAtMs.set(0L);
+    private static void endPoll(long token) {
+        if (token != 0L) pollStartedAtMs.compareAndSet(token, 0L);
+    }
+
+    // Отдельный in-flight guard для call-poll (хард-таймаут чуть выше его long-poll).
+    // Токен — как у tryBeginPoll: снимаем лок только если он наш.
+    private static long tryBeginCallPoll() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now == 0L) now = 1L;
+        while (true) {
+            final long started = callPollStartedAtMs.get();
+            if (started != 0L && now - started < 45_000L) return 0L;
+            if (callPollStartedAtMs.compareAndSet(started, now)) return now;
+        }
+    }
+
+    private static void endCallPoll(long token) {
+        if (token != 0L) callPollStartedAtMs.compareAndSet(token, 0L);
+    }
+
+    // Запустить call-poll ОТДЕЛЬНОЙ задачей со своим wakelock — не блокируя слот и
+    // wakelock опроса сообщений (тот завершается быстро, как до #6). Звонки в фоне
+    // — best-effort (Doze), но сообщения больше не ждут 30-сек long-poll звонка.
+    private static void scheduleCallPoll(final Context appContext) {
+        // Если живой UI сам опрашивает звонки (foreground/активный звонок) — не лезем
+        // в call_poll, чтобы не «увести» оффер у in-app клиента (drain-эндпоинт: один
+        // читатель). Когда UI уходит в фон/умирает — флаг гаснет, и звонки берём мы.
+        if (uiOwnsCallPolling(appContext)) {
+            return;
+        }
+        final long callToken = tryBeginCallPoll();
+        if (callToken == 0L) return;
+        PowerManager pm = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
+        final PowerManager.WakeLock wakeLock = pm == null ? null
+                : pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "paranoia:callpoll");
+        if (wakeLock != null) {
+            wakeLock.setReferenceCounted(false);
+            wakeLock.acquire(45_000L);
+        }
+        POLL_EXECUTOR.execute(new Runnable() {
+            @Override
+            public void run() {
+                final long startedAt = android.os.SystemClock.elapsedRealtime();
+                try {
+                    Snapshot snap = SNAPSHOT.get();
+                    if (snap != null) pollCalls(appContext, snap);
+                } finally {
+                    endCallPoll(callToken);
+                    if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+                }
+                // ЧЕЙНИМ call-poll, пока приложение в фоне и есть цели: сервер капает
+                // long-poll на 30с (MAX_LONG_POLL_MS), поэтому это back-to-back 30-сек
+                // long-poll'ы = НЕПРЕРЫВНОЕ покрытие входящих (а не дыра 30с между
+                // 60-сек будильниками → задержка до ~минуты). Это сознательный размен
+                // батарея↔скорость: без push другого способа real-time-приёма нет, а
+                // фон-приём и так требует отключения battery-optimization. В Doze
+                // процесс замораживается → чейн встаёт, добивает рекуррентный alarm.
+                // Выходим, если: сервис не нужен / приложение на переднем плане
+                // (звонок ведёт in-app) / UI сам опрашивает / нет целей.
+                // NB: НЕ используем serviceRequested() — PREF_SERVICE_REQUESTED пишет
+                // только main-процесс, а :notifications читает свой устаревший кэш
+                // (cross-process SharedPreferences ненадёжен). Мы выполняемся ВНУТРИ
+                // живого сервиса, значит он запущен; на logout SNAPSHOT чистится
+                // (ACTION_CLEAR_SNAPSHOT) → isEmpty() остановит чейн.
+                Snapshot snap2 = SNAPSHOT.get();
+                boolean fg = isApplicationForeground(appContext);
+                boolean uiOwns = uiOwnsCallPolling(appContext);
+                boolean hasTargets = snap2 != null && !snap2.isEmpty();
+                boolean keepChaining = !fg && !uiOwns && hasTargets;
+                if (keepChaining) {
+                    // Если опрос вернулся слишком быстро (ошибка/нет сети) — пауза, чтобы
+                    // не молотить сервер; нормальный long-poll длится ~30с.
+                    long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
+                    if (elapsed < 5_000L) {
+                        try { Thread.sleep(5_000L); } catch (InterruptedException ignore) { return; }
+                        if (isApplicationForeground(appContext) || uiOwnsCallPolling(appContext)) {
+                            return;
+                        }
+                    }
+                    scheduleCallPoll(appContext);
+                }
+            }
+        });
     }
 
     private static void schedulePollAlarm(Context context, long delayMs) {
@@ -426,7 +652,9 @@ public final class ParanoiaForegroundService extends Service {
             Log.w(TAG, "AlarmManager unavailable; cannot schedule next poll");
             return;
         }
-        long when = System.currentTimeMillis() + Math.max(1000L, delayMs);
+        // Монотонные часы (elapsedRealtime), а не wall-clock: ручная смена времени/
+        // NTP/оператор не должны сдвигать интервал опроса.
+        long when = android.os.SystemClock.elapsedRealtime() + Math.max(1000L, delayMs);
         PendingIntent pi = pollAlarmIntent(context);
         try {
             // Без exact-alarm'а app standby bucket откладывает срабатывание на минуты —
@@ -437,13 +665,13 @@ public final class ParanoiaForegroundService extends Service {
                 useExact = manager.canScheduleExactAlarms();
             }
             if (useExact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
+                manager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, when, pi);
                 Log.i(TAG, "next poll scheduled in " + delayMs + "ms (exact, allow while idle)");
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
+                manager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, when, pi);
                 Log.i(TAG, "next poll scheduled in " + delayMs + "ms (inexact, allow while idle; exact not granted)");
             } else {
-                manager.setExact(AlarmManager.RTC_WAKEUP, when, pi);
+                manager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, when, pi);
                 Log.i(TAG, "next poll scheduled in " + delayMs + "ms (legacy exact)");
             }
         } catch (RuntimeException e) {
@@ -462,7 +690,8 @@ public final class ParanoiaForegroundService extends Service {
     }
 
     private void runAutonomousPoll() {
-        if (!tryBeginPoll()) {
+        final long pollToken = tryBeginPoll();
+        if (pollToken == 0L) {
             return;
         }
         final Context appContext = getApplicationContext();
@@ -470,18 +699,111 @@ public final class ParanoiaForegroundService extends Service {
             @Override
             public void run() {
                 try {
-                    processPollResult(appContext, pollNotifications(appContext));
+                    executeFullPoll(appContext);
                 } finally {
-                    endPoll();
+                    endPoll(pollToken);
                 }
+            }
+        });
+    }
+
+    // Полный цикл: сообщения → показ уведомления → ПОТОМ call-poll. Сообщения
+    // показываются ДО длинного (30с) call-poll'а, поэтому он их не задерживает
+    // (следующий alarm уже запланирован заранее). Зовётся И из alarm-пути
+    // (PollAlarmReceiver — рекуррентный, переживает Doze), И из runAutonomousPoll.
+    private static void executeFullPoll(Context appContext) {
+        PollResult r = pollNotifications(appContext);
+        processPollResult(appContext, r);
+        // Слот/wakelock сообщений освобождается СРАЗУ (как до #6) — call-poll уходит
+        // в свою задачу со своим guard'ом/wakelock'ом и не задерживает уведомления.
+        if (r.hasTargets) {
+            scheduleCallPoll(appContext);
+            startMessageLongPolls(appContext); // мгновенные сообщения, параллельно
+        }
+    }
+
+    // МГНОВЕННЫЕ СООБЩЕНИЯ в фоне: на КАЖДЫЙ диалог — свой long-poll /notify (сервер
+    // держит до нового сообщения). Параллельно с call-poll'ом → сообщения приходят
+    // так же быстро, как звонки, БЕЗ combined-эндпоинта (тот потребовал бы правок
+    // маскировки на сервере). Один диалог — один самоперезапускающийся поток, пока
+    // приложение в фоне. (Combined «один запрос на все диалоги» = будущая оптимизация,
+    // требует масок-схемы; здесь переиспользуем уже маскированный /notify.)
+    private static void startMessageLongPolls(final Context appContext) {
+        if (isApplicationForeground(appContext) || uiOwnsCallPolling(appContext)) return;
+        Snapshot snap = SNAPSHOT.get();
+        if (snap == null || snap.isEmpty()) return;
+        for (ProfileHint profile : snap.profiles) {
+            for (DialogHint dialog : profile.dialogs) {
+                spawnMessageLongPoll(appContext, profile, dialog);
+            }
+        }
+    }
+
+    private static void spawnMessageLongPoll(final Context appContext, final ProfileHint profile,
+                                             final DialogHint dialog) {
+        final String key = profile.senderServerId + "|" + dialog.partnerServerId;
+        if (!MSG_INFLIGHT.add(key)) return; // по этому диалогу уже висит long-poll
+        MSG_EXECUTOR.execute(new Runnable() {
+            @Override
+            public void run() {
+                final long startedAt = android.os.SystemClock.elapsedRealtime();
+                // Опрашиваем с ВЫСШЕЙ увиденной seq (не ниже snapshot.seq — если юзер
+                // прочитал на другом устройстве, snapshot принесёт бОльшую).
+                Long seen = MSG_SEEN_SEQ.get(key);
+                final long polledSeq = (seen != null && seen > dialog.seq) ? seen : dialog.seq;
+                PowerManager pm = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
+                PowerManager.WakeLock wl = pm == null ? null
+                        : pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "paranoia:msgpoll");
+                if (wl != null) { wl.setReferenceCounted(false); wl.acquire(30_000L); }
+                long count = -1;
+                try {
+                    count = paranoiaServiceNotifyCountWait(
+                            profile.serverUrl, profile.reserveUrlsJson, profile.signingKeyB64,
+                            profile.senderServerId, dialog.partnerServerId, polledSeq,
+                            (int) MSG_LONG_POLL_MS);
+                } catch (Throwable t) {
+                    // stale-процесс после апдейта без нового нативного символа — пропускаем.
+                    Log.w(TAG, "notify_count_wait native unavailable — skipping message poll", t);
+                } finally {
+                    if (wl != null && wl.isHeld()) wl.release();
+                    MSG_INFLIGHT.remove(key);
+                }
+                if (count > 0) {
+                    // Сдвигаем высшую seq за посчитанные → следующий long-poll ждёт
+                    // ГЕНУИННО новые (без tight-loop при непрочитанных). Итог-уведомление
+                    // считает pollNotifications от реальной snapshot.seq (total unread).
+                    MSG_SEEN_SEQ.put(key, polledSeq + count);
+                    PollResult r = pollNotifications(appContext);
+                    processPollResult(appContext, r);
+                }
+                // Перезапуск, пока в фоне (чейн как у звонков). Без бэкоффа — seq сдвинут,
+                // tight-loop'а нет. Лёгкая пауза ТОЛЬКО если опрос вернулся подозрительно
+                // быстро (ошибка/сеть/сервер не держал long-poll), чтобы не молотить.
+                if (isApplicationForeground(appContext) || uiOwnsCallPolling(appContext)) return;
+                Snapshot s = SNAPSHOT.get();
+                if (s == null || s.isEmpty()) return;
+                long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
+                if (count < 0 || elapsed < 3_000L) {
+                    try { Thread.sleep(5_000L); } catch (InterruptedException ignore) { return; }
+                    if (isApplicationForeground(appContext) || uiOwnsCallPolling(appContext)) return;
+                }
+                spawnMessageLongPoll(appContext, profile, dialog);
             }
         });
     }
 
     private static void processPollResult(Context context, PollResult result) {
         if (!result.hasTargets) {
-            Log.i(TAG, "poll finished: no targets, stopping service");
-            stop(context);
+            // НЕ останавливаем сервис на ВРЕМЕННЫХ условиях (app foreground, нет сети,
+            // native не загрузился, snapshot ещё не пришёл после рестарта процесса) —
+            // раньше это валило сервис навсегда (+ сбрасывало service_requested). Стоп
+            // ТОЛЬКО при осознанном logout/clear из UI.
+            if (snapshotExplicitlyCleared) {
+                Log.i(TAG, "poll: snapshot explicitly cleared (logout) — stopping service");
+                stop(context);
+            } else {
+                Log.i(TAG, "poll skipped (transient: foreground/no-net/native/empty-after-restart) — keeping service alive");
+            }
             return;
         }
         if (result.total > 0) {
@@ -542,6 +864,170 @@ public final class ParanoiaForegroundService extends Service {
         return result;
     }
 
+    // Stateless опрос входящих звонков по snapshot'у. На каждый НОВЫЙ оффер (kind 0)
+    // показываем баннер «Входящий вызов» с кнопками. Сам звонок поднимается в
+    // приложении (фон-процесс без Qt/WebRTC) — баннер будит и открывает UI.
+    private static void pollCalls(Context context, Snapshot snapshot) {
+        for (ProfileHint profile : snapshot.profiles) {
+            if (profile.peerKeysJson == null || profile.peerKeysJson.length() <= 2) continue; // "[]"
+            // Long-poll 12с (back-to-back чейн = непрерывное покрытие). КОРОЧЕ 30с
+            // СОЗНАТЕЛЬНО: при переходе приложения в foreground/звонок in-app
+            // забирает опрос (uiOwns), но НАШ in-flight poll нельзя прервать — он
+            // ещё до ~30с конкурировал с in-app за drain-эндпоинт и мог «увести»
+            // Answer/Hangup активного звонка. 12с укорачивает это окно «угона» ~2.5×
+            // ценой умеренного роста реконнектов (battery-optimization и так должна
+            // быть выключена для фон-звонков). Остаток окна добивают backstop'ы в
+            // CallController (media-loss → hangup; media-flow → running).
+            String json;
+            try {
+                json = paranoiaServiceCallPoll(
+                        profile.serverUrl, profile.reserveUrlsJson, profile.signingKeyB64,
+                        profile.senderServerId, profile.peerKeysJson, 12000);
+            } catch (Throwable t) {
+                // UnsatisfiedLinkError и т.п.: УСТАРЕВШИЙ процесс :notifications после
+                // апдейта держит в памяти СТАРУЮ libParanoiaService без этого символа.
+                // НЕ роняем сервис (был FATAL-краш) — пропускаем опрос звонков (опрос
+                // сообщений на старой .so ещё работает). Системный установщик при
+                // апдейте APK убивает процессы → свежий поднимется с новой .so;
+                // артефакт только у dev-инкрементальной установки (adb), не в проде.
+                Log.w(TAG, "call_poll native unavailable (stale process after update?) — skipping calls", t);
+                return;
+            }
+            if (json == null) {
+                Log.w(TAG, "service call_poll failed: " + paranoiaLastError());
+                continue;
+            }
+            try {
+                JSONArray arr = new JSONArray(json);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject env = arr.optJSONObject(i);
+                    if (env == null) continue;
+                    int kind = env.optInt("kind", -1);
+                    String sender = env.optString("sender").trim();
+                    String callId = "";
+                    boolean accept = true;
+                    try {
+                        JSONObject pl = new JSONObject(env.optString("payload_json"));
+                        callId = pl.optString("call_id").trim();
+                        accept = pl.optBoolean("accept", true);
+                    } catch (JSONException ignore) {}
+                    if (callId.isEmpty()) callId = sender + ":" + env.optLong("ts_ms", 0L);
+
+                    if (kind == 0) {
+                        // Offer.
+                        if (SEEN_CALL_IDS.size() > 500) SEEN_CALL_IDS.clear();
+                        if (!SEEN_CALL_IDS.add(callId)) continue; // уже звенел
+                        Log.i(TAG, "incoming call from " + sender + " call_id=" + callId);
+                        // Сохраняем расшифрованный конверт (cross-process) — UI заберёт при
+                        // открытии и поднимет звонок (сервер уже drain'нул оффер).
+                        prefs(context).edit()
+                                .putString(PREF_CALL_OFFER, env.toString())
+                                .putLong(PREF_CALL_OFFER_TS, android.os.SystemClock.elapsedRealtime())
+                                .putString(PREF_CALL_OFFER_CALLID, callId)
+                                .apply();
+                        showIncomingCall(context, sender, callId, env.toString());
+                    } else if (kind == 2 || (kind == 1 && !accept)) {
+                        // Hangup (звонящий отменил) / decline. Если это про ПОКАЗАННЫЙ
+                        // нами оффер — гасим баннер и стираем сохранённый конверт, иначе
+                        // на входе в приложение поднимется экран уже отменённого звонка.
+                        String storedCid = prefs(context).getString(PREF_CALL_OFFER_CALLID, "");
+                        if (!callId.isEmpty() && callId.equals(storedCid)) {
+                            prefs(context).edit()
+                                    .remove(PREF_CALL_OFFER).remove(PREF_CALL_OFFER_TS)
+                                    .remove(PREF_CALL_OFFER_CALLID).apply();
+                            NotificationManager m = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+                            if (m != null) m.cancel(CALL_NOTIFICATION_ID);
+                            Log.i(TAG, "incoming call cancelled by remote (hangup) call_id=" + callId);
+                        }
+                    }
+                }
+            } catch (JSONException e) {
+                Log.w(TAG, "Cannot parse call_poll JSON", e);
+            }
+        }
+    }
+
+    // Точка входа для UI-процесса (#6, гонка перехода в фон): in-app сигналинг
+    // сдрейнил оффер из long-poll'а уже ПОСЛЕ ухода в фон (фон-сервис его не
+    // получит). Показываем баннер тем же путём, что и фон-сервис, чтобы звонок
+    // не потерялся (тап → handoff → экран/авто-приём). force=true: foreground-skip
+    // НЕ применяем (UI сам решил, что в фоне — иначе бы показал экран).
+    public static void showIncomingCallFromUi(Context context, String envelopeJson) {
+        if (envelopeJson == null || envelopeJson.isEmpty()) return;
+        try {
+            JSONObject env = new JSONObject(envelopeJson);
+            if (env.optInt("kind", -1) != 0) return; // только Offer
+            String sender = env.optString("sender").trim();
+            String callId = "";
+            try {
+                JSONObject pl = new JSONObject(env.optString("payload_json"));
+                callId = pl.optString("call_id").trim();
+            } catch (JSONException ignore) {}
+            if (callId.isEmpty()) callId = sender + ":" + env.optLong("ts_ms", 0L);
+            if (SEEN_CALL_IDS.size() > 500) SEEN_CALL_IDS.clear();
+            if (!SEEN_CALL_IDS.add(callId)) return; // уже показывали
+            Log.i(TAG, "incoming call (handed off from UI) from " + sender + " call_id=" + callId);
+            prefs(context).edit()
+                    .putString(PREF_CALL_OFFER, envelopeJson)
+                    .putLong(PREF_CALL_OFFER_TS, android.os.SystemClock.elapsedRealtime())
+                    .apply();
+            showIncomingCall(context, sender, callId, envelopeJson, /*force=*/true);
+        } catch (JSONException e) {
+            Log.w(TAG, "showIncomingCallFromUi: bad envelope", e);
+        }
+    }
+
+    // Баннер входящего вызова: тап/«Ответить» открывают приложение (там штатный
+    // экран звонка подхватывает ещё-висящий оффер); «Сбросить» гасит уведомление.
+    private static void showIncomingCall(Context context, String sender, String callId, String offerJson) {
+        showIncomingCall(context, sender, callId, offerJson, /*force=*/false);
+    }
+
+    private static void showIncomingCall(Context context, String sender, String callId, String offerJson,
+                                         boolean force) {
+        if (!force && isApplicationForeground(context)) return; // на переднем плане звонок ведёт само приложение
+        requestPostNotificationsIfNeeded(context);
+        if (!notificationsAllowed(context)) return;
+        ensureChannels(context);
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+
+        // Оффер кладём в intent (надёжный cross-process канал) — UI заберёт его и
+        // поднимет экран вызова (инъекция в CallSignaling, сервер оффер drain'нул).
+        // ДВА разных PendingIntent'а (разные requestCode, иначе FLAG_UPDATE_CURRENT
+        // их склеит): «Ответить» несёт флаг авто-приёма (после PIN примем сразу),
+        // тап по телу баннера — просто открывает экран вызова с кнопками.
+        PendingIntent answer = openAppIntent(context, CALL_NOTIFICATION_ID, null, null, offerJson, true);
+        PendingIntent openBody = openAppIntent(context, CALL_NOTIFICATION_ID + 2, null, null, offerJson, false);
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) piFlags |= PendingIntent.FLAG_IMMUTABLE;
+        // «Сбросить» — broadcast в PollAlarmReceiver (не getService: запуск сервиса из
+        // background-action на Android 12+ может блокироваться, broadcast проходит).
+        Intent dismiss = new Intent(context, PollAlarmReceiver.class)
+                .setAction(ACTION_CALL_DISMISS)
+                .setPackage(context.getPackageName())
+                .putExtra(EXTRA_CALL_ID, callId);
+        PendingIntent dismissPi = PendingIntent.getBroadcast(context, CALL_NOTIFICATION_ID + 1, dismiss, piFlags);
+
+        Notification.Builder builder = notificationBuilder(context, CALL_CHANNEL_ID)
+                .setContentTitle("Входящий вызов")
+                .setContentText("Нажмите «Ответить», чтобы принять")
+                .setSmallIcon(context.getApplicationInfo().icon)
+                .setContentIntent(openBody)
+                .setAutoCancel(true)
+                .addAction(0, "Ответить", answer)
+                .addAction(0, "Сбросить", dismissPi);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            builder.setCategory(Notification.CATEGORY_CALL);
+            builder.setPriority(Notification.PRIORITY_HIGH); // heads-up на pre-O
+        }
+        try {
+            manager.notify(CALL_NOTIFICATION_ID, buildNotification(builder));
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot show incoming-call notification", e);
+        }
+    }
+
     private static void handleSnapshotIntent(Intent intent) {
         if (intent == null) return;
         String json = intent.getStringExtra(EXTRA_SNAPSHOT_JSON);
@@ -579,7 +1065,10 @@ public final class ParanoiaForegroundService extends Service {
                 }
                 if (dialogs.isEmpty()) continue;
 
-                profiles.add(new ProfileHint(server, reservesJson, signingKey, sender, dialogs));
+                JSONArray peerKeys = p.optJSONArray("peerMasterKeys");
+                String peerKeysJson = peerKeys != null ? peerKeys.toString() : "[]";
+
+                profiles.add(new ProfileHint(server, reservesJson, signingKey, sender, dialogs, peerKeysJson));
             }
             SNAPSHOT.set(new Snapshot(profiles));
             int total = 0;
@@ -611,9 +1100,11 @@ public final class ParanoiaForegroundService extends Service {
             if (nativeLibraryLoaded) {
                 return true;
             }
-            if (nativeLibraryLoadAttempted) {
-                return false;
-            }
+            // НЕ латчим неудачу навсегда: dlopen может разово упасть (например, OOM
+            // при линковке/нехватка адресного пространства) — тогда следующий poll
+            // повторит. Спам в лог ограничен интервалом будильника (60с). Логируем
+            // «недоступна» только один раз, чтобы не засорять.
+            final boolean firstAttempt = !nativeLibraryLoadAttempted;
             nativeLibraryLoadAttempted = true;
             // Грузим маленькую .so без Qt-зависимостей. Перебираем supported
             // ABIs для совместимости с multi-arch APK; первое имя, которое
@@ -635,7 +1126,9 @@ public final class ParanoiaForegroundService extends Service {
                     Log.i(TAG, "cannot load native library " + name + ": " + e.getMessage());
                 }
             }
-            Log.w(TAG, "ParanoiaService native library is not available for background polling");
+            if (firstAttempt) {
+                Log.w(TAG, "ParanoiaService native library is not available for background polling");
+            }
             return false;
         }
     }
@@ -666,8 +1159,14 @@ public final class ParanoiaForegroundService extends Service {
     }
 
     private static boolean isApplicationForeground(Context context) {
-        appForeground = prefs(context).getBoolean(PREF_APP_FOREGROUND, appForeground);
-        return appForeground;
+        SharedPreferences p = prefs(context);
+        boolean fg = p.getBoolean(PREF_APP_FOREGROUND, appForeground);
+        long until = p.getLong(PREF_APP_FOREGROUND_UNTIL, 0L);
+        // Флаг истёк (UI давно не присылал heartbeat — вероятно процесс мёртв) ⇒
+        // трактуем как background, чтобы фоновый опрос возобновился.
+        fg = fg && until != 0L && android.os.SystemClock.elapsedRealtime() < until;
+        appForeground = fg;
+        return fg;
     }
 
     private static boolean serviceRequested(Context context) {
@@ -710,6 +1209,14 @@ public final class ParanoiaForegroundService extends Service {
                 NotificationManager.IMPORTANCE_DEFAULT);
         messages.setDescription("Уведомления о новых сообщениях без раскрытия отправителя");
         manager.createNotificationChannel(messages);
+
+        NotificationChannel calls = new NotificationChannel(
+                CALL_CHANNEL_ID,
+                "Paranoia calls",
+                NotificationManager.IMPORTANCE_HIGH);
+        calls.setDescription("Входящие вызовы");
+        calls.enableVibration(true);
+        manager.createNotificationChannel(calls);
     }
 
     // Уведомление открывает QtActivity напрямую — тем же интентом, что и иконка
@@ -719,6 +1226,16 @@ public final class ParanoiaForegroundService extends Service {
     // зависанию. EXTRA_OPEN_* кладём в интент: при холодном старте QtActivity
     // их видно через getIntent() (см. takeOpenTarget).
     private static PendingIntent openAppIntent(Context context, int requestCode, String profileId, String peer) {
+        return openAppIntent(context, requestCode, profileId, peer, null, false);
+    }
+
+    private static PendingIntent openAppIntent(Context context, int requestCode, String profileId, String peer,
+                                               String callOfferJson) {
+        return openAppIntent(context, requestCode, profileId, peer, callOfferJson, false);
+    }
+
+    private static PendingIntent openAppIntent(Context context, int requestCode, String profileId, String peer,
+                                               String callOfferJson, boolean answerIntent) {
         Intent launchIntent = new Intent(Intent.ACTION_MAIN);
         launchIntent.addCategory(Intent.CATEGORY_LAUNCHER);
         launchIntent.setClassName(context, "app.paranoia.client.ParanoiaActivity");
@@ -729,6 +1246,12 @@ public final class ParanoiaForegroundService extends Service {
         }
         if (peer != null && !peer.isEmpty()) {
             launchIntent.putExtra(EXTRA_OPEN_PEER, peer);
+        }
+        if (callOfferJson != null && !callOfferJson.isEmpty()) {
+            launchIntent.putExtra(EXTRA_CALL_OFFER, callOfferJson);
+        }
+        if (answerIntent) {
+            launchIntent.putExtra(EXTRA_CALL_ANSWER, true);
         }
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -759,6 +1282,86 @@ public final class ParanoiaForegroundService extends Service {
             return "";
         }
         return valueOrEmpty(profileId) + "\n" + peer;
+    }
+
+    // Забрать (и очистить) отложенный конверт входящего звонка (#6 handoff).
+    // UI-процесс зовёт при открытии; возвращает JSON конверта или "".
+    public static String takePendingCallOffer(Context context) {
+        // Сперва из intent открывшей Activity (надёжный cross-process канал).
+        if (context instanceof Activity) {
+            Intent intent = ((Activity) context).getIntent();
+            if (intent != null) {
+                String fromIntent = intent.getStringExtra(EXTRA_CALL_OFFER);
+                if (fromIntent != null && !fromIntent.isEmpty()) {
+                    intent.removeExtra(EXTRA_CALL_OFFER);
+                    // подчистим и prefs, чтобы не выстрелил повторно
+                    prefs(context).edit().remove(PREF_CALL_OFFER).remove(PREF_CALL_OFFER_TS).remove(PREF_CALL_OFFER_CALLID).apply();
+                    // intent-канал = пользователь только что тапнул → оффер свежий.
+                    return fromIntent;
+                }
+            }
+        }
+        SharedPreferences prefs = prefs(context);
+        String offer = prefs.getString(PREF_CALL_OFFER, "");
+        long ts = prefs.getLong(PREF_CALL_OFFER_TS, 0L);
+        if (offer != null && !offer.isEmpty()) {
+            prefs.edit().remove(PREF_CALL_OFFER).remove(PREF_CALL_OFFER_TS).remove(PREF_CALL_OFFER_CALLID).apply();
+            // Протухший оффер (звонок давно не звенит) НЕ инжектим — иначе занял бы
+            // состояние звонка мёртвым вызовом и реальные входящие отбивались BUSY.
+            long age = android.os.SystemClock.elapsedRealtime() - ts;
+            if (ts == 0L || age > CALL_OFFER_TTL_MS) {
+                Log.i(TAG, "pending call offer is stale (age " + age + "ms) — discarding");
+                return "";
+            }
+        }
+        return valueOrEmpty(offer);
+    }
+
+    // UI-процесс сообщает, что САМ опрашивает звонки (его in-app сигналинг активен:
+    // foreground или идёт звонок). Доставляем ИНТЕНТОМ — фон-сервис запишет флаг в
+    // своём процессе (cross-process prefs ненадёжны). Пока флаг свеж — фон-сервис не
+    // лезет в call_poll (и не чейнит), отдавая звонки in-app клиенту.
+    public static void heartbeatUiCallPolling(Context context) {
+        sendUiCallPolling(context, true);
+    }
+
+    // UI ушёл в фон без активного звонка — отдаём опрос звонков фон-сервису СРАЗУ.
+    public static void clearUiCallPolling(Context context) {
+        sendUiCallPolling(context, false);
+    }
+
+    private static void sendUiCallPolling(Context context, boolean active) {
+        if (!serviceRequested(context)) {
+            // Сервис не запрашивали (например, ещё не залогинились) — запускать его
+            // только ради этого флага не нужно; локально хватает (нечего опрашивать).
+            return;
+        }
+        Intent intent = new Intent(context, ParanoiaForegroundService.class);
+        intent.setAction(ACTION_SET_UI_CALL_POLLING);
+        intent.putExtra(EXTRA_UI_CALL_POLLING, active);
+        try {
+            startServiceCompat(context, intent);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cannot send UI call-polling state", e);
+        }
+    }
+
+    private static boolean uiOwnsCallPolling(Context context) {
+        long until = prefs(context).getLong(PREF_UI_CALL_POLLING_UNTIL, 0L);
+        return until != 0L && android.os.SystemClock.elapsedRealtime() < until;
+    }
+
+    // Нажал ли пользователь «Ответить» в баннере (intent-only — если флаг потерян,
+    // деградируем в ручной приём, что безопасно). Зовётся UI при открытии.
+    public static boolean takePendingCallAnswerIntent(Context context) {
+        if (context instanceof Activity) {
+            Intent intent = ((Activity) context).getIntent();
+            if (intent != null && intent.getBooleanExtra(EXTRA_CALL_ANSWER, false)) {
+                intent.removeExtra(EXTRA_CALL_ANSWER);
+                return true;
+            }
+        }
+        return false;
     }
 
     public static String takeOpenPeer(Context context) {

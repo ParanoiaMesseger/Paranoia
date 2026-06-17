@@ -494,7 +494,7 @@ Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 72
                             height: 26
-                            radius: Theme.radiusSm
+                            radius: 13   // пилюля, не «квадрат»
                             color: reserveClientArea.containsMouse ? Theme.bgButton : Theme.bgCard
                             border.width: 1
                             border.color: Theme.border
@@ -1074,7 +1074,7 @@ Rectangle {
 
         background: Rectangle {
             color: Theme.bgSecondary
-            radius: Theme.radiusSm
+            radius: Theme.radiusLg
             border.width: 1
             border.color: Theme.border
         }
@@ -1137,9 +1137,10 @@ Rectangle {
                         var p = dlgContextMenu.selectedPeer
                         dlgContextMenu.close()
                         // Android — системный photo picker (галерея), а не SAF
-                        // document picker; результат прилетит сигналом
-                        // Chat.avatarPhotoPicked → Backend.setDialogAvatar.
-                        if (Qt.platform.os === "android") {
+                        // document picker; iOS — PHPicker (галерея, не «Файлы»).
+                        // Результат прилетит сигналом Chat.avatarPhotoPicked →
+                        // Backend.setDialogAvatar. Десктоп — файловый диалог.
+                        if (Qt.platform.os === "android" || Qt.platform.os === "ios") {
                             Chat.pickAvatarFromGallery(p)
                         } else {
                             avatarDialog.peer = p
@@ -1491,8 +1492,11 @@ Rectangle {
                         hoverEnabled: true
                         enabled: !modelData.isActive
                         onClicked: {
-                            Backend.switchSession(modelData.profileId)
+                            // Закрываем ДО переключения: switchSession пересобирает
+                            // сессии/UI, и отложенный close() мог теряться → окно
+                            // оставалось открытым (приходилось тапать мимо).
                             root.closeSessionSwitcher()
+                            Backend.switchSession(modelData.profileId)
                         }
                     }
 

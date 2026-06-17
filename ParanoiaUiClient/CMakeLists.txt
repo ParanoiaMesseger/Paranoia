@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.15 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.16 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -479,6 +479,8 @@ qt_add_qml_module(Paranoia
     src/backend/VersionInfoBackend.cpp
     src/backend/ChatBackend.hpp
     src/backend/ChatBackend.cpp
+    src/backend/ActiveChatNotifier.hpp
+    src/backend/ActiveChatNotifier.cpp
     src/backend/EncryptedImageProvider.hpp
     src/backend/EmojiImageProvider.hpp
     src/backend/EmojiImageProvider.cpp
@@ -554,6 +556,7 @@ qt_add_qml_module(Paranoia
     ui/Pages/InstallServerPage.qml
     ui/Pages/MainPage.qml
     ui/Pages/ChatPage.qml
+    ui/Pages/SharedMediaPage.qml
     ui/Pages/ExportImportPage.qml
     ui/Pages/QrExchangePage.qml
     ui/Pages/QrScanPage.qml
@@ -677,14 +680,23 @@ if(PARANOIA_IS_IOS)
         src/platform/PlatformNotifications_ios.mm
         src/platform/ShareTarget_ios.mm
         src/platform/IosFileExport.mm
+        src/platform/IosImagePicker.mm
     )
     set_source_files_properties(
         src/platform/PlatformNotifications_ios.mm
         src/platform/ShareTarget_ios.mm
         src/platform/IosFileExport.mm
+        src/platform/IosImagePicker.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    # PHPickerViewController (нативный выбор фото из галереи — см. IosImagePicker.mm).
+    target_link_libraries(Paranoia PRIVATE "-framework PhotosUI")
     set_target_properties(Paranoia PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
+        # Явный bundle-id главного таргета: иначе cmake-Xcode подставляет
+        # "Paranoia.$(PRODUCT_NAME...)" = Paranoia.Paranoia, и application-identifier
+        # подписи расходится с CFBundleIdentifier (app.paranoia.client) → signed
+        # device-install падает 0xe8008016. CI собирает unsigned → там не всплывает.
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "app.paranoia.client"
         XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/Paranoia.entitlements"
         # Иконка приложения с вариантами light/dark/tinted (iOS 18) — Xcode
         # компилирует asset-catalog actool'ом и кладёт в бандл.

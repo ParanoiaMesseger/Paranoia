@@ -564,19 +564,25 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
                                           trimmedUsername, serverId, private_key, dbPath, profileId, makeActive,
                                           rotateRegistrationKeyOnSuccess, connectionMeta]() {
         if (!self) return;
-        QMetaObject::invokeMethod(self, [self, dbPath, url, normalizedReserves, turnServerUrls, reserveUrlsJson,
-                                         trimmedUsername, serverId, private_key, profileId, makeActive,
-                                         rotateRegistrationKeyOnSuccess, connectionMeta]() {
-            auto handle = std::make_shared<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
+        // ТЯЖЁЛОЕ — на воркере (раньше всё это шло на GUI-поток через invokeMethod →
+        // фриз входа ~1с): создание handle (db/сеть) и РАСШИФРОВКА dialogs.json.
+        // На GUI-поток передаём уже готовый handle + расшифрованный список диалогов.
+        auto handle          = std::make_shared<ParanoiaFFI>(url, reserveUrlsJson, serverId, private_key, dbPath);
+        const bool handleOk  = handle && handle->isRawOk();
+        QList<Dialog> preloadedDialogs;
+        if (handleOk) preloadedDialogs = Dialog::loadFromPath(Paths::profileDialogs(profileId));
+        QMetaObject::invokeMethod(self, [self, handle, handleOk, preloadedDialogs, url, normalizedReserves,
+                                         turnServerUrls, trimmedUsername, serverId, private_key, profileId, makeActive,
+                                         rotateRegistrationKeyOnSuccess, connectionMeta]() mutable {
             if (!self) return;
-            if (!handle || !handle->isRawOk()) {
+            if (!handleOk) {
                 if (makeActive) emit self->loginError(MainBackend::tr("Не удалось подключиться. Проверьте адрес сервера и ключ."));
                 return;
             }
             auto *store  = SessionStore::instance();
             auto session = store->addSession(std::move(handle), url, trimmedUsername, serverId, private_key, profileId,
                                              normalizedReserves, turnServerUrls);
-            session->loadDialogs();
+            session->dialogs = preloadedDialogs; // расшифровано на воркере (вместо синхронного loadDialogs)
             if (!session->findDialog(QStringLiteral("Избранное"))) {
                 QCryptographicHash hasher(QCryptographicHash::Sha256);
                 hasher.addData(QByteArrayLiteral("paranoia:self-dialog:v1\n"));
@@ -1622,6 +1628,15 @@ bool MainBackend::setDialogAvatar(const QString &peer, const QString &fileUrl)
     return true;
 }
 
+QString MainBackend::dialogAvatar(const QString &peer) const
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const Dialog *dlg = session->findDialog(peer);
+    if (!dlg || dlg->avatar.isEmpty()) return {};
+    return QStringLiteral("data:image/png;base64,") + dlg->avatar;
+}
+
 void MainBackend::clearDialogAvatar(const QString &peer)
 {
     auto session = SessionStore::instance()->activeSession();
@@ -2242,6 +2257,10 @@ void MainBackend::publishServiceSnapshot()
         for (const QString &u : session->reserveServerUrls) reserveUrls.append(u);
 
         QJsonArray dialogs;
+        // peerMasterKeys — для фонового опроса входящих ЗВОНКОВ (service_call_poll):
+        // master_key = последняя запись keyring диалога (как в VoipSystem), ключ —
+        // peerServerId (== sender в конвертах звонка).
+        QJsonArray peerMasterKeys;
         // last_pulled_seq лежит в SQLCipher; берём его пока vault unlocked
         // и UI ещё держит handle. Сервис будет использовать это значение
         // как baseline для notify_count.
@@ -2258,6 +2277,13 @@ void MainBackend::publishServiceSnapshot()
             dialog["partnerServerId"] = d.peerServerId;
             dialog["seq"]             = qint64(seq);
             dialogs.append(dialog);
+
+            if (!d.keyring.isEmpty()) {
+                QJsonObject pk;
+                pk["peer"]           = d.peerServerId;
+                pk["master_key_b64"] = QString::fromUtf8(d.keyring.last().key.toBase64());
+                peerMasterKeys.append(pk);
+            }
         }
         if (dialogs.isEmpty()) continue;
 
@@ -2267,6 +2293,7 @@ void MainBackend::publishServiceSnapshot()
         profile["signingKeyB64"]  = session->private_key;
         profile["senderServerId"] = session->serverId;
         profile["dialogs"]        = dialogs;
+        profile["peerMasterKeys"] = peerMasterKeys;
         profiles.append(profile);
     }
     QJsonObject root;

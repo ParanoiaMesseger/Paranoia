@@ -4,6 +4,7 @@
 #include <QMap>
 #include <QMutex>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QThread>
 #include <atomic>
@@ -57,6 +58,25 @@ namespace paranoia::voip
         Q_INVOKABLE bool start();
         Q_INVOKABLE void stop();
 
+        /// Был ли по этому call_id недавно Hangup. Нужно, чтобы НЕ инжектить
+        /// отложенный оффер уже отменённого звонка (гонка: на входе в приложение
+        /// hangup мог прийти раньше, чем мы инжектим сохранённый оффер).
+        bool wasRecentlyHungUp(const QString &callId) const;
+
+        /// Включить/выключить ОПРОС новых офферов. Выключаем, когда приложение в
+        /// фоне и нет активного звонка — тогда входящие ловит фон-сервис (иначе
+        /// два поллера дерутся за drain-эндпоинт, и foreground-клиент «съедал»
+        /// оффер, показывая невидимый экран вместо баннера). Поток НЕ
+        /// останавливаем — просто пропускаем call_poll до повторного включения.
+        /// Безопасно из любого потока.
+        void setOfferPollingEnabled(bool enabled) { offerPollingEnabled_.store(enabled); }
+
+        /// Скормить УЖЕ расшифрованный конверт `{sender,kind,payload_json,ts_ms}`
+        /// в штатный путь (как будто пришёл из poll'а) — для handoff входящего
+        /// звонка из фонового сервиса: сервер `drain`-ит оффер, поэтому foreground
+        /// повторным poll'ом его не получит, и его передаём напрямую. (#6)
+        Q_INVOKABLE void injectEnvelope(const QString &envelopeJson);
+
     signals:
         void userChanged();
         void runningChanged();
@@ -77,6 +97,7 @@ namespace paranoia::voip
 
         void workerLoop();
         void dispatch(const QJsonObject &envelope);
+        void rememberHangup(const QString &callId);
         QByteArray buildPeersKeysJson() const;
         PollSnapshot pollSnapshot() const;
         bool isCurrentGeneration(quint64 generation) const;
@@ -90,6 +111,12 @@ namespace paranoia::voip
         mutable QMutex keys_mutex_;
         std::atomic<bool> running_{false};
         std::atomic<bool> stop_{false};
+        // true по умолчанию (foreground при старте); VoipSystem гасит в фоне без
+        // активного звонка, чтобы не конкурировать с фон-сервисом за офферы.
+        std::atomic<bool> offerPollingEnabled_{true};
+        // call_id'ы, по которым видели Hangup — чтобы не инжектить отменённый оффер.
+        QSet<QString> recent_hangups_;
+        mutable QMutex hangups_mutex_;
     };
 
 } // namespace paranoia::voip

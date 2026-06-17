@@ -72,6 +72,74 @@ Java_app_paranoia_client_ParanoiaForegroundService_paranoiaServiceNotifyCount(
     return (jlong)count;
 }
 
+// Как paranoiaServiceNotifyCount, но с long-poll (сервер держит запрос до нового
+// сообщения / long_poll_ms). Фон-сервис гоняет per-диалог параллельно → мгновенные
+// сообщения, тот же маскированный /notify (без правок сервера).
+JNIEXPORT jlong JNICALL
+Java_app_paranoia_client_ParanoiaForegroundService_paranoiaServiceNotifyCountWait(
+    JNIEnv *env, jclass cls,
+    jstring server_url, jstring reserve_urls_json,
+    jstring signing_key_b64, jstring sender_server_id, jstring partner_server_id,
+    jlong seq, jint long_poll_ms)
+{
+    (void)cls;
+    const char *url        = take_chars(env, server_url);
+    const char *res        = take_chars(env, reserve_urls_json);
+    const char *sk         = take_chars(env, signing_key_b64);
+    const char *sender     = take_chars(env, sender_server_id);
+    const char *partner    = take_chars(env, partner_server_id);
+
+    uint64_t count = 0;
+    const int rc = paranoia_service_notify_count_wait(
+        url ? url : "", res ? res : "", sk ? sk : "",
+        sender ? sender : "", partner ? partner : "",
+        seq < 0 ? 0 : (uint64_t)seq,
+        long_poll_ms < 0 ? 0 : (uint32_t)long_poll_ms, &count);
+
+    release_chars(env, server_url, url);
+    release_chars(env, reserve_urls_json, res);
+    release_chars(env, signing_key_b64, sk);
+    release_chars(env, sender_server_id, sender);
+    release_chars(env, partner_server_id, partner);
+
+    if (rc != 0) return -1;
+    if (count > (uint64_t)INT64_MAX) return INT64_MAX;
+    return (jlong)count;
+}
+
+// Stateless опрос входящих звонков: возвращает JSON-массив конвертов
+// [{sender,kind,payload_json,ts_ms}] или null при ошибке (paranoia_last_error).
+JNIEXPORT jstring JNICALL
+Java_app_paranoia_client_ParanoiaForegroundService_paranoiaServiceCallPoll(
+    JNIEnv *env, jclass cls,
+    jstring server_url, jstring reserve_urls_json,
+    jstring signing_key_b64, jstring user, jstring peers_keys_json,
+    jint long_poll_ms)
+{
+    (void)cls;
+    const char *url   = take_chars(env, server_url);
+    const char *res   = take_chars(env, reserve_urls_json);
+    const char *sk    = take_chars(env, signing_key_b64);
+    const char *usr   = take_chars(env, user);
+    const char *peers = take_chars(env, peers_keys_json);
+
+    char *json = paranoia_service_call_poll(
+        url ? url : "", res ? res : "", sk ? sk : "",
+        usr ? usr : "", peers ? peers : "",
+        long_poll_ms < 0 ? 0u : (unsigned int)long_poll_ms);
+
+    release_chars(env, server_url, url);
+    release_chars(env, reserve_urls_json, res);
+    release_chars(env, signing_key_b64, sk);
+    release_chars(env, user, usr);
+    release_chars(env, peers_keys_json, peers);
+
+    if (!json) return NULL;
+    jstring result = (*env)->NewStringUTF(env, json);
+    paranoia_free_string(json);
+    return result;
+}
+
 JNIEXPORT jstring JNICALL
 Java_app_paranoia_client_ParanoiaForegroundService_paranoiaLastError(JNIEnv *env, jclass cls)
 {

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -12,6 +12,7 @@ use paranoia_lib::{
         pubkey_from_private_key, validate_export_payload,
     },
 };
+use paranoia_lib::transport::CoreCallSignal;
 use rand::RngCore;
 use rpassword::read_password;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod dialogue_store;
+mod mcp_install;
+mod mcp_server;
+mod ui_store;
 
 use dialogue_store::{
     MergeOutcome, ProfileDialogueStore, base64_entry_to_key, key_entry_from_base64,
@@ -102,6 +106,25 @@ fn validate_b64_32(value: &str, label: &str) -> Result<[u8; 32]> {
     bytes
         .try_into()
         .map_err(|b: Vec<u8>| anyhow!("{label} must be 32 bytes, got {}", b.len()))
+}
+
+/// server_id = hex(SHA256("paranoia:server-id:v1\n" || ed25519_pubkey)).
+/// Идентично `ParanoiaLibrary::ffi::paranoia_derive_server_id`. Это идентичность,
+/// под которой профиль зарегистрирован на сервере, и то, что уходит как `sender`/
+/// ключ диалога — поэтому `--username` ОБЯЗАН быть именно server_id, а не
+/// отображаемым именем (иначе сервер ответит "One user in pair not registered").
+fn derive_server_id_from_signing(signing: &SigningKey) -> String {
+    let pubkey = signing.verifying_key().to_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(b"paranoia:server-id:v1\n");
+    hasher.update(pubkey);
+    hex::encode(hasher.finalize())
+}
+
+/// Тот же вывод из signing key в base64(32).
+fn derive_server_id_b64(signing_key_b64: &str) -> Result<String> {
+    let bytes = validate_b64_32(signing_key_b64, "signing key")?;
+    Ok(derive_server_id_from_signing(&SigningKey::from_bytes(&bytes)))
 }
 
 fn write_owner_only(path: impl AsRef<Path>, data: impl AsRef<[u8]>) -> Result<()> {
@@ -478,6 +501,139 @@ async fn cmd_clear(
     Ok(())
 }
 
+/// Достать master key (последняя запись keyring'а) для диалога — тот же ключ,
+/// которым клиент шифрует сигнальные конверты звонка (VoipSystem: keyring.last()).
+fn dialog_master_key(server_url: &str, username: &str, peer_id: &str) -> Result<[u8; 32]> {
+    let store = load_dialogue_store()?;
+    if let Some(entries) = profile_keyring_entries(&store, server_url, username, peer_id) {
+        let last = entries.last().context("keyring for peer is empty")?;
+        return base64_entry_to_key(last);
+    }
+    let key_hex = store
+        .entries
+        .get(peer_id)
+        .context("no session_key for this peer (import profile first)")?;
+    let entry = key_entry_from_hex(1, key_hex)?;
+    base64_entry_to_key(&entry)
+}
+
+/// CALL-OFFER: послать тестовый Offer-конверт звонка (kind=0) peer'у. Нужен для
+/// автономной отладки приёма входящих звонков в фоне (Android/iOS) без второго
+/// живого клиента: шлём валидный подписанный+зашифрованный оффер на сервер,
+/// клиент-получатель ловит его поллингом call_poll и поднимает баннер вызова.
+/// Медиа НЕ поднимается (мы не отвечаем на answer) — проверяется именно ДОСТАВКА
+/// и показ входящего. Мирроринг paranoia_call_signal_send (voip_ffi.rs).
+async fn cmd_call_offer(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let store = load_dialogue_store()?;
+    let peer_id = resolve_peer_id(&store, server_url, username, peer);
+    let key = dialog_master_key(server_url, username, &peer_id)?;
+
+    // call_id и session_id — случайные (как у настоящего клиента).
+    let mut rng = rand::rngs::OsRng;
+    let mut cid = [0u8; 16];
+    rng.fill_bytes(&mut cid);
+    let mut sid = [0u8; 32];
+    rng.fill_bytes(&mut sid);
+    let call_id = hex_lower(&cid);
+    let session_id_b64 = B64.encode(sid);
+
+    // Тело Offer — те же поля, что шлёт CallController::startOutgoingCall.
+    let payload = serde_json::json!({
+        "call_id": call_id,
+        "session_id": session_id_b64,
+        "candidates": ["192.168.0.50:40000"],
+        "streams": [0],
+    })
+    .to_string();
+
+    let sealed = paranoia_lib::voip::signaling::seal(&key, payload.as_bytes())
+        .map_err(|e| anyhow!("signaling seal failed: {e}"))?;
+    let payload_b64 = B64.encode(&sealed);
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Подпись как на сервере: sender+recver+kind+ts_ms+payload_b64 (kind=0).
+    let signed = format!("{username}{peer_id}0{ts_ms}{payload_b64}");
+    let sig = crypto::sign(&client.config().signing_key, signed.as_bytes());
+    let core = CoreCallSignal {
+        sender: username.to_string(),
+        recver: peer_id.clone(),
+        kind: 0,
+        payload: sealed,
+        ts_ms,
+        sig,
+    };
+    client
+        .transport()
+        .call_signal(&core)
+        .await
+        .map_err(|e| anyhow!("call_signal failed: {e}"))?;
+    println!("Offer sent: call_id={call_id} to={peer_id}");
+    Ok(())
+}
+
+/// CALL-HANGUP: послать Hangup-конверт (kind=2) по call_id — для отладки
+/// распространения сброса и «протухших» офферов (отменённый звонок).
+async fn cmd_call_hangup(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+    call_id: &str,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let store = load_dialogue_store()?;
+    let peer_id = resolve_peer_id(&store, server_url, username, peer);
+    let key = dialog_master_key(server_url, username, &peer_id)?;
+
+    let payload = serde_json::json!({
+        "call_id": call_id,
+        "reason": "user_hangup",
+    })
+    .to_string();
+    let sealed = paranoia_lib::voip::signaling::seal(&key, payload.as_bytes())
+        .map_err(|e| anyhow!("signaling seal failed: {e}"))?;
+    let payload_b64 = B64.encode(&sealed);
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let signed = format!("{username}{peer_id}2{ts_ms}{payload_b64}");
+    let sig = crypto::sign(&client.config().signing_key, signed.as_bytes());
+    let core = CoreCallSignal {
+        sender: username.to_string(),
+        recver: peer_id.clone(),
+        kind: 2,
+        payload: sealed,
+        ts_ms,
+        sig,
+    };
+    client
+        .transport()
+        .call_signal(&core)
+        .await
+        .map_err(|e| anyhow!("call_signal failed: {e}"))?;
+    println!("Hangup sent: call_id={call_id} to={peer_id}");
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// DIALOGUE INIT: сохранить session_key, как hex.
 fn cmd_dialogue_init(peer: &str, session_key_hex: &str) -> Result<()> {
     set_dialogue_key(peer, session_key_hex)?;
@@ -531,8 +687,13 @@ fn export_dialogues(
     let mut dialogues = Vec::new();
 
     if let Some(profile) = store.profiles.get(&id) {
-        for (peer, entries) in &profile.dialogues {
-            if !selected_peer(peer, peers) {
+        for (peer_sid, entries) in &profile.dialogues {
+            // Ключ диалога — server_id; отображаемое имя берём из names.
+            let display = profile.names.get(peer_sid);
+            // Выбор по --peer допускаем и по server_id, и по имени.
+            let selected = peers.is_empty()
+                || peers.iter().any(|p| p == peer_sid || Some(p) == display);
+            if !selected {
                 continue;
             }
             let mut keyring = Vec::new();
@@ -546,8 +707,10 @@ fn export_dialogues(
             if !keyring.is_empty() {
                 keyring.sort_by_key(|entry| entry.start_seq);
                 dialogues.push(ExportDialogue {
-                    peer: peer.clone(),
-                    peer_server_id: None,
+                    // peer = отображаемое имя (или server_id, если имени нет),
+                    // peer_server_id = server_id — чтобы импорт не терял идентичность.
+                    peer: display.cloned().unwrap_or_else(|| peer_sid.clone()),
+                    peer_server_id: Some(peer_sid.clone()),
                     keyring,
                 });
             }
@@ -646,15 +809,19 @@ struct ImportStats {
 fn profile_for_import<'a>(
     store: &'a mut dialogue_store::DialogueKeyStore,
     server: &ExportServer,
+    server_id: &str,
 ) -> (&'a mut ProfileDialogueStore, bool) {
-    let id = profile_id(&server.url, &server.username);
+    // Ключуем профиль по server_id (идентичность для сервера), НЕ по
+    // отображаемому `server.username`: иначе profile_id не сойдётся с тем, что
+    // CLI шлёт серверу, и --username придётся угадывать.
+    let id = profile_id(&server.url, server_id);
     let existed = store.profiles.contains_key(&id);
     let profile = store
         .profiles
         .entry(id)
         .or_insert_with(|| ProfileDialogueStore {
             server_url: server.url.clone(),
-            username: server.username.clone(),
+            username: server_id.to_string(),
             signing_key_b64: String::new(),
             signing_key_ct_b64: String::new(),
             dialogues: Default::default(),
@@ -669,7 +836,9 @@ fn import_server_profile(
     stats: &mut ImportStats,
 ) -> Result<()> {
     validate_b64_32(&server.signing_key_b64, "imported user signing key")?;
-    let (profile, created) = profile_for_import(store, server);
+    // server_id владельца — детерминированно из signing key (в payload его нет).
+    let owner_server_id = derive_server_id_b64(&server.signing_key_b64)?;
+    let (profile, created) = profile_for_import(store, server, &owner_server_id);
     if created {
         stats.profiles += 1;
     }
@@ -687,10 +856,31 @@ fn import_server_profile(
     }
 
     for dialogue in &server.dialogues {
+        // Ключ диалога — server_id пира (для dialogue_id и recver). Если в payload
+        // он есть (peer_server_id) — берём его, а `peer` трактуем как
+        // отображаемое имя и кладём в names. Старые экспорты без peer_server_id —
+        // fallback на `peer` как есть (back-compat; server_id восстановить нечем).
+        let peer_sid = dialogue
+            .peer_server_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(dialogue.peer.trim());
+        let peer_sid = peer_sid.to_string();
+        if peer_sid.is_empty() {
+            continue;
+        }
+        if peer_sid != dialogue.peer.trim() && !dialogue.peer.trim().is_empty() {
+            profile
+                .names
+                .entry(peer_sid.clone())
+                .or_insert_with(|| dialogue.peer.trim().to_string());
+        }
+
         let mut touched_dialogue = false;
         for entry in &dialogue.keyring {
             let entry = key_entry_from_base64(entry.start_seq, &entry.key)?;
-            match merge_profile_keyring_entry(profile, &dialogue.peer, entry) {
+            match merge_profile_keyring_entry(profile, &peer_sid, entry) {
                 MergeOutcome::Imported => {
                     stats.key_entries += 1;
                     touched_dialogue = true;
@@ -731,14 +921,16 @@ fn maybe_import_current_admin(
     Ok(())
 }
 
-fn cmd_import(server_url: &str, file: PathBuf) -> Result<()> {
+/// Ядро import: расшифровать export-файл и материализовать профиль(и) в сторе.
+/// Возвращает сводку JSON (без печати) — общее для `import` и мастера `mcp install`.
+fn import_core(server_url: &str, file: &Path) -> Result<serde_json::Value> {
     let metadata =
-        fs::metadata(&file).with_context(|| format!("failed to stat {}", file.display()))?;
+        fs::metadata(file).with_context(|| format!("failed to stat {}", file.display()))?;
     if metadata.len() > MAX_EXPORT_FILE_BYTES {
         return Err(anyhow!("export file is larger than 16 MiB"));
     }
     let envelope =
-        fs::read_to_string(&file).with_context(|| format!("failed to read {}", file.display()))?;
+        fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
     let device = load_or_create_device_key()?;
     let device_priv = validate_b64_32(&device.private_key_b64, "device private key")?;
     let plaintext =
@@ -757,16 +949,312 @@ fn cmd_import(server_url: &str, file: PathBuf) -> Result<()> {
     }
     maybe_import_current_admin(server_url, &payload, &mut stats)?;
 
+    Ok(serde_json::json!({
+        "profiles": stats.profiles,
+        "dialogues": stats.dialogues,
+        "key_entries": stats.key_entries,
+        "admin_servers": stats.admin_servers,
+        "skipped": stats.skipped,
+        "conflicts": stats.conflicts,
+    }))
+}
+
+fn cmd_import(server_url: &str, file: PathBuf) -> Result<()> {
+    let s = import_core(server_url, &file)?;
     println!(
         "Import complete: profiles={}, dialogues={}, key_entries={}, admin_servers={}, skipped={}, conflicts={}",
-        stats.profiles,
-        stats.dialogues,
-        stats.key_entries,
-        stats.admin_servers,
-        stats.skipped,
-        stats.conflicts
+        s["profiles"], s["dialogues"], s["key_entries"], s["admin_servers"], s["skipped"], s["conflicts"]
     );
     Ok(())
+}
+
+/// Публичный device-pubkey принимающего устройства (для обмена под export).
+fn device_pubkey_b64() -> Result<String> {
+    Ok(load_or_create_device_key()?.pubkey_b64)
+}
+
+/// PIN vault'а UI-клиента: явный аргумент → env PARANOIA_UI_PIN → запрос с tty.
+/// Отдельно от PARANOIA_CLI_PIN (тот шифрует СВОЙ стор по схеме key_from_pin).
+fn read_ui_pin(explicit: Option<String>) -> Result<String> {
+    if let Some(p) = explicit {
+        return Ok(p);
+    }
+    if let Ok(p) = std::env::var("PARANOIA_UI_PIN") {
+        return Ok(p);
+    }
+    eprint!("Enter UI vault PIN: ");
+    read_password().context("failed to read UI PIN")
+}
+
+/// Структурный список профилей CLI-стора с авторитетным server_id (из signing
+/// key) и собеседниками (names). Общее ядро для `server-id` и MCP-тулзы `whoami`.
+fn collect_server_id_profiles() -> Result<Vec<serde_json::Value>> {
+    let store = load_dialogue_store()?;
+    let mut profiles = Vec::new();
+    for (pid, profile) in &store.profiles {
+        // Авторитетно деривируем из signing key; username стора — fallback.
+        let server_id = match profile_signing_key_b64(profile)? {
+            Some(sk) => derive_server_id_b64(&sk).unwrap_or_else(|_| profile.username.clone()),
+            None => profile.username.clone(),
+        };
+        let display = profile
+            .names
+            .get(&server_id)
+            .cloned()
+            .unwrap_or_else(|| profile.username.clone());
+        let peers: Vec<_> = profile
+            .names
+            .iter()
+            .map(|(sid, name)| serde_json::json!({ "server_id": sid, "name": name }))
+            .collect();
+        profiles.push(serde_json::json!({
+            "profile_id": pid,
+            "server_url": profile.server_url,
+            "display_name": display,
+            "server_id": server_id,
+            "peers": peers,
+        }));
+    }
+    Ok(profiles)
+}
+
+/// SERVER-ID: показать server_id (идентичность для сервера = `--username`).
+/// Без аргумента — перечислить профили CLI-стора; с `--signing-key-b64` —
+/// вычислить из произвольного ключа, не трогая стор.
+fn cmd_server_id(signing_key_b64: Option<String>, json: bool) -> Result<()> {
+    if let Some(sk) = signing_key_b64 {
+        let sid = derive_server_id_b64(&sk)?;
+        if json {
+            println!("{}", serde_json::json!({ "server_id": sid }));
+        } else {
+            println!("{sid}");
+        }
+        return Ok(());
+    }
+
+    let profiles = collect_server_id_profiles()?;
+
+    if json {
+        println!("{}", serde_json::json!({ "profiles": profiles }));
+    } else if profiles.is_empty() {
+        println!("(в CLI-сторе нет профилей — используй `sync-from-ui` или `import`)");
+    } else {
+        for p in &profiles {
+            println!(
+                "server_id={} (display={}) server_url={}",
+                p["server_id"].as_str().unwrap_or(""),
+                p["display_name"].as_str().unwrap_or(""),
+                p["server_url"].as_str().unwrap_or(""),
+            );
+            if let Some(arr) = p["peers"].as_array() {
+                for peer in arr {
+                    println!(
+                        "    peer name={} server_id={}",
+                        peer["name"].as_str().unwrap_or(""),
+                        peer["server_id"].as_str().unwrap_or(""),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Вернуть активный vault обратно на CLI-стор. `read_ui_profiles` переключает
+/// глобальный singleton на UI-vault; без восстановления последующие операции в
+/// том же процессе (например, в MCP) открыли бы CLI paranoia.db чужим db_key.
+fn restore_cli_vault() -> Result<()> {
+    paranoia_lib::local_vault::lock();
+    init_vault_for_cli()
+}
+
+/// Ядро sync-from-ui: прочитать профиль(и) из UI-vault и материализовать в
+/// CLI-сторе (dialogues по server_id, names заполнен, signing key перешифрован
+/// под PIN CLI-стора). ВСЕГДА восстанавливает CLI-vault (успех/ошибка). Возвращает
+/// сводку JSON. Общее ядро подкоманды `sync-from-ui` и MCP-тулзы provision_from_ui.
+fn sync_from_ui_core(
+    default_server_url: &str,
+    app_data_root: &Path,
+    ui_pin: &str,
+    selector: Option<&str>,
+) -> Result<serde_json::Value> {
+    let out = sync_from_ui_inner(default_server_url, app_data_root, ui_pin, selector);
+    let _ = restore_cli_vault(); // вернуть CLI-vault в любом случае
+    out
+}
+
+fn sync_from_ui_inner(
+    default_server_url: &str,
+    app_data_root: &Path,
+    ui_pin: &str,
+    selector: Option<&str>,
+) -> Result<serde_json::Value> {
+    let profiles = ui_store::read_ui_profiles(app_data_root, ui_pin, selector)?;
+
+    let mut store = load_dialogue_store()?;
+    let mut n_profiles = 0usize;
+    let mut n_dialogues = 0usize;
+    let mut n_keys = 0usize;
+    let mut details = Vec::new();
+
+    for up in &profiles {
+        let server_url = if up.server.trim().is_empty() {
+            default_server_url.to_string()
+        } else {
+            up.server.trim().to_string()
+        };
+        validate_b64_32(&up.private_key, "UI signing key")?;
+        // server_id авторитетно из signing key; client.json как fallback.
+        let server_id = derive_server_id_b64(&up.private_key)
+            .unwrap_or_else(|_| up.server_id.trim().to_string());
+        if server_id.is_empty() {
+            bail!("не удалось определить server_id для профиля '{}'", up.username);
+        }
+
+        let pid = profile_id(&server_url, &server_id);
+        let existed = store.profiles.contains_key(&pid);
+        // Перешифровать signing key под PIN CLI-стора (схема key_from_pin), пока
+        // не взяли &mut на профиль (read_pin читает PARANOIA_CLI_PIN). Не зависит
+        // от активного vault — поэтому ок даже при переключённом на UI vault.
+        let signing_ct = encrypt_profile_secret_b64(&up.private_key)?;
+
+        let profile = store
+            .profiles
+            .entry(pid)
+            .or_insert_with(ProfileDialogueStore::default);
+        profile.server_url = server_url.clone();
+        profile.username = server_id.clone();
+        profile.signing_key_b64 = String::new();
+        profile.signing_key_ct_b64 = signing_ct;
+        if !existed {
+            n_profiles += 1;
+        }
+        // Своё имя — под собственный server_id (self-чат «Избранное» резолвится).
+        if !up.username.trim().is_empty() {
+            profile
+                .names
+                .entry(server_id.clone())
+                .or_insert_with(|| up.username.trim().to_string());
+        }
+
+        for d in &up.dialogues {
+            let peer_sid = if d.peer_server_id.trim().is_empty() {
+                d.peer.trim().to_string()
+            } else {
+                d.peer_server_id.trim().to_string()
+            };
+            if peer_sid.is_empty() {
+                continue;
+            }
+            let display = if !d.local_name.trim().is_empty() {
+                d.local_name.trim()
+            } else {
+                d.peer.trim()
+            };
+            if !display.is_empty() && display != peer_sid {
+                profile.names.insert(peer_sid.clone(), display.to_string());
+            }
+
+            let mut touched = false;
+            for (start_seq, key_b64) in &d.keyring {
+                let entry = key_entry_from_base64(*start_seq, key_b64.as_str())?;
+                match merge_profile_keyring_entry(profile, &peer_sid, entry) {
+                    MergeOutcome::Imported => {
+                        n_keys += 1;
+                        touched = true;
+                    }
+                    MergeOutcome::Skipped | MergeOutcome::Conflict => {}
+                }
+            }
+            if touched {
+                n_dialogues += 1;
+            }
+        }
+
+        details.push(serde_json::json!({
+            "username": up.username,
+            "server_id": server_id,
+            "dialogues": up.dialogues.len(),
+        }));
+    }
+
+    save_dialogue_store(&store)?;
+    Ok(serde_json::json!({
+        "profiles": n_profiles,
+        "dialogues": n_dialogues,
+        "key_entries": n_keys,
+        "details": details,
+    }))
+}
+
+/// SYNC-FROM-UI: подтянуть профиль(и) НАПРЯМУЮ из стора UI-клиента, без
+/// export/import. После этого send/receive работают с тем же диалогом, что и UI
+/// (общий — серверный — стейт диалога).
+fn cmd_sync_from_ui(
+    default_server_url: &str,
+    app_data_root: PathBuf,
+    pin: Option<String>,
+    selector: Option<String>,
+) -> Result<()> {
+    let ui_pin = read_ui_pin(pin)?;
+    let res = sync_from_ui_core(default_server_url, &app_data_root, &ui_pin, selector.as_deref())?;
+    println!(
+        "Synced from UI store: profiles={} dialogues={} key_entries={}",
+        res["profiles"], res["dialogues"], res["key_entries"]
+    );
+    if let Some(details) = res["details"].as_array() {
+        for item in details {
+            println!(
+                "  username={} server_id={} dialogues={}",
+                item["username"].as_str().unwrap_or(""),
+                item["server_id"].as_str().unwrap_or(""),
+                item["dialogues"]
+            );
+        }
+    }
+    println!("→ используй server_id выше как --username (он же выводится `server-id`).");
+    Ok(())
+}
+
+/// MCP: собрать конфиг из CLI-флагов + env PARANOIA_MCP_*/PARANOIA_UI_* и
+/// запустить сервер. server_url/db_path/reserve берём из общих флагов CLI.
+async fn cmd_mcp(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    db_path: &str,
+    username: Option<String>,
+    peer: Option<String>,
+    log: Option<PathBuf>,
+) -> Result<()> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let username = username
+        .or_else(|| env("PARANOIA_MCP_USERNAME"))
+        .or_else(|| env("PARANOIA_MCP_SELF_HASH"))
+        .unwrap_or_default();
+    let self_hash = env("PARANOIA_MCP_SELF_HASH").unwrap_or_else(|| username.clone());
+    let peer = peer.or_else(|| env("PARANOIA_MCP_PEER")).unwrap_or_default();
+    let log_path = log
+        .or_else(|| env("PARANOIA_MCP_LOG").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("messages.jsonl")
+        });
+    let ui_app_data_root = env("PARANOIA_UI_APP_DATA_ROOT");
+    let ui_pin = env("PARANOIA_UI_PIN").or_else(|| env("PARANOIA_CLI_PIN"));
+
+    let cfg = mcp_server::McpConfig {
+        server_url: server_url.to_string(),
+        reserve_server_urls: reserve_server_urls.to_vec(),
+        db_path: db_path.to_string(),
+        username,
+        peer,
+        self_hash,
+        log_path,
+        ui_app_data_root,
+        ui_pin,
+    };
+    mcp_server::serve(cfg).await
 }
 
 #[derive(Parser)]
@@ -825,6 +1313,41 @@ enum Commands {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Показать server_id профилей (= --username для сервера) или вычислить из ключа
+    ServerId {
+        /// Вычислить server_id из signing key (base64, 32 байта), не читая стор
+        #[arg(long = "signing-key-b64")]
+        signing_key_b64: Option<String>,
+        /// Машиночитаемый вывод (JSON) — для MCP/скриптов
+        #[arg(long)]
+        json: bool,
+    },
+    /// Подтянуть профиль НАПРЯМУЮ из стора UI-клиента (vault), без export/import
+    SyncFromUi {
+        /// Каталог AppData UI-клиента (где vault.json и profiles/)
+        #[arg(long = "app-data-root")]
+        app_data_root: PathBuf,
+        /// PIN vault'а UI-клиента (или env PARANOIA_UI_PIN; иначе спросит с tty)
+        #[arg(long)]
+        pin: Option<String>,
+        /// Выбрать один профиль по username/server_id/имени каталога (по умолч. — все)
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// MCP: сервер (без под-команды) либо мастер установки (`mcp install`)
+    Mcp {
+        /// server_id профиля по умолчанию (иначе env PARANOIA_MCP_USERNAME)
+        #[arg(long)]
+        username: Option<String>,
+        /// peer по умолчанию (иначе env PARANOIA_MCP_PEER)
+        #[arg(long)]
+        peer: Option<String>,
+        /// durable-лог входящих (иначе env PARANOIA_MCP_LOG или <cwd>/messages.jsonl)
+        #[arg(long)]
+        log: Option<PathBuf>,
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
     /// Отправка текстового сообщения
     Send {
         #[arg(long)]
@@ -833,6 +1356,22 @@ enum Commands {
         peer: String,
         #[arg(long)]
         text: String,
+    },
+    /// Послать тестовый Offer-звонок peer'у (отладка приёма входящих в фоне)
+    CallOffer {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+    },
+    /// Послать Hangup (kind=2) по call_id (отладка сброса/протухших офферов)
+    CallHangup {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+        #[arg(long = "call-id")]
+        call_id: String,
     },
     /// Получение новых сообщений
     Receive {
@@ -904,6 +1443,62 @@ enum DeviceKeyCmd {
     Show,
 }
 
+/// Источник профиля при установке.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum InstallSource {
+    /// Подтянуть из действующего стора UI-клиента (vault) напрямую — нужен PIN UI
+    Ui,
+    /// Импортировать зашифрованный export-файл (нужен обмен device-key с хозяином)
+    Import,
+    /// Профиль уже подключён — только зарегистрировать в хостах
+    None,
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Мастер установки: провижининг профиля + регистрация в MCP-хостах.
+    /// Интерактивен для человека; с флагами/`--non-interactive` — для агента.
+    Install {
+        /// Рабочий каталог рантайма (стор/БД/ключи). По умолч. ~/.local/share/paranoia-mcp
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// PIN CLI-стора. Иначе спросит (tty) или env PARANOIA_CLI_PIN
+        #[arg(long)]
+        pin: Option<String>,
+        /// Источник профиля: ui | import | none
+        #[arg(long, value_enum)]
+        source: Option<InstallSource>,
+        /// (ui) каталог AppData UI-клиента
+        #[arg(long)]
+        ui_app_data_root: Option<PathBuf>,
+        /// (ui) PIN vault UI-клиента
+        #[arg(long)]
+        ui_pin: Option<String>,
+        /// (import) путь к зашифрованному export-файлу
+        #[arg(long)]
+        export_file: Option<PathBuf>,
+        /// server_id профиля (если в сторе их несколько)
+        #[arg(long)]
+        username: Option<String>,
+        /// peer по умолчанию (имя/server_id)
+        #[arg(long)]
+        peer: Option<String>,
+        /// Хосты через запятую: claude-code,claude-desktop,cursor,windsurf,cline,codex.
+        /// Пусто — автоопределение установленных (или спросит).
+        #[arg(long, value_delimiter = ',')]
+        hosts: Vec<String>,
+        /// Не задавать вопросов (агент/скрипт): недостающее обязательное → ошибка
+        #[arg(long)]
+        non_interactive: bool,
+        /// Показать план без записи
+        #[arg(long)]
+        dry_run: bool,
+        /// Машиночитаемый вывод (JSON) на stdout
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum AdminCmd {
     /// Генерация админских ключей
@@ -968,7 +1563,30 @@ fn init_vault_for_cli() -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_vault_for_cli()?;
+    // MCP/скрипты: если задан рабочий каталог — перейти в него ДО инициализации
+    // vault. Стор (.paranoia-cli-data, DEVICE_KEY, paranoia.db) адресуется
+    // относительно cwd, а ~/.paranoia_dialogues.json — относительно HOME; сводим
+    // оба в WORKDIR (реплицирует поведение прежней python-обёртки run_cli).
+    if let Ok(wd) = std::env::var("PARANOIA_MCP_WORKDIR") {
+        if !wd.is_empty() {
+            std::env::set_current_dir(&wd)
+                .with_context(|| format!("PARANOIA_MCP_WORKDIR: chdir {wd}"))?;
+            // SAFETY: однопоточный старт процесса, до спавна tokio-задач.
+            unsafe { std::env::set_var("HOME", &wd) };
+        }
+    }
+    // `mcp install` сам настраивает workdir/PIN и инициализирует vault уже в нём —
+    // ранний init в исходном cwd ему не нужен (и насорил бы там .paranoia-cli-data).
+    let is_mcp_install = matches!(
+        &cli.command,
+        Commands::Mcp {
+            cmd: Some(McpCmd::Install { .. }),
+            ..
+        }
+    );
+    if !is_mcp_install {
+        init_vault_for_cli()?;
+    }
 
     match cli.command {
         Commands::Admin { cmd } => match cmd {
@@ -1012,6 +1630,67 @@ async fn main() -> Result<()> {
         Commands::Import { file } => {
             cmd_import(&cli.server_url, file)?;
         }
+        Commands::ServerId {
+            signing_key_b64,
+            json,
+        } => {
+            cmd_server_id(signing_key_b64, json)?;
+        }
+        Commands::SyncFromUi {
+            app_data_root,
+            pin,
+            profile,
+        } => {
+            cmd_sync_from_ui(&cli.server_url, app_data_root, pin, profile)?;
+        }
+        Commands::Mcp {
+            username,
+            peer,
+            log,
+            cmd,
+        } => match cmd {
+            Some(McpCmd::Install {
+                workdir,
+                pin,
+                source,
+                ui_app_data_root,
+                ui_pin,
+                export_file,
+                username: inst_username,
+                peer: inst_peer,
+                hosts,
+                non_interactive,
+                dry_run,
+                json,
+            }) => {
+                mcp_install::run(mcp_install::InstallOpts {
+                    server_url: cli.server_url.clone(),
+                    workdir,
+                    pin,
+                    source,
+                    ui_app_data_root,
+                    ui_pin,
+                    export_file,
+                    username: inst_username,
+                    peer: inst_peer,
+                    hosts,
+                    non_interactive,
+                    dry_run,
+                    json,
+                })?;
+            }
+            None => {
+                cmd_mcp(
+                    &cli.server_url,
+                    &cli.reserve_server_urls,
+                    &cli.db_path,
+                    username,
+                    peer,
+                    log,
+                )
+                .await?;
+            }
+        },
         Commands::Send {
             username,
             peer,
@@ -1024,6 +1703,27 @@ async fn main() -> Result<()> {
                 &cli.db_path,
                 &peer,
                 &text,
+            )
+            .await?;
+        }
+        Commands::CallOffer { username, peer } => {
+            cmd_call_offer(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+            )
+            .await?;
+        }
+        Commands::CallHangup { username, peer, call_id } => {
+            cmd_call_hangup(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+                &call_id,
             )
             .await?;
         }

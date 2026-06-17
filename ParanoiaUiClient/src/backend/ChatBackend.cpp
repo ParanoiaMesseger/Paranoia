@@ -1,5 +1,6 @@
 #include "ChatBackend.hpp"
 
+#include "ActiveChatNotifier.hpp"
 #include "EncryptedImageProvider.hpp"
 
 #include "session/Dialog.hpp"
@@ -304,9 +305,26 @@ ChatBackend::ChatBackend(QObject *parent) : QObject(parent)
     m_activePollTimer->setSingleShot(true);
     connect(m_activePollTimer, &QTimer::timeout, this, &ChatBackend::onActivePollTimer);
     connect(qApp, &QGuiApplication::applicationStateChanged, this, &ChatBackend::onApplicationStateChanged);
+
+    // Long-poll near-real-time приём активного диалога (свой поток). На сигнал
+    // «есть новое» — обычный fetch + обновление статусов. Очередь в main-поток.
+    m_notifier = new ActiveChatNotifier();
+    connect(m_notifier, &ActiveChatNotifier::messagesWaiting, this, [this]() {
+        if (m_activePeer.isEmpty() || !applicationIsActive()) return;
+        fetchMessages();
+        refreshArrivedStatus();
+    });
 }
 
-ChatBackend::~ChatBackend() { m_activePollTimer->stop(); }
+ChatBackend::~ChatBackend()
+{
+    m_activePollTimer->stop();
+    if (m_notifier) {
+        m_notifier->stop();
+        delete m_notifier;
+        m_notifier = nullptr;
+    }
+}
 
 bool ChatBackend::messagesLoading() const { return m_messageLoadingJobs > 0; }
 
@@ -335,14 +353,42 @@ void ChatBackend::openChat(const QString &peer)
         refreshArrivedStatus();
         scheduleActiveChatPoll(0);
     }
+    updateNotifier();
 }
 
 void ChatBackend::stopChat()
 {
     m_activePeer.clear();
     m_activePollTimer->stop();
+    // НЕ stop() поток на каждый выход (он бы блокировал GUI в wait(), пока воркер
+    // висит в 25-сек long-poll → фриз/краш). Просто переводим в idle (пустая цель).
+    updateNotifier();
     emit activePeerChanged({});
     emit readReceiptsEnabledChanged();
+}
+
+// (Пере)нацелить long-poll-нотифаер на текущий активный диалог. Запускаем только
+// когда приложение активно, мы залогинены и диалог существует; иначе — стоп.
+void ChatBackend::updateNotifier()
+{
+    if (!m_notifier) return;
+    auto session = SessionStore::instance()->activeSession();
+    const auto *dlg = (session && !m_activePeer.isEmpty()) ? session->findDialog(m_activePeer) : nullptr;
+    // Нет цели/не активны → переводим воркер в IDLE (пустая конфигурация), но НЕ
+    // останавливаем поток: stop()+wait() на GUI-потоке морозил бы UI, пока висящий
+    // long-poll не вернётся (до 25с). Поток живёт всё время сессии, стоп — в dtor.
+    if (!applicationIsActive() || !session || !session->isLoggedIn() || !dlg) {
+        m_notifier->configure({}, {}, {}, {});
+        return;
+    }
+    const QString keyringJson = dlg->keyringJson();
+    if (keyringJson.isEmpty() || !session->ffi) {
+        m_notifier->configure({}, {}, {}, {});
+        return;
+    }
+    const QString peerId = dlg->peerServerId.isEmpty() ? m_activePeer : dlg->peerServerId;
+    m_notifier->configure(session->ffi, session->serverId, peerId, keyringJson);
+    m_notifier->start();
 }
 
 void ChatBackend::sendText(const QString &text)
@@ -1625,6 +1671,28 @@ void ChatBackend::pickVideoFromGallery()
 #endif
 }
 
+#if defined(Q_OS_IOS)
+extern "C" void paranoia_ios_pick_avatar(void (*cb)(void *ctx, const char *path), void *ctx);
+
+void ChatBackend::iosAvatarPickedTrampoline(void *ctx, const char *path)
+{
+    auto *self = static_cast<ChatBackend *>(ctx);
+    if (self == nullptr) return;
+    const QString p = (path != nullptr) ? QString::fromUtf8(path) : QString();
+    // Делегат зовёт нас в главном потоке UIKit; перекидываем в Qt-очередь, чтобы
+    // emit прошёл из event loop'а (и m_pendingAvatarPeer читался согласованно).
+    QMetaObject::invokeMethod(
+        self,
+        [self, p]() {
+            const QString peer = self->m_pendingAvatarPeer;
+            self->m_pendingAvatarPeer.clear();
+            if (peer.isEmpty() || p.isEmpty()) return; // отмена/ошибка
+            emit self->avatarPhotoPicked(peer, p);
+        },
+        Qt::QueuedConnection);
+}
+#endif
+
 void ChatBackend::pickAvatarFromGallery(const QString &peer)
 {
 #if defined(Q_OS_ANDROID)
@@ -1635,6 +1703,9 @@ void ChatBackend::pickAvatarFromGallery(const QString &peer)
                                        "(Landroid/content/Context;Z)V", context.object<jobject>(),
                                        static_cast<jboolean>(true));
     clearPendingAndroidException();
+#elif defined(Q_OS_IOS)
+    m_pendingAvatarPeer = peer; // потребится в iosAvatarPickedTrampoline
+    paranoia_ios_pick_avatar(&ChatBackend::iosAvatarPickedTrampoline, this);
 #else
     Q_UNUSED(peer)
 #endif
@@ -1728,6 +1799,9 @@ void ChatBackend::onApplicationStateChanged(Qt::ApplicationState state)
     } else {
         m_activePollTimer->stop();
     }
+    // Long-poll крутим только в активном состоянии (в фоне приём ведёт
+    // NotificationCoordinator); updateNotifier сам решит старт/стоп.
+    updateNotifier();
 }
 
 // ── Active chat poll ──────────────────────────────────────────────────────────
@@ -1866,7 +1940,10 @@ void ChatBackend::scheduleActiveChatPoll(int delayMs)
     m_activePollTimer->start(delayMs);
 }
 
-int ChatBackend::randomActiveNotifyDelayMs() { return QRandomGenerator::global()->bounded(500, 1'001); }
+// Near-real-time приём теперь даёт long-poll-нотифаер (ActiveChatNotifier), поэтому
+// короткий поллер РЕДКИЙ: подстраховка при сбое long-poll'а + обновление статусов
+// доставки/прочтения (на которые notify не будит). Раньше было 0.5–1 c (агрессивно).
+int ChatBackend::randomActiveNotifyDelayMs() { return QRandomGenerator::global()->bounded(6'000, 10'001); }
 
 int ChatBackend::retryActiveNotifyDelayMs() const
 {
@@ -1921,6 +1998,90 @@ void ChatBackend::loadHistory(const QString &peer)
             if (peer == self->m_activePeer) emit self->messagesReceived(peer, self->m_messageCache[peer]);
         });
     });
+}
+
+void ChatBackend::loadAllForAttachments(const QString &peer)
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const auto *dlg = session->findDialog(peer);
+    if (!dlg) return;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    // Большой лимит = «вся история» (стор отдаёт ORDER BY ts DESC LIMIT n). Тяжёлый
+    // дешифр идёт на воркер-потоке под ffiMutex — GUI не блокируется. Кэш чата НЕ
+    // трогаем: это разовая выборка только под экран «Вложения».
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson]() {
+        if (!self) return;
+        QString json;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (session->ffi) {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                json                 = session->ffi->history_keyring(serverId, peerId, keyringJson, 1000000);
+            }
+        }
+        QMetaObject::invokeMethod(self, [self, peer, json]() {
+            if (!self) return;
+            const QVariantList messages = json.isEmpty() ? QVariantList() : self->parseMessages(json);
+            emit self->attachmentsHistoryLoaded(peer, messages);
+        });
+    });
+}
+
+void ChatBackend::ensureGalleryPreview(const QString &peer, const QString &messageId)
+{
+    if (peer.isEmpty() || messageId.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const auto *dlg = session->findDialog(peer);
+    if (!dlg) return;
+    // Уже в провайдере — сразу сигналим готовность (галерея покажет).
+    if (m_imageProvider && m_imageProvider->contains(messageId)) {
+        emit galleryPreviewReady(messageId);
+        return;
+    }
+    if (m_failedPreviewIds.contains(messageId)) return;
+    const QString requestKey = QStringLiteral("gallery\n") + messageId;
+    if (m_previewInFlightIds.contains(requestKey)) return;
+    m_previewInFlightIds.insert(requestKey);
+
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, session, peer, serverId, peerServerId, keyringJson, messageId, requestKey]() {
+            if (!self) return;
+            QByteArray bytes;
+            QString err;
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                if (!session->ffi) {
+                    err = QStringLiteral("client_not_ready");
+                } else {
+                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                    bytes = session->ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
+                    if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
+                }
+            }
+            const QByteArray previewBytes = bytes.isEmpty() ? QByteArray() : makePreviewBytes(bytes);
+            QMetaObject::invokeMethod(self, [self, requestKey, messageId, previewBytes, err]() {
+                if (!self) return;
+                self->m_previewInFlightIds.remove(requestKey);
+                if (!previewBytes.isEmpty() && self->m_imageProvider) {
+                    self->m_imageProvider->setBytes(messageId, previewBytes);
+                    emit self->galleryPreviewReady(messageId);
+                    return;
+                }
+                if (!err.isEmpty()) {
+                    self->m_failedPreviewIds.insert(messageId);
+                    qWarning().noquote() << "Gallery preview failed:" << err << "msgId=" << messageId;
+                }
+            });
+        });
 }
 
 void ChatBackend::appendMessages(const QString &peer, const QVariantList &messages)

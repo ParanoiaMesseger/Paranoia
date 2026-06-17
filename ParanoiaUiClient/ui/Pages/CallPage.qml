@@ -87,10 +87,9 @@ Rectangle {
         }
     }
 
-    // Аватар-заглушка: круг с первой буквой имени собеседника. Показывается
-    // когда удалённого видео нет (камера выключена / не была включена) во
-    // время активного звонка. Цвет — акцент темы (одиночные звонки, групповых
-    // не планируем); позже сюда поедет реальная аватарка.
+    // Аватар собеседника: реальная аватарка диалога (если задана), иначе круг с
+    // первой буквой имени. Показывается когда удалённого видео нет (камера
+    // выключена / не была включена) во время активного звонка.
     Item {
         id: remoteAvatarPlaceholder
         anchors.fill: parent
@@ -100,6 +99,10 @@ Rectangle {
         readonly property string _initial: _displayName.length > 0
                                            ? _displayName.charAt(0).toUpperCase()
                                            : "?"
+        // data:-URL аватара диалога по peer'у (пусто = нет аватара → буква).
+        readonly property string _avatarSrc:
+            (VoIPAvailable && Backend && peerName.length > 0) ? Backend.dialogAvatar(peerName) : ""
+        readonly property bool _hasAvatar: _avatarSrc.length > 0
 
         Rectangle {
             id: avatarCircle
@@ -110,13 +113,26 @@ Rectangle {
             color: Theme.bgButton
             border.color: Theme.accent
             border.width: 2
+            clip: true
 
+            // Буква — только когда аватарки нет.
             Label {
                 anchors.centerIn: parent
+                visible: !remoteAvatarPlaceholder._hasAvatar
                 text: remoteAvatarPlaceholder._initial
                 color: Theme.textPrimary
                 font.pixelSize: avatarCircle.width * 0.45
                 font.weight: Font.DemiBold
+            }
+
+            // Реальная аватарка (круг ЗАПЕЧЁН в PNG, см. setDialogAvatar) —
+            // обычный Image, прозрачные углы открывают фон-кружок.
+            Image {
+                anchors.fill: parent
+                visible: remoteAvatarPlaceholder._hasAvatar && status === Image.Ready
+                source: remoteAvatarPlaceholder._avatarSrc
+                fillMode: Image.PreserveAspectFit
+                mipmap: true
             }
         }
     }
@@ -319,6 +335,20 @@ Rectangle {
         RowLayout {
             Layout.alignment: Qt.AlignHCenter
             spacing: 18
+
+            // running: маршрут аудио (громкая связь ↔ разговорный динамик).
+            // Только на мобильных — на десктопе вывод выбирается системой.
+            // Иконка динамика подсвечена (warning), когда громкая связь включена.
+            CallControlButton {
+                readonly property bool mobile: Qt.platform.os === "android" || Qt.platform.os === "ios"
+                visible: mode === "running" && Call !== null && mobile
+                iconName: "speaker"
+                tone: Call && Call.audioRoute === 1 ? "warning" : "neutral"
+                tooltip: Call && Call.audioRoute === 1
+                    ? qsTr("Громкая связь включена")
+                    : qsTr("Включить громкую связь")
+                onClicked: if (Call) Call.setAudioRoute(Call.audioRoute === 1 ? 0 : 1)
+            }
 
             // running: микрофон mute
             CallControlButton {

@@ -7,6 +7,7 @@
 #include <Qt>
 
 class EncryptedImageProvider;
+class ActiveChatNotifier;
 
 class ChatBackend : public QObject
 {
@@ -64,6 +65,13 @@ public:
     /// после успешного скачивания файла, когда пользователь согласился убрать
     /// файл с сервера).
     Q_INVOKABLE void removeAttachmentChunksFromServer(const QString &messageId);
+    /// Полная история диалога для экрана «Вложения» (без лимита окна чата).
+    /// Грузится в отдельном потоке (FFI с большим лимитом), НЕ трогает кэш/окно
+    /// чата; результат — сигналом attachmentsHistoryLoaded(peer, messages).
+    Q_INVOKABLE void loadAllForAttachments(const QString &peer);
+    /// Лениво расшифровать превью ЛЮБОГО изображения диалога (для экрана «Вложения»,
+    /// в т.ч. старых, не загруженных в кэш чата). По готовности — galleryPreviewReady.
+    Q_INVOKABLE void ensureGalleryPreview(const QString &peer, const QString &messageId);
     Q_INVOKABLE void setReadReceiptsEnabled(bool enabled);
     Q_INVOKABLE void requestFileAccessPermissions();
     Q_INVOKABLE void commitInputMethod();
@@ -87,6 +95,10 @@ public:
 
 signals:
     void messagesReceived(const QString &peer, const QVariantList &messages);
+    /// Полная история диалога для экрана «Вложения» (см. loadAllForAttachments).
+    void attachmentsHistoryLoaded(const QString &peer, const QVariantList &messages);
+    /// Превью изображения для галереи готово (залито в провайдер) — id для рефреша.
+    void galleryPreviewReady(const QString &messageId);
     void sendError(const QString &msg);
     void receiveError(const QString &msg);
     void attachmentSaved(const QString &path);
@@ -142,6 +154,11 @@ private slots:
     void onActivePollTimer();
 
 private:
+#if defined(Q_OS_IOS)
+    // Трамплин для PHPicker-делегата (см. IosImagePicker.mm): C-callback → emit
+    // avatarPhotoPicked в главном потоке Qt. ctx = this.
+    static void iosAvatarPickedTrampoline(void *ctx, const char *path);
+#endif
     QString m_activePeer;
     // Peer, для которого открыт photo picker под АВАТАР (Android). Выставляется
     // в pickAvatarFromGallery, потребляется one-shot в consumePickedAttachment.
@@ -151,6 +168,12 @@ private:
     QMap<QString, QSet<QString>> m_appliedReactionIds;
     void consumePickedAttachment();
     QTimer *m_activePollTimer;
+    // Long-poll near-real-time приёма активного диалога (свой поток, без ffiMutex).
+    // Короткий m_activePollTimer остаётся редким fallback'ом + для read-receipt'ов.
+    ActiveChatNotifier *m_notifier = nullptr;
+    // (Пере)настроить и запустить long-poll-нотифаер на текущий m_activePeer
+    // (если залогинены, диалог есть и приложение активно); иначе — остановить.
+    void updateNotifier();
     QSet<QString> m_sendInFlightKeys;
     QSet<QString> m_previewInFlightIds;
     // Превью, для которых extract провалился безвозвратно (attachment_not_found):

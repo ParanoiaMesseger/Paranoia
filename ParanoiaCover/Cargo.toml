@@ -1,6 +1,6 @@
 [package]
 name = "paranoia-cover"
-version = "0.2.15"
+version = "0.2.16"
 edition = "2024"
 
 # Общий движок schema-cover: формат masking-профиля, AEAD-конверт cover-слоя,

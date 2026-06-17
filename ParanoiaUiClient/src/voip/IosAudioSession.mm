@@ -48,6 +48,22 @@ namespace paranoia::voip
 #endif
     }
 
+    void iosAudioSessionSetRoute(int route)
+    {
+#if PARANOIA_VOIP_IOS
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        NSError *error          = nil;
+        // route==1 → громкая связь; иначе вернуть дефолтный порт (earpiece/гарнитура).
+        AVAudioSessionPortOverride ov =
+            (route == 1) ? AVAudioSessionPortOverrideSpeaker : AVAudioSessionPortOverrideNone;
+        if (![session overrideOutputAudioPort:ov error:&error]) {
+            NSLog(@"Paranoia: AVAudioSession overrideOutputAudioPort(route=%d) failed: %@", route, error);
+        }
+#else
+        (void)route;
+#endif
+    }
+
     void iosAudioSessionDeactivate()
     {
 #if PARANOIA_VOIP_IOS

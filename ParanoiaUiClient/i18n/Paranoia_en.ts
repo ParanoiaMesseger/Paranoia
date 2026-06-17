@@ -267,16 +267,8 @@
         <translation>Dialogue not found.</translation>
     </message>
     <message>
-        <source>Ошибка синхронизации seq. Повторите отправку после обновления диалога.</source>
-        <translation>Seq sync error. Resend after refreshing the dialogue.</translation>
-    </message>
-    <message>
         <source>Сервер недоступен. Проверьте соединение.</source>
         <translation>The server is unavailable. Check your connection.</translation>
-    </message>
-    <message>
-        <source>Ошибка отправки сообщения.</source>
-        <translation>Failed to send the message.</translation>
     </message>
     <message>
         <source>Ошибка отправки реакции.</source>
@@ -309,6 +301,10 @@
     <message>
         <source>Не удалось сохранить файл: </source>
         <translation>Could not save the file: </translation>
+    </message>
+    <message>
+        <source>MediaStore</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
         <source>Не удалось удалить локальные сообщения: </source>
@@ -355,12 +351,32 @@
         <translation>You</translation>
     </message>
     <message>
+        <source>Ошибка синхронизации seq. Обновите диалог и повторите.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Сервер недоступен. Сообщение в очереди — нажмите для повтора.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Не удалось отправить. Нажмите на сообщение для повтора.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
         <source>Файл</source>
         <translation>File</translation>
     </message>
 </context>
 <context>
     <name>ChatPage</name>
+    <message>
+        <source>Сегодня</source>
+        <translation>Today</translation>
+    </message>
+    <message>
+        <source>Вчера</source>
+        <translation>Yesterday</translation>
+    </message>
     <message>
         <source>Вы</source>
         <translation>You</translation>
@@ -2202,6 +2218,120 @@ Update now?</translation>
     <message>
         <source>Введите PIN для оценки</source>
         <translation>Enter a PIN to evaluate</translation>
+    </message>
+</context>
+<context>
+    <name>SharedMediaPage</name>
+    <message>
+        <source>Удалено: %1</source>
+        <translation>Deleted: %1</translation>
+    </message>
+    <message>
+        <source>Б</source>
+        <translation type="unfinished">B</translation>
+    </message>
+    <message>
+        <source>КБ</source>
+        <translation type="unfinished">KB</translation>
+    </message>
+    <message>
+        <source>МБ</source>
+        <translation type="unfinished">MB</translation>
+    </message>
+    <message>
+        <source>ГБ</source>
+        <translation type="unfinished">GB</translation>
+    </message>
+    <message>
+        <source>Сохраняю «%1»…</source>
+        <translation>Saving “%1”…</translation>
+    </message>
+    <message>
+        <source>Выбрано: %1</source>
+        <translation>Selected: %1</translation>
+    </message>
+    <message>
+        <source>Вложения</source>
+        <translation>Attachments</translation>
+    </message>
+    <message>
+        <source>Медиа</source>
+        <translation>Media</translation>
+    </message>
+    <message>
+        <source>Файлы</source>
+        <translation>Files</translation>
+    </message>
+    <message>
+        <source>Ссылки</source>
+        <translation>Links</translation>
+    </message>
+    <message>
+        <source>Загружаю всю историю…</source>
+        <translation>Loading full history…</translation>
+    </message>
+    <message>
+        <source>Нет фото и видео</source>
+        <translation>No photos or videos</translation>
+    </message>
+    <message>
+        <source>Нет файлов</source>
+        <translation>No files</translation>
+    </message>
+    <message>
+        <source>файл</source>
+        <translation>file</translation>
+    </message>
+    <message>
+        <source>Нет ссылок</source>
+        <translation>No links</translation>
+    </message>
+    <message>
+        <source>Удалить вложения?</source>
+        <translation>Delete attachments?</translation>
+    </message>
+    <message>
+        <source>Выбранные сообщения с вложениями будут удалены и с сервера, и у собеседника при следующей синхронизации.</source>
+        <translation>The selected messages with attachments will be deleted from the server and for your contact on the next sync.</translation>
+    </message>
+    <message>
+        <source>Удалить</source>
+        <translation type="unfinished">Delete</translation>
+    </message>
+    <message>
+        <source>Отмена</source>
+        <translation type="unfinished">Cancel</translation>
+    </message>
+</context>
+<context>
+    <name>TextMessageViewer</name>
+    <message>
+        <source>Вы</source>
+        <translation type="unfinished">You</translation>
+    </message>
+    <message>
+        <source>Сообщение</source>
+        <translation type="unfinished">Message</translation>
+    </message>
+    <message>
+        <source>Готово</source>
+        <translation type="unfinished">Done</translation>
+    </message>
+    <message>
+        <source>Выделить</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Скопировано</source>
+        <translation type="unfinished">Copied</translation>
+    </message>
+    <message>
+        <source>Копировать выделенное</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Копировать</source>
+        <translation type="unfinished">Copy</translation>
     </message>
 </context>
 <context>

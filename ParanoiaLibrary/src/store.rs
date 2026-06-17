@@ -443,14 +443,32 @@ impl LocalStore {
         )?;
         let mut messages = Vec::new();
         for row in rows {
-            let (id, sender, content_json, ts_str, status_json, seq) = row?;
+            // Пропускаем непарсящиеся строки, а не валим всю выборку: одно битое/
+            // старое сообщение не должно «прятать» весь остальной диалог (иначе при
+            // большом лимите вся история падала в Err → пустой результат).
+            let (id, sender, content_json, ts_str, status_json, seq) = match row {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let content = match serde_json::from_str(&content_json) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let timestamp = match ts_str.parse::<DateTime<Utc>>() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let status = match serde_json::from_str(&status_json) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
             messages.push(Message {
                 id,
                 dialogue: dialogue.clone(),
                 sender,
-                content: serde_json::from_str(&content_json)?,
-                timestamp: ts_str.parse::<DateTime<Utc>>()?,
-                status: serde_json::from_str(&status_json)?,
+                content,
+                timestamp,
+                status,
                 server_seq: seq.map(|s| s as u64),
             });
         }

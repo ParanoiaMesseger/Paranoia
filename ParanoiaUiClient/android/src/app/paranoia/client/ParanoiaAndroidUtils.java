@@ -186,6 +186,22 @@ public final class ParanoiaAndroidUtils {
         }
     }
 
+    /// Сменить маршрут вывода НА ЛЕТУ во время звонка, не трогая AudioManager.mode
+    /// (он уже MODE_IN_COMMUNICATION из setVoiceCallMode). speakerphone=true —
+    /// громкая связь; false — разговорный динамик (earpiece) или подключённая
+    /// проводная/BT-гарнитура (её система выберет сама, когда speakerphone выключен).
+    public static void setSpeakerphone(Context context, boolean speakerphone) {
+        if (context == null) return;
+        try {
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return;
+            am.setSpeakerphoneOn(speakerphone);
+            Log.i(TAG, "audio route: speakerphone=" + speakerphone);
+        } catch (Exception e) {
+            Log.w(TAG, "setSpeakerphone failed: " + e.getMessage());
+        }
+    }
+
     /// Заблокировать ориентацию Activity на portrait (или вернуть UNSPECIFIED).
     /// Используется на время звонка, чтобы интерфейс не «прыгал» при повороте
     /// устройства. Если context — не Activity, no-op.

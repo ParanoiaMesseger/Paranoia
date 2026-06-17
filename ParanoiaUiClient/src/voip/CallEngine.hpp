@@ -4,6 +4,7 @@
 #include <QMap>
 #include <QString>
 #include <QTimer>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -87,6 +88,11 @@ namespace paranoia::voip
         /// первого кадра — VideoCapture::dimensionsReady. До этого false.
         bool localVideoPortrait() const { return local_video_portrait_; }
         bool mediaReceived() const { return media_received_; }
+        /// Время (ms since epoch) последнего ПРИНЯТОГО аудио-кадра от peer'а.
+        /// 0 — ещё ни одного. DTX выключен (OPUS_SET_DTX(0)) → packets идут каждые
+        /// 20мс непрерывно, поэтому длинная «дыра» = peer пропал/положил трубку.
+        /// Атомик: enqueueIncomingFrame зовётся из rx-потока FFI.
+        qint64 lastAudioRxMs() const { return last_audio_rx_ms_.load(std::memory_order_relaxed); }
 
         /// Текущий sink для локального preview. QML не должен писать его в
         /// `VideoOutput.videoSink`; вместо этого используется `setLocalVideoOutput()`.
@@ -159,6 +165,16 @@ namespace paranoia::voip
         bool micMuted() const { return mic_muted_; }
         Q_INVOKABLE void setMicMuted(bool muted);
 
+        /// Маршрут аудио-вывода: 0=разговорный динамик (earpiece, к уху),
+        /// 1=громкая связь (speakerphone). Проводная/BT-гарнитура подхватывается
+        /// платформой автоматически когда speakerphone=off. Меняется на лету во
+        /// время звонка. Дефолт — Speaker (как было: видеозвонок с экрана).
+        enum AudioRoute { RouteEarpiece = 0, RouteSpeaker = 1 };
+        Q_ENUM(AudioRoute)
+        Q_PROPERTY(int audioRoute READ audioRoute WRITE setAudioRoute NOTIFY audioRouteChanged)
+        int audioRoute() const { return audio_route_; }
+        Q_INVOKABLE void setAudioRoute(int route);
+
         /// Запросить keyframe у локального энкодера (например, после нового
         /// peer'а или явной просьбы удалённой стороны).
         Q_INVOKABLE void requestKeyframe();
@@ -176,6 +192,7 @@ namespace paranoia::voip
         void remoteVideoActiveChanged();
         void mediaReceivedChanged();
         void micMutedChanged();
+        void audioRouteChanged();
         void errorOccurred(const QString &message);
 
     public slots:
@@ -226,12 +243,17 @@ namespace paranoia::voip
         QString state_                       = QStringLiteral("idle");
         quint16 local_port_                  = 0;
         bool mic_muted_                      = false;
+        int audio_route_                     = RouteSpeaker; // дефолт — громкая связь
+        void applyAudioRoute();                              // platform-specific вывод
         bool video_attached_                 = false;
         bool local_video_portrait_           = false;
         // Гейтинг markMediaReceived() — один раз на сессию.
         bool received_audio_packet_          = false;
         bool remote_video_active_            = false;
         bool media_received_                 = false;
+        // Время последнего принятого аудио-кадра (см. lastAudioRxMs()). Атомик —
+        // пишется из rx-потока, читается из GUI-потока (pollRxPath).
+        std::atomic<qint64> last_audio_rx_ms_{0};
 
         // Текущий контекст — owned (нужен на время жизни сессии). После
         // teardown'а кладём в `retired_callback_contexts_` чтобы не освобождать
