@@ -15,7 +15,7 @@ FFMPEG_IOS_ARCHS="${FFMPEG_IOS_ARCHS:-arm64}"
 FFMPEG_IOS_SDK="${FFMPEG_IOS_SDK:-iphoneos}"
 IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
-FFMPEG_IOS_CONFIG_ID="${FFMPEG_IOS_CONFIG_ID:-ffmpeg-${FFMPEG_VERSION}-ios-h264-videotoolbox-avfilter-20260526}"
+FFMPEG_IOS_CONFIG_ID="${FFMPEG_IOS_CONFIG_ID:-ffmpeg-${FFMPEG_VERSION}-ios-h264-videotoolbox-avfilter-transcode1-20260617}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARANOIA_ROOT="${PARANOIA_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -112,12 +112,11 @@ build_one_arch() {
             --sysroot="$SDK_PATH" \
             --enable-static \
             --disable-shared \
+            --enable-pic \
             --disable-programs \
             --disable-doc \
             --disable-autodetect \
             --disable-avdevice \
-            --disable-avformat \
-            --disable-swresample \
             --disable-postproc \
             --disable-network \
             --disable-everything \
@@ -125,6 +124,8 @@ build_one_arch() {
             --enable-avutil \
             --enable-swscale \
             --enable-avfilter \
+            --enable-avformat \
+            --enable-swresample \
             --enable-filter=buffer \
             --enable-filter=buffersink \
             --enable-filter=transpose \
@@ -136,6 +137,32 @@ build_one_arch() {
             --enable-filter=null \
             --enable-decoder=h264 \
             --enable-parser=h264 \
+            --enable-protocol=file \
+            --enable-demuxer=mov \
+            --enable-demuxer=matroska \
+            --enable-muxer=mp4 \
+            --enable-muxer=mov \
+            --enable-decoder=hevc \
+            --enable-decoder=mpeg4 \
+            --enable-decoder=vp8 \
+            --enable-decoder=vp9 \
+            --enable-parser=hevc \
+            --enable-parser=vp8 \
+            --enable-parser=vp9 \
+            --enable-parser=mpeg4video \
+            --enable-decoder=aac \
+            --enable-decoder=mp3 \
+            --enable-decoder=opus \
+            --enable-decoder=vorbis \
+            --enable-decoder=ac3 \
+            --enable-decoder=pcm_s16le \
+            --enable-parser=aac \
+            --enable-parser=opus \
+            --enable-encoder=aac \
+            --enable-bsf=aac_adtstoasc \
+            --enable-bsf=h264_mp4toannexb \
+            --enable-bsf=hevc_mp4toannexb \
+            --enable-bsf=extract_extradata \
             "${videotoolbox_args[@]}" \
             --extra-cflags="$common_flags" \
             --extra-ldflags="-arch $arch -isysroot $SDK_PATH $min_flag"
@@ -149,6 +176,8 @@ build_one_arch() {
        || [ ! -f "$prefix/lib/libavutil.a" ] \
        || [ ! -f "$prefix/lib/libswscale.a" ] \
        || [ ! -f "$prefix/lib/libavfilter.a" ] \
+       || [ ! -f "$prefix/lib/libavformat.a" ] \
+       || [ ! -f "$prefix/lib/libswresample.a" ] \
        || [ ! -f "$prefix/include/libavcodec/avcodec.h" ] \
        || [ ! -f "$prefix/include/libavfilter/avfilter.h" ]; then
         echo "ERROR: FFmpeg install for $out_subdir did not produce expected files" >&2

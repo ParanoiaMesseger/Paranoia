@@ -227,7 +227,7 @@ Rectangle {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
 
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: AppScrollBar { policy: ScrollBar.AsNeeded }
 
         MessageText {
             id: bodyView
@@ -284,7 +284,7 @@ Rectangle {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
 
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: AppScrollBar { policy: ScrollBar.AsNeeded }
 
         TextEdit {
             id: bodyEdit

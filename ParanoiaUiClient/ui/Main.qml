@@ -366,6 +366,7 @@ ApplicationWindow {
             onOpenVersionInfo: stackView.push(versionInfoPage)
             onOpenChangePin: stackView.push(changePinPage)
             onOpenMasking: stackView.push(maskingPage)
+            onOpenDataManagement: stackView.push(dataManagementPage)
         }
     }
 
@@ -435,6 +436,13 @@ ApplicationWindow {
     Component {
         id: versionInfoPage
         VersionInfoPage {
+            onBack: stackView.pop()
+        }
+    }
+
+    Component {
+        id: dataManagementPage
+        DataManagementPage {
             onBack: stackView.pop()
         }
     }

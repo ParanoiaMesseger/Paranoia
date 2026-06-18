@@ -106,7 +106,7 @@ Popup {
             cellHeight: 46
             model: picker.categories[picker.currentCategory].emojis
             boundsBehavior: Flickable.StopAtBounds
-            ScrollBar.vertical: ScrollBar {}
+            ScrollBar.vertical: AppScrollBar {}
 
             delegate: Item {
                 id: cell

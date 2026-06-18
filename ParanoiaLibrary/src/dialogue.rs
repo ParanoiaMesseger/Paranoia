@@ -141,11 +141,7 @@ impl Dialogue {
         F: FnMut(u32, u32),
     {
         let mime_type = mime_type.into();
-        let kind = if mime_type.starts_with("image/") {
-            AttachmentKind::Image
-        } else {
-            AttachmentKind::File
-        };
+        let kind = kind_for_mime(&mime_type);
         self.send_path_chunked(kind, filename.into(), mime_type, path.as_ref(), None, on_progress)
             .await
     }
@@ -176,11 +172,7 @@ impl Dialogue {
             self.send_large_file_path_with_progress(filename, mime_type, path, on_progress)
                 .await
         } else {
-            let kind = if mime_type.starts_with("image/") {
-                AttachmentKind::Image
-            } else {
-                AttachmentKind::File
-            };
+            let kind = kind_for_mime(&mime_type);
             self.send_path_chunked(kind, filename.into(), mime_type, path, None, on_progress)
                 .await
         }
@@ -331,11 +323,7 @@ impl Dialogue {
             on_progress(index, total_chunks);
         }
 
-        let kind = if mime_type.starts_with("image/") {
-            AttachmentKind::Image
-        } else {
-            AttachmentKind::File
-        };
+        let kind = kind_for_mime(&mime_type);
         let expires_at = now_unix() + limits.ephemeral_retention_secs;
         let attachment = FileAttachment {
             filename,
@@ -715,7 +703,10 @@ impl Dialogue {
             anyhow::bail!("attachment_not_found");
         };
         let file = match message.content {
-            MessageContent::File(f) | MessageContent::Image(f) | MessageContent::Voice(f) => f,
+            MessageContent::File(f)
+            | MessageContent::Image(f)
+            | MessageContent::Voice(f)
+            | MessageContent::Video(f) => f,
             _ => anyhow::bail!("message_has_no_attachment"),
         };
         // 1) Зашифрованный persistent кеш → расшифровать в указанный target.
@@ -801,7 +792,8 @@ impl Dialogue {
         let file = match &message.content {
             MessageContent::File(file)
             | MessageContent::Image(file)
-            | MessageContent::Voice(file) => file,
+            | MessageContent::Voice(file)
+            | MessageContent::Video(file) => file,
             _ => anyhow::bail!("message_has_no_attachment"),
         };
 
@@ -837,6 +829,21 @@ impl Dialogue {
             }
         }
 
+        // 2.7) Эфемерный большой файл (blob, TTL 24ч) — тело НЕ в истории, а в
+        //      blob-хранилище по file_id. Без этой ветки превью/инлайн-проигрывание
+        //      эфемерного видео/голосового падало бы (transfer_id=None → ниже
+        //      attachment_not_downloaded). Качаем blob, кэшируем зашифрованно.
+        if let Some(file_id) = file.ephemeral_file_id.clone() {
+            let plaintext = self
+                .download_ephemeral_file(&file_id, file.chunk_count)
+                .await?;
+            let sealed =
+                crate::local_vault::encrypt_attachment(message_id.as_bytes(), &plaintext)?;
+            ensure_parent_dir(&enc_path)?;
+            write_bytes_atomic(&enc_path, &sealed)?;
+            return Ok(plaintext);
+        }
+
         // 3) Скачать с сервера прямо в RAM (никаких plaintext-файлов на диске).
         //    На диск уходит ТОЛЬКО зашифрованный enc_path.
         let transfer_id = file
@@ -868,7 +875,7 @@ impl Dialogue {
         // что вложение скачано (downloadable=true в JSON).
         let mut message_mut = message;
         if let MessageContent::File(ref mut f) | MessageContent::Image(ref mut f)
-            | MessageContent::Voice(ref mut f) = message_mut.content
+            | MessageContent::Voice(ref mut f) | MessageContent::Video(ref mut f) = message_mut.content
         {
             f.downloaded = true;
             f.data.clear();
@@ -1195,6 +1202,7 @@ impl Dialogue {
             MessageContent::File(file) => (AttachmentKind::File, file),
             MessageContent::Image(file) => (AttachmentKind::Image, file),
             MessageContent::Voice(file) => (AttachmentKind::Voice, file),
+            MessageContent::Video(file) => (AttachmentKind::Video, file),
             _ => anyhow::bail!("message_has_no_attachment"),
         };
 
@@ -1618,7 +1626,10 @@ fn readable_path(file: &FileAttachment) -> Option<PathBuf> {
 
 fn strip_remote_local_attachment_state(content: &mut MessageContent) {
     match content {
-        MessageContent::File(file) | MessageContent::Image(file) | MessageContent::Voice(file) => {
+        MessageContent::File(file)
+        | MessageContent::Image(file)
+        | MessageContent::Voice(file)
+        | MessageContent::Video(file) => {
             file.cache_path = None;
             if file.data.is_empty() && file.size > 0 {
                 file.downloaded = false;
@@ -1703,6 +1714,21 @@ fn attachment_content(kind: AttachmentKind, file: FileAttachment) -> MessageCont
         AttachmentKind::File => MessageContent::File(file),
         AttachmentKind::Image => MessageContent::Image(file),
         AttachmentKind::Voice => MessageContent::Voice(file),
+        AttachmentKind::Video => MessageContent::Video(file),
+    }
+}
+
+/// Классификация вложения по MIME-типу. `video/*` → Video, `image/*` → Image,
+/// остальное → File. Голос отправляется явным `AttachmentKind::Voice`, не сюда.
+fn kind_for_mime(mime_type: &str) -> AttachmentKind {
+    if mime_type.starts_with("video/") {
+        AttachmentKind::Video
+    } else if mime_type.starts_with("image/") {
+        AttachmentKind::Image
+    } else if mime_type.starts_with("audio/") {
+        AttachmentKind::Voice
+    } else {
+        AttachmentKind::File
     }
 }
 

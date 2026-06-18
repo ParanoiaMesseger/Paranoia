@@ -344,6 +344,7 @@ fn classify(content: &MessageContent) -> &'static str {
         MessageContent::Text(_) | MessageContent::TextReply { .. } => "text",
         MessageContent::Image(_) => "image",
         MessageContent::Voice(_) => "voice",
+        MessageContent::Video(_) => "video",
         MessageContent::File(_)
         | MessageContent::FileHeader { .. }
         | MessageContent::FileChunk { .. } => "file",

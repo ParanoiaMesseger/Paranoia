@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.16 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.17 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -172,9 +172,11 @@ set(PARANOIA_HAS_FFMPEG 0)
 set(PARANOIA_FFMPEG_TARGETS "")
 
 function(_paranoia_try_prebuilt_ffmpeg root_dir tag)
-    # avfilter добавлен для нашего pipeline'а (transpose/scale/format/pad);
-    # порядок важен для линковки: avfilter зависит от swscale/avutil/avcodec.
-    set(_libs avfilter swscale avcodec avutil)
+    # avfilter — pipeline звонков (transpose/scale/format/pad); avformat +
+    # swresample — транскод видео-вложений (демукс/ремукс mp4 + ресемпл AAC).
+    # Порядок важен для статической линковки (символ используется ДО определения):
+    # avfilter → avformat → avcodec → swresample, всё опирается на avutil (последний).
+    set(_libs avfilter avformat avcodec swscale swresample avutil)
     set(_all_found TRUE)
 
     foreach(_lib ${_libs})
@@ -187,6 +189,9 @@ function(_paranoia_try_prebuilt_ffmpeg root_dir tag)
         set(_all_found FALSE)
     endif()
     if(NOT EXISTS "${root_dir}/include/libavfilter/avfilter.h")
+        set(_all_found FALSE)
+    endif()
+    if(NOT EXISTS "${root_dir}/include/libavformat/avformat.h")
         set(_all_found FALSE)
     endif()
 
@@ -277,7 +282,7 @@ else()
     endif()
 
     if(NOT PARANOIA_HAS_FFMPEG)
-    find_package(FFMPEG COMPONENTS avcodec avutil avfilter swscale QUIET)
+    find_package(FFMPEG COMPONENTS avcodec avformat avutil avfilter swscale swresample QUIET)
 
     # FFMPEG_FOUND ещё не гарантирует, что созданы imported targets — в Qt6.10
     # /Homebrew окружении на macOS FindFFMPEG.cmake часто рапортует FOUND по
@@ -286,9 +291,12 @@ else()
     # таргетом и упадём (gitlab job 2951). Проверяем все четыре — иначе откатываемся
     # на pkg-config fallback ниже.
     if(FFMPEG_FOUND AND TARGET FFMPEG::avcodec AND TARGET FFMPEG::avutil
-            AND TARGET FFMPEG::avfilter AND TARGET FFMPEG::swscale)
+            AND TARGET FFMPEG::avfilter AND TARGET FFMPEG::swscale
+            AND TARGET FFMPEG::avformat AND TARGET FFMPEG::swresample)
         set(PARANOIA_HAS_FFMPEG 1)
-        set(PARANOIA_FFMPEG_TARGETS FFMPEG::avfilter FFMPEG::swscale FFMPEG::avcodec FFMPEG::avutil)
+        set(PARANOIA_FFMPEG_TARGETS
+            FFMPEG::avfilter FFMPEG::avformat FFMPEG::swscale
+            FFMPEG::avcodec FFMPEG::swresample FFMPEG::avutil)
     endif()
 
     find_package(PkgConfig QUIET)
@@ -298,11 +306,15 @@ else()
         pkg_check_modules(LIBAVUTIL QUIET IMPORTED_TARGET libavutil)
         pkg_check_modules(LIBSWSCALE QUIET IMPORTED_TARGET libswscale)
         pkg_check_modules(LIBAVFILTER QUIET IMPORTED_TARGET libavfilter)
+        pkg_check_modules(LIBAVFORMAT QUIET IMPORTED_TARGET libavformat)
+        pkg_check_modules(LIBSWRESAMPLE QUIET IMPORTED_TARGET libswresample)
 
-        if(LIBAVCODEC_FOUND AND LIBAVUTIL_FOUND AND LIBSWSCALE_FOUND AND LIBAVFILTER_FOUND)
+        if(LIBAVCODEC_FOUND AND LIBAVUTIL_FOUND AND LIBSWSCALE_FOUND AND LIBAVFILTER_FOUND
+                AND LIBAVFORMAT_FOUND AND LIBSWRESAMPLE_FOUND)
             set(PARANOIA_HAS_FFMPEG 1)
             set(PARANOIA_FFMPEG_TARGETS
-                PkgConfig::LIBAVFILTER PkgConfig::LIBSWSCALE PkgConfig::LIBAVCODEC PkgConfig::LIBAVUTIL)
+                PkgConfig::LIBAVFILTER PkgConfig::LIBAVFORMAT PkgConfig::LIBSWSCALE
+                PkgConfig::LIBAVCODEC PkgConfig::LIBSWRESAMPLE PkgConfig::LIBAVUTIL)
         endif()
     endif()
     endif() # NOT PARANOIA_HAS_FFMPEG — системный FFmpeg как fallback
@@ -525,6 +537,7 @@ qt_add_qml_module(Paranoia
     ui/Theme.qml
     ui/Reactions.qml
     ui/Components/AppIcon.qml
+    ui/Components/AppScrollBar.qml
     ui/Components/EditKeyToolbar.qml
     ui/Components/MessageText.qml
     ui/Components/EmojiPanel.qml
@@ -566,6 +579,7 @@ qt_add_qml_module(Paranoia
     ui/Pages/AddReserveDomainPage.qml
     ui/Pages/MaskingPage.qml
     ui/Pages/VersionInfoPage.qml
+    ui/Pages/DataManagementPage.qml
     ui/Pages/SetPin.qml
     ui/Pages/UnlockPin.qml
     ui/Pages/ChangePin.qml
@@ -619,6 +633,7 @@ if(PARANOIA_HAS_VOIP)
         QML_FILES
             ui/Pages/CallPage.qml
             ui/Components/CallPathIndicator.qml
+            ui/Components/VoicePlayer.qml
     )
 
     if(PARANOIA_IS_IOS)
@@ -640,11 +655,32 @@ if(PARANOIA_HAS_VOIP)
             src/voip/VideoCapture.cpp
             src/voip/VideoSink.hpp
             src/voip/VideoSink.cpp
+            src/voip/VideoTranscoder.hpp
+            src/voip/VideoTranscoder.cpp
+        )
+        qt_target_qml_sources(Paranoia
+            QML_FILES
+                ui/Components/VideoViewer.qml
         )
         target_link_libraries(Paranoia PRIVATE ${PARANOIA_FFMPEG_TARGETS})
 
         if(PARANOIA_IS_ANDROID)
             target_link_libraries(Paranoia PRIVATE android log mediandk z m dl)
+            # libParanoia.so — shared. Глобальные таблицы ffmpeg-asm (ff_tx_tab_*
+            # из tx/FFT, тянутся AAC+swresample) в shared-либе preemptible →
+            # прямая ADRP-адресация в NEON-asm даёт «relocation … recompile with
+            # -fPIC». Локализуем символы статических ffmpeg/openh264-архивов
+            # (--exclude-libs) → они становятся non-preemptible, релокация валидна.
+            # Затрагивает только эти архивы; Rust/JNI/opus-экспорты не трогаем.
+            target_link_options(Paranoia PRIVATE
+                "LINKER:--exclude-libs,libavutil.a"
+                "LINKER:--exclude-libs,libavcodec.a"
+                "LINKER:--exclude-libs,libavformat.a"
+                "LINKER:--exclude-libs,libavfilter.a"
+                "LINKER:--exclude-libs,libswscale.a"
+                "LINKER:--exclude-libs,libswresample.a"
+                "LINKER:--exclude-libs,libopenh264.a"
+            )
         elseif(PARANOIA_IS_IOS)
             target_link_libraries(Paranoia PRIVATE
                 "-framework VideoToolbox"
@@ -688,8 +724,9 @@ if(PARANOIA_IS_IOS)
         src/platform/IosFileExport.mm
         src/platform/IosImagePicker.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-    # PHPickerViewController (нативный выбор фото из галереи — см. IosImagePicker.mm).
-    target_link_libraries(Paranoia PRIVATE "-framework PhotosUI")
+    # PHPickerViewController (нативный выбор фото) + PHPhotoLibrary (сохранение
+    # медиа в галерею — см. IosFileExport.mm paranoia_ios_save_media_to_photos).
+    target_link_libraries(Paranoia PRIVATE "-framework PhotosUI" "-framework Photos")
     set_target_properties(Paranoia PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
         # Явный bundle-id главного таргета: иначе cmake-Xcode подставляет

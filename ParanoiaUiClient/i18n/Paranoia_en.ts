@@ -146,6 +146,14 @@
         <translation>With video</translation>
     </message>
     <message>
+        <source>Громкая связь включена</source>
+        <translation>Speaker on</translation>
+    </message>
+    <message>
+        <source>Включить громкую связь</source>
+        <translation>Turn on speaker</translation>
+    </message>
+    <message>
         <source>Включить микрофон</source>
         <translation>Enable microphone</translation>
     </message>
@@ -303,8 +311,28 @@
         <translation>Could not save the file: </translation>
     </message>
     <message>
+        <source>Не удалось сохранить в галерею: </source>
+        <translation>Failed to save to gallery: </translation>
+    </message>
+    <message>
+        <source>нет доступа к «Фото».</source>
+        <translation>no access to Photos.</translation>
+    </message>
+    <message>
         <source>MediaStore</source>
-        <translation type="unfinished"></translation>
+        <translation>MediaStore</translation>
+    </message>
+    <message>
+        <source>Ошибка записи голосового: </source>
+        <translation>Voice recording error: </translation>
+    </message>
+    <message>
+        <source>Видео ещё загружается, попробуйте позже.</source>
+        <translation>Video is still downloading, try again later.</translation>
+    </message>
+    <message>
+        <source>Не удалось подготовить видео: </source>
+        <translation>Failed to prepare video: </translation>
     </message>
     <message>
         <source>Не удалось удалить локальные сообщения: </source>
@@ -352,15 +380,15 @@
     </message>
     <message>
         <source>Ошибка синхронизации seq. Обновите диалог и повторите.</source>
-        <translation type="unfinished"></translation>
+        <translation>Sequence sync error. Refresh the chat and try again.</translation>
     </message>
     <message>
         <source>Сервер недоступен. Сообщение в очереди — нажмите для повтора.</source>
-        <translation type="unfinished"></translation>
+        <translation>Server unavailable. Message queued — tap to retry.</translation>
     </message>
     <message>
         <source>Не удалось отправить. Нажмите на сообщение для повтора.</source>
-        <translation type="unfinished"></translation>
+        <translation>Failed to send. Tap the message to retry.</translation>
     </message>
     <message>
         <source>Файл</source>
@@ -402,8 +430,24 @@
         <translation>Loading photo preview…</translation>
     </message>
     <message>
+        <source>Проигрывание видео недоступно в этой сборке.</source>
+        <translation>Video playback is not available in this build.</translation>
+    </message>
+    <message>
+        <source>Подготовка видео…</source>
+        <translation>Preparing video…</translation>
+    </message>
+    <message>
         <source>Сообщение</source>
         <translation>Message</translation>
+    </message>
+    <message>
+        <source>Подготовка видео… %1%</source>
+        <translation>Preparing video… %1%</translation>
+    </message>
+    <message>
+        <source>Видео готово, отправляю…</source>
+        <translation>Video ready, sending…</translation>
     </message>
     <message>
         <source>Файл сохранён</source>
@@ -490,6 +534,10 @@
         <translation>Video</translation>
     </message>
     <message>
+        <source>Голосовое</source>
+        <translation>Voice</translation>
+    </message>
+    <message>
         <source> сообщение</source>
         <translation> message</translation>
     </message>
@@ -508,6 +556,10 @@
     <message>
         <source>Загрузка превью</source>
         <translation>Loading preview</translation>
+    </message>
+    <message>
+        <source>Голосовое сообщение</source>
+        <translation>Voice message</translation>
     </message>
     <message>
         <source>Сохранение…</source>
@@ -548,6 +600,10 @@
     <message>
         <source>Отправка: %1/%2 блоков (%3%)%4</source>
         <translation>Sending: %1/%2 chunks (%3%)%4</translation>
+    </message>
+    <message>
+        <source>Запись… %1</source>
+        <translation>Recording… %1</translation>
     </message>
     <message>
         <source>Сообщение…</source>
@@ -821,6 +877,73 @@
     </message>
 </context>
 <context>
+    <name>DataManagementPage</name>
+    <message>
+        <source>Управление данными</source>
+        <translation>Data management</translation>
+    </message>
+    <message>
+        <source>Использование памяти</source>
+        <translation>Storage usage</translation>
+    </message>
+    <message>
+        <source>всего</source>
+        <translation>total</translation>
+    </message>
+    <message>
+        <source>Обновить</source>
+        <translation>Refresh</translation>
+    </message>
+    <message>
+        <source>Очистка…</source>
+        <translation>Clearing…</translation>
+    </message>
+    <message>
+        <source>Очистить кэш</source>
+        <translation>Clear cache</translation>
+    </message>
+    <message>
+        <source>Самоликвидация</source>
+        <translation>Self-destruct</translation>
+    </message>
+    <message>
+        <source>Безвозвратно удаляет все диалоги этого устройства со всех серверов загруженных профилей, затем затирает локальное хранилище по ГОСТ (3 прохода: случайные данные, единицы, нули) и уничтожает ключ хранилища (crypto-erase). После — приложение закроется как при первой установке.</source>
+        <translation>Permanently deletes all dialogs of this device from all servers of loaded profiles, then wipes local storage per GOST (3 passes: random data, ones, zeros) and destroys the storage key (crypto-erase). After that the app closes as on a fresh install.</translation>
+    </message>
+    <message>
+        <source>⚠️ На flash-памяти (телефоны/SSD) перезапись не гарантирует физического стирания из-за wear-leveling — реальную невосстановимость даёт уничтожение ключа шифрования.</source>
+        <translation>⚠️ On flash storage (phones/SSD) overwriting does not guarantee physical erasure due to wear-leveling — real unrecoverability comes from destroying the encryption key.</translation>
+    </message>
+    <message>
+        <source>Уничтожить все данные?</source>
+        <translation>Destroy all data?</translation>
+    </message>
+    <message>
+        <source>Это действие НЕОБРАТИМО. Все диалоги, профили, ключи и вложения на этом устройстве будут удалены, а диалоги — стёрты с серверов.</source>
+        <translation>This action is IRREVERSIBLE. All dialogs, profiles, keys and attachments on this device will be deleted, and dialogs wiped from servers.</translation>
+    </message>
+    <message>
+        <source>Отмена</source>
+        <translation>Cancel</translation>
+    </message>
+    <message>
+        <source>Уничтожить</source>
+        <translation>Destroy</translation>
+    </message>
+    <message>
+        <source>Уничтожение данных…</source>
+        <translation>Destroying data…</translation>
+    </message>
+    <message>
+        <source>Удаление диалогов с серверов… %1%</source>
+        <translation>Deleting dialogs from servers… %1%</translation>
+    </message>
+    <message>
+        <source>Затирание хранилища… %1%</source>
+        <translation>Wiping storage… %1%</translation>
+    </message>
+</context>
+<context>
     <name>DesktopTray</name>
     <message>
         <source>Открыть Paranoia</source>
@@ -839,11 +962,11 @@
     <name>EmojiPanel</name>
     <message>
         <source>Поиск эмодзи…</source>
-        <translation type="unfinished"></translation>
+        <translation>Search emoji…</translation>
     </message>
     <message>
         <source>Ничего не найдено</source>
-        <translation type="unfinished"></translation>
+        <translation>Nothing found</translation>
     </message>
 </context>
 <context>
@@ -1405,6 +1528,26 @@ Update now?</translation>
         <translation>Failed to clear the dialogue: </translation>
     </message>
     <message>
+        <source>Вложения</source>
+        <translation>Attachments</translation>
+    </message>
+    <message>
+        <source>Сообщения</source>
+        <translation>Messages</translation>
+    </message>
+    <message>
+        <source>Профили и ключи</source>
+        <translation>Profiles and keys</translation>
+    </message>
+    <message>
+        <source>Словари</source>
+        <translation>Dictionaries</translation>
+    </message>
+    <message>
+        <source>Кэш</source>
+        <translation>Cache</translation>
+    </message>
+    <message>
         <source>Неподдерживаемый тип профиля экспорта.</source>
         <translation>Unsupported export profile type.</translation>
     </message>
@@ -1596,10 +1739,6 @@ Update now?</translation>
         <translation>User</translation>
     </message>
     <message>
-        <source>Добавить профиль или сервер</source>
-        <translation>Add profile or server</translation>
-    </message>
-    <message>
         <source>Импорт</source>
         <translation>Import</translation>
     </message>
@@ -1622,6 +1761,10 @@ Update now?</translation>
     <message>
         <source>Версия приложения</source>
         <translation>App version</translation>
+    </message>
+    <message>
+        <source>Управление данными</source>
+        <translation>Data management</translation>
     </message>
     <message>
         <source>Переименовать</source>
@@ -2228,19 +2371,19 @@ Update now?</translation>
     </message>
     <message>
         <source>Б</source>
-        <translation type="unfinished">B</translation>
+        <translation>B</translation>
     </message>
     <message>
         <source>КБ</source>
-        <translation type="unfinished">KB</translation>
+        <translation>KB</translation>
     </message>
     <message>
         <source>МБ</source>
-        <translation type="unfinished">MB</translation>
+        <translation>MB</translation>
     </message>
     <message>
         <source>ГБ</source>
-        <translation type="unfinished">GB</translation>
+        <translation>GB</translation>
     </message>
     <message>
         <source>Сохраняю «%1»…</source>
@@ -2296,42 +2439,42 @@ Update now?</translation>
     </message>
     <message>
         <source>Удалить</source>
-        <translation type="unfinished">Delete</translation>
+        <translation>Delete</translation>
     </message>
     <message>
         <source>Отмена</source>
-        <translation type="unfinished">Cancel</translation>
+        <translation>Cancel</translation>
     </message>
 </context>
 <context>
     <name>TextMessageViewer</name>
     <message>
         <source>Вы</source>
-        <translation type="unfinished">You</translation>
+        <translation>You</translation>
     </message>
     <message>
         <source>Сообщение</source>
-        <translation type="unfinished">Message</translation>
+        <translation>Message</translation>
     </message>
     <message>
         <source>Готово</source>
-        <translation type="unfinished">Done</translation>
+        <translation>Done</translation>
     </message>
     <message>
         <source>Выделить</source>
-        <translation type="unfinished"></translation>
+        <translation>Select</translation>
     </message>
     <message>
         <source>Скопировано</source>
-        <translation type="unfinished">Copied</translation>
+        <translation>Copied</translation>
     </message>
     <message>
         <source>Копировать выделенное</source>
-        <translation type="unfinished"></translation>
+        <translation>Copy selection</translation>
     </message>
     <message>
         <source>Копировать</source>
-        <translation type="unfinished">Copy</translation>
+        <translation>Copy</translation>
     </message>
 </context>
 <context>
@@ -2416,7 +2559,7 @@ Update now?</translation>
     </message>
     <message>
         <source>Проверка резервного источника обновлений…</source>
-        <translation type="unfinished"></translation>
+        <translation>Checking backup update source…</translation>
     </message>
     <message>
         <source>Не удалось проверить обновления. Откройте страницу релизов вручную.</source>
@@ -2440,47 +2583,57 @@ Update now?</translation>
     </message>
     <message>
         <source>Резервный источник не содержит сборку для этой платформы.</source>
-        <translation type="unfinished"></translation>
+        <translation>Backup source has no build for this platform.</translation>
     </message>
     <message>
         <source>Скачивание…</source>
-        <translation type="unfinished"></translation>
+        <translation>Downloading…</translation>
     </message>
     <message>
         <source>Запуск установки…</source>
-        <translation type="unfinished"></translation>
+        <translation>Starting installation…</translation>
     </message>
     <message>
         <source>Загрузка отменена.</source>
-        <translation type="unfinished"></translation>
+        <translation>Download cancelled.</translation>
     </message>
     <message>
         <source>Ошибка загрузки. Откройте страницу релизов вручную.</source>
-        <translation type="unfinished"></translation>
+        <translation>Download error. Open the releases page manually.</translation>
     </message>
     <message>
         <source>Скачивание… %1%</source>
-        <translation type="unfinished"></translation>
+        <translation>Downloading… %1%</translation>
     </message>
     <message>
         <source>Открыт системный установщик.</source>
-        <translation type="unfinished"></translation>
+        <translation>System installer opened.</translation>
+    </message>
+    <message>
+        <source>Обновление установлено. Перезапустите приложение.</source>
+        <translation>Update installed. Restart the app.</translation>
+    </message>
+    <message>
+        <source>Установка не удалась (код %1). %2
+Можно вручную: sudo dpkg -i %3</source>
+        <translation>Installation failed (code %1). %2
+Manually: sudo dpkg -i %3</translation>
+    </message>
+    <message>
+        <source>Не удалось запустить pkexec. Установите вручную: sudo dpkg -i %1</source>
+        <translation>Failed to launch pkexec. Install manually: sudo dpkg -i %1</translation>
     </message>
     <message>
         <source>Запущена установка — введите пароль администратора.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Не удалось запустить pkexec. Установите вручную: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>Installation started — enter the administrator password.</translation>
     </message>
     <message>
         <source>Запущен установщик.</source>
-        <translation type="unfinished"></translation>
+        <translation>Installer started.</translation>
     </message>
     <message>
         <source>Не удалось запустить установщик: %1</source>
-        <translation type="unfinished"></translation>
+        <translation>Failed to launch installer: %1</translation>
     </message>
 </context>
 <context>
@@ -2507,7 +2660,7 @@ Update now?</translation>
     </message>
     <message>
         <source>Скачивание…</source>
-        <translation type="unfinished"></translation>
+        <translation>Downloading…</translation>
     </message>
     <message>
         <source>Скачать и установить</source>
@@ -2515,11 +2668,11 @@ Update now?</translation>
     </message>
     <message>
         <source>Скачать</source>
-        <translation type="unfinished"></translation>
+        <translation>Download</translation>
     </message>
     <message>
         <source>Отменить скачивание</source>
-        <translation type="unfinished"></translation>
+        <translation>Cancel download</translation>
     </message>
     <message>
         <source>GitHub</source>

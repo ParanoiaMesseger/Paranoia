@@ -7,6 +7,10 @@
 #include "session/SessionStore.hpp"
 #include "utils/Utils.hpp"
 
+#if defined(PARANOIA_HAS_VIDEO) && PARANOIA_HAS_VIDEO
+#include "voip/VideoTranscoder.hpp"
+#endif
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -24,6 +28,14 @@
 #include <QTimer>
 #include <QImage>
 #include <QBuffer>
+#include <QTemporaryFile>
+#include <QUrl>
+#include <QRegularExpression>
+#include <QDateTime>
+#include <QMediaCaptureSession>
+#include <QMediaRecorder>
+#include <QAudioInput>
+#include <QMediaFormat>
 #include <algorithm>
 
 namespace {
@@ -50,6 +62,40 @@ QByteArray makePreviewBytes(const QByteArray &orig)
     buf.open(QIODevice::WriteOnly);
     if (!scaled.save(&buf, "JPEG", 85) || out.isEmpty()) return orig;
     return out;
+}
+
+// Превью видео: декодируем кадр-постер из mp4-байтов через ffmpeg и кодируем в
+// JPEG (как и фото — кладётся в EncryptedImageProvider под image://secure/<id>).
+// Если video отключено в сборке (нет ffmpeg) — пусто, UI покажет заглушку.
+QByteArray makeVideoPosterBytes(const QByteArray &mp4Bytes, const QString &messageId)
+{
+#if defined(PARANOIA_HAS_VIDEO) && PARANOIA_HAS_VIDEO
+    if (mp4Bytes.isEmpty()) return {};
+    // extractPosterFrame работает с файлом (демуксеру нужен seek) — пишем во
+    // временный, удаляем сразу после (plaintext только в темпе на миг).
+    QTemporaryFile tmp(QDir::tempPath() + QStringLiteral("/paranoia_vthumb_XXXXXX.mp4"));
+    tmp.setAutoRemove(true);
+    if (!tmp.open() || tmp.write(mp4Bytes) != mp4Bytes.size()) return {};
+    tmp.flush();
+    const QString tmpPath = tmp.fileName();
+    tmp.close();
+    QString err;
+    const QImage frame = paranoia::media::VideoTranscoder::extractPosterFrame(tmpPath, &err);
+    QFile::remove(tmpPath);
+    if (frame.isNull()) {
+        qWarning().noquote() << "video poster extract failed:" << err << "msgId=" << messageId;
+        return {};
+    }
+    QByteArray out;
+    QBuffer buf(&out);
+    buf.open(QIODevice::WriteOnly);
+    if (!frame.save(&buf, "JPEG", 85) || out.isEmpty()) return {};
+    return out;
+#else
+    Q_UNUSED(mp4Bytes);
+    Q_UNUSED(messageId);
+    return {};
+#endif
 }
 } // namespace
 
@@ -758,6 +804,44 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
         const QString mimeType =
             originalMimeType.isEmpty() ? QMimeDatabase().mimeTypeForFile(info).name() : originalMimeType;
 
+        // Путь/MIME, реально уходящие в отправку. Для видео — транскодируем в
+        // H.264/mp4 ПЕРЕД отправкой (сжатие + единый плеер-совместимый контейнер).
+        QString sendPath = path;
+        QString sendMime = mimeType;
+#if defined(PARANOIA_HAS_VIDEO) && PARANOIA_HAS_VIDEO
+        if (err.isEmpty() && mimeType.startsWith(QLatin1String("video/"))) {
+            const QString base = QFileInfo(path).completeBaseName();
+            const QString outDir =
+                QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/paranoia_vid");
+            QDir().mkpath(outDir);
+            const QString outPath =
+                outDir + QChar('/') + (base.isEmpty() ? QStringLiteral("video") : base) + QStringLiteral(".mp4");
+            QFile::remove(outPath);
+            if (self) emit self->videoPrepareProgress(peer, 0.0);
+            // Троттлим прогресс шагами ~2%, чтобы не спамить GUI-поток.
+            auto lastPct = std::make_shared<int>(-1);
+            QString terr;
+            const bool tok = paranoia::media::VideoTranscoder::transcode(
+                path, outPath,
+                [self, peer, lastPct](double f) {
+                    int pct = static_cast<int>(f * 100.0); // шаг 1% — живее прогресс
+                    if (pct != *lastPct) {
+                        *lastPct = pct;
+                        if (self) emit self->videoPrepareProgress(peer, f);
+                    }
+                },
+                &terr);
+            if (self) emit self->videoPrepareFinished(peer, tok);
+            if (tok && QFileInfo(outPath).size() > 0) {
+                sendPath = outPath;
+                sendMime = QStringLiteral("video/mp4");
+            } else {
+                qWarning().noquote() << "ChatBackend::sendFile video transcode failed:" << terr
+                                     << "— отправляю исходник как есть";
+            }
+        }
+#endif
+
         // Контекст для прогресс-callback'а из Tokio-потока FFI. Backend живёт
         // от main() до выхода процесса, поэтому raw-указатель безопасен;
         // QMetaObject::invokeMethod внутри trampoline маршалит вызов на
@@ -775,10 +859,19 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
                 // Авто-выбор канала по размеру (история / эфемерно / отказ) —
                 // порог и лимиты резолвит lib (см. send_file_auto).
                 json = session->ffi->send_file_auto_json_keyring_with_progress(
-                    serverId, peerId, keyringJson, path, mimeType,
+                    serverId, peerId, keyringJson, sendPath, sendMime,
                     &paranoia_chat_progress_trampoline, ctx.get());
                 if (json.isEmpty()) err = ParanoiaFFI::last_error();
             }
+        }
+        // Чистим временный prep-файл отправки (транскод видео paranoia_vid /
+        // запись голоса paranoia_voice) — он уже отправлен, plaintext не нужен.
+        // Оригинал пользователя (path) НЕ трогаем — он не под этими temp-папками.
+        {
+            const QString cacheRoot = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            if (sendPath.startsWith(cacheRoot + QStringLiteral("/paranoia_vid"))
+                || sendPath.startsWith(cacheRoot + QStringLiteral("/paranoia_voice")))
+                QFile::remove(sendPath);
         }
         // ctx живёт до конца блока — выйдем за пределы lambda → unique_ptr
         // удалит его. К этому моменту все progress-вызовы уже закончились (FFI
@@ -1033,6 +1126,46 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
     });
 }
 
+#if defined(Q_OS_IOS)
+extern "C" void paranoia_ios_save_media_to_photos(const char *path, bool isVideo, const char *filename,
+                                                  void (*cb)(void *ctx, bool ok, const char *err), void *ctx);
+extern "C" void paranoia_ios_export_file(const char *path);
+
+namespace
+{
+    struct IosSaveCtx {
+        QPointer<ChatBackend> self;
+        QString peer;
+        QString messageId;
+        QString filename;
+    };
+}
+
+// Колбэк сохранения медиа в Photos (из произвольного потока UIKit) → маршалим
+// результат в Qt-поток и показываем тост/ошибку.
+static void iosPhotosSavedTrampoline(void *ctx, bool ok, const char *err)
+{
+    std::unique_ptr<IosSaveCtx> c(static_cast<IosSaveCtx *>(ctx));
+    if (!c || !c->self) return;
+    const QPointer<ChatBackend> self = c->self;
+    const QString peer = c->peer, messageId = c->messageId, filename = c->filename;
+    const bool okv     = ok;
+    const QString errv = QString::fromUtf8(err ? err : "");
+    QMetaObject::invokeMethod(self, [self, messageId, filename, okv, errv]() {
+        if (!self) return;
+        if (okv) {
+            emit self->attachmentSaved(filename);
+            emit self->attachmentDownloaded(messageId, filename);
+        } else {
+            emit self->receiveError(ChatBackend::tr("Не удалось сохранить в галерею: ")
+                                    + (errv == QLatin1String("no_photo_permission")
+                                           ? ChatBackend::tr("нет доступа к «Фото».")
+                                           : errv));
+        }
+    });
+}
+#endif
+
 void ChatBackend::saveAttachmentToDefault(const QString &messageId)
 {
     if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
@@ -1040,8 +1173,9 @@ void ChatBackend::saveAttachmentToDefault(const QString &messageId)
     if (!session) return;
     const auto *dlg = session->findDialog(m_activePeer);
     if (!dlg) return;
-    // Картинка или файл? + имя/mime из кэша.
+    // Картинка / видео / файл? + имя/mime из кэша.
     bool isImg = false;
+    bool isVid = false;
     QString filename = QStringLiteral("attachment.bin");
     QString mime;
     for (const auto &cached : m_messageCache.value(m_activePeer)) {
@@ -1049,6 +1183,7 @@ void ChatBackend::saveAttachmentToDefault(const QString &messageId)
         if (msg.value(QStringLiteral("id")).toString() != messageId) continue;
         mime  = msg.value(QStringLiteral("mime_type")).toString();
         isImg = isImageAttachment(msg.value(QStringLiteral("kind")).toString(), mime);
+        isVid = msg.value(QStringLiteral("kind")).toString() == QLatin1String("video");
         const QString fn  = msg.value(QStringLiteral("filename")).toString();
         const QString txt = msg.value(QStringLiteral("text")).toString();
         filename          = !fn.isEmpty() ? fn : (!txt.isEmpty() ? txt : filename);
@@ -1097,6 +1232,63 @@ void ChatBackend::saveAttachmentToDefault(const QString &messageId)
             }
         });
     });
+#elif defined(Q_OS_IOS)
+    // iOS: песочница приложения пользователю недоступна (десктоп-путь тут бесполезен).
+    // Расшифровываем во временный файл, затем медиа (фото/видео) → галерея Photos,
+    // прочее → «Файлы» (document picker).
+    QString tmpPath = temporaryAttachmentPath();
+    if (tmpPath.isEmpty()) return;
+    // Сохраняем настоящее расширение (mp4/jpg) — Photos определяет тип ресурса
+    // по нему, иначе .bin-временник отвергается (PHPhotosErrorInvalidResource).
+    {
+        const QString ext = QFileInfo(filename).suffix();
+        if (!ext.isEmpty() && tmpPath.endsWith(QStringLiteral(".bin"))) {
+            tmpPath.chop(4);
+            tmpPath += QChar('.') + ext;
+        }
+    }
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    const bool media           = isImg || isVid;
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, session, peer, serverId, peerServerId, keyringJson, messageId, tmpPath, filename, isVid, media]() {
+            if (!self) return;
+            int rc = -1;
+            QString err;
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                if (!session->ffi) {
+                    err = "client_not_ready";
+                } else {
+                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                    rc = session->ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, tmpPath);
+                    if (rc != 0) err = ParanoiaFFI::last_error();
+                }
+            }
+            QMetaObject::invokeMethod(self, [self, peer, messageId, filename, tmpPath, rc, err, isVid, media]() {
+                if (!self) return;
+                if (rc != 0) {
+                    QFile::remove(tmpPath);
+                    emit self->receiveError(ChatBackend::tr("Не удалось сохранить файл: ")
+                                            + userFacingAttachmentError(err));
+                    return;
+                }
+                if (media) {
+                    // Async; временный файл удаляется в нативном колбэке.
+                    paranoia_ios_save_media_to_photos(
+                        tmpPath.toUtf8().constData(), isVid, filename.toUtf8().constData(),
+                        &iosPhotosSavedTrampoline,
+                        new IosSaveCtx{ QPointer<ChatBackend>(self), peer, messageId, filename });
+                } else {
+                    // Document picker; временный файл удалит делегат пикера.
+                    paranoia_ios_export_file(tmpPath.toUtf8().constData());
+                    emit self->attachmentDownloaded(messageId, filename);
+                }
+            });
+        });
 #else
     // Десктоп: фото → Изображения/Paranoia, файлы → Загрузки/Paranoia (saveAttachment с
     // путём-ПАПКОЙ сам подберёт уникальное имя файла).
@@ -1126,15 +1318,22 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
     if (!dlg) return;
 
     bool imageMessage = false;
+    bool videoMessage = false;
     bool hasPreview   = false;
     for (const auto &cached : m_messageCache.value(m_activePeer)) {
         const QVariantMap msg = cached.toMap();
         if (msg.value("id").toString() != messageId) continue;
         imageMessage = isImageAttachment(msg.value("kind").toString(), msg.value("mime_type").toString());
+        videoMessage = msg.value("kind").toString() == QLatin1String("video");
         hasPreview   = !msg.value("preview_source").toString().isEmpty();
+        // Постер видео декодируем из самого файла → нужен скачанный mp4 целиком.
+        // Не тянем автоматически крупные (>30 МБ) — UI покажет заглушку до
+        // явного скачивания пользователем.
+        if (videoMessage && msg.value("size").toLongLong() > 30 * 1024 * 1024)
+            videoMessage = false;
         break;
     }
-    if (!imageMessage || hasPreview) return;
+    if ((!imageMessage && !videoMessage) || hasPreview) return;
     // Вложение, которого нет в сторе — не долбим FFI на каждом recompose.
     if (m_failedPreviewIds.contains(messageId)) return;
 
@@ -1148,7 +1347,7 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
     const QString keyringJson  = dlg->keyringJson();
     QPointer self(this);
     QThreadPool::globalInstance()->start(
-        [self, session, peer, serverId, peerServerId, keyringJson, messageId, requestKey]() {
+        [self, session, peer, serverId, peerServerId, keyringJson, messageId, requestKey, videoMessage]() {
             if (!self) return;
             QByteArray bytes;
             QString err;
@@ -1163,7 +1362,11 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
                 }
             }
             // Декод+даунскейл на воркер-потоке (не на GUI): не блокируем UI.
-            const QByteArray previewBytes = bytes.isEmpty() ? QByteArray() : makePreviewBytes(bytes);
+            // Видео → декодируем кадр-постер из mp4; фото → даунскейл картинки.
+            const QByteArray previewBytes =
+                bytes.isEmpty() ? QByteArray()
+                : videoMessage  ? makeVideoPosterBytes(bytes, messageId)
+                                : makePreviewBytes(bytes);
             QMetaObject::invokeMethod(self, [self, peer, requestKey, messageId, previewBytes, err]() {
                 if (!self) return;
                 self->m_previewInFlightIds.remove(requestKey);
@@ -1188,6 +1391,193 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
                     // ffiMutex → получатель «зависает».
                     self->m_failedPreviewIds.insert(messageId);
                     qWarning().noquote() << "Image preview cache failed:" << err << "msgId=" << messageId;
+                }
+            });
+        });
+}
+
+// ───────────────────────── Голосовая запись ─────────────────────────
+
+void ChatBackend::setVoiceRecording(bool on)
+{
+    if (m_voiceRecording == on) return;
+    m_voiceRecording = on;
+    emit voiceRecordingChanged();
+}
+
+void ChatBackend::ensureVoiceRecorder()
+{
+    if (m_voiceRecorder) return;
+    m_captureSession = new QMediaCaptureSession(this);
+    m_audioInput     = new QAudioInput(this);
+    m_voiceRecorder  = new QMediaRecorder(this);
+    m_captureSession->setAudioInput(m_audioInput);
+    m_captureSession->setRecorder(m_voiceRecorder);
+
+    // m4a/AAC — широко проигрывается на всех платформах, компактно для голоса.
+    QMediaFormat fmt(QMediaFormat::FileFormat::Mpeg4Audio);
+    fmt.setAudioCodec(QMediaFormat::AudioCodec::AAC);
+    m_voiceRecorder->setMediaFormat(fmt);
+    m_voiceRecorder->setQuality(QMediaRecorder::NormalQuality);
+
+    connect(m_voiceRecorder, &QMediaRecorder::durationChanged, this,
+            [this](qint64 ms) { emit voiceRecordingDurationMs(ms); });
+
+    connect(m_voiceRecorder, &QMediaRecorder::errorOccurred, this,
+            [this](QMediaRecorder::Error, const QString &errStr) {
+                qWarning().noquote() << "Voice recorder error:" << errStr;
+                m_voicePendingSend = false;
+                setVoiceRecording(false);
+                emit sendError(ChatBackend::tr("Ошибка записи голосового: ") + errStr);
+            });
+
+    // stop() асинхронный — отправляем/чистим по факту StoppedState.
+    connect(m_voiceRecorder, &QMediaRecorder::recorderStateChanged, this,
+            [this](QMediaRecorder::RecorderState st) {
+                if (st != QMediaRecorder::StoppedState) return;
+                setVoiceRecording(false);
+                const bool send = m_voicePendingSend;
+                m_voicePendingSend = false;
+                // actualLocation надёжнее: рекордер мог скорректировать путь/расширение.
+                QString path = m_voiceRecorder->actualLocation().toLocalFile();
+                if (path.isEmpty()) path = m_voiceTempPath;
+                m_voiceTempPath.clear();
+                if (path.isEmpty()) return;
+                if (send && QFileInfo(path).size() > 0)
+                    sendFile(QUrl::fromLocalFile(path).toString());
+                else
+                    QFile::remove(path);
+            });
+}
+
+void ChatBackend::startVoiceRecording()
+{
+    if (m_activePeer.isEmpty()) {
+        emit sendError(ChatBackend::tr("Нет активного диалога."));
+        return;
+    }
+    ensureVoiceRecorder();
+    if (m_voiceRecording) return;
+    const QString dir =
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/paranoia_voice");
+    QDir().mkpath(dir);
+    m_voiceTempPath =
+        dir + QStringLiteral("/voice-%1.m4a").arg(QDateTime::currentMSecsSinceEpoch());
+    m_voicePendingSend = false;
+    m_voiceRecorder->setOutputLocation(QUrl::fromLocalFile(m_voiceTempPath));
+    m_voiceRecorder->record();
+    setVoiceRecording(true);
+}
+
+void ChatBackend::sendVoiceRecording()
+{
+    if (!m_voiceRecorder || m_voiceRecorder->recorderState() == QMediaRecorder::StoppedState) return;
+    m_voicePendingSend = true;
+    m_voiceRecorder->stop();
+}
+
+void ChatBackend::cancelVoiceRecording()
+{
+    if (!m_voiceRecorder) return;
+    m_voicePendingSend = false;
+    if (m_voiceRecorder->recorderState() != QMediaRecorder::StoppedState) {
+        m_voiceRecorder->stop();   // StoppedState-обработчик удалит файл (send=false)
+    } else if (!m_voiceTempPath.isEmpty()) {
+        QFile::remove(m_voiceTempPath);
+        m_voiceTempPath.clear();
+        setVoiceRecording(false);
+    }
+}
+
+void ChatBackend::releasePlaybackFile(const QString &fileUrl)
+{
+    QString path = QUrl(fileUrl).toLocalFile();
+    if (path.isEmpty()) path = fileUrl;
+    // Удаляем ТОЛЬКО внутри playback-кэша — защита от случайного сноса чужого пути.
+    const QString playDir =
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/paranoia_play");
+    if (path.startsWith(playDir))
+        QFile::remove(path);
+}
+
+void ChatBackend::clearPlaybackCache()
+{
+    const QString playDir =
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/paranoia_play");
+    QDir(playDir).removeRecursively();
+}
+
+void ChatBackend::cacheVideoForPlayback(const QString &messageId)
+{
+    if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) {
+        emit videoPlaybackError(messageId, ChatBackend::tr("Нет активной сессии."));
+        return;
+    }
+    const auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) {
+        emit videoPlaybackError(messageId, ChatBackend::tr("Диалог не найден."));
+        return;
+    }
+
+    // Детерминированный путь в кэше: если уже расшифровано — отдаём сразу.
+    QString safeId = messageId;
+    safeId.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_.-]")), QStringLiteral("_"));
+    const QString outDir =
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/paranoia_play");
+    QDir().mkpath(outDir);
+    const QString outPath = outDir + QChar('/') + safeId + QStringLiteral(".mp4");
+    if (QFileInfo(outPath).size() > 0) {
+        emit videoReadyForPlayback(messageId, QUrl::fromLocalFile(outPath).toString());
+        return;
+    }
+
+    const QString requestKey = m_activePeer + QChar('\n') + messageId + QStringLiteral("\nplay");
+    if (m_previewInFlightIds.contains(requestKey)) return;
+    m_previewInFlightIds.insert(requestKey);
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, session, peer, serverId, peerServerId, keyringJson, messageId, requestKey, outPath]() {
+            if (!self) return;
+            QByteArray bytes;
+            QString err;
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                if (!session->ffi) {
+                    err = QStringLiteral("client_not_ready");
+                } else {
+                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                    bytes = session->ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
+                    if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
+                }
+            }
+            bool wrote = false;
+            if (err.isEmpty() && !bytes.isEmpty()) {
+                QFile f(outPath);
+                if (f.open(QIODevice::WriteOnly)) {
+                    wrote = f.write(bytes) == bytes.size();
+                    f.close();
+                    if (!wrote) QFile::remove(outPath);
+                } else {
+                    err = QStringLiteral("write_failed");
+                }
+            }
+            QMetaObject::invokeMethod(self, [self, requestKey, messageId, outPath, wrote, err]() {
+                if (!self) return;
+                self->m_previewInFlightIds.remove(requestKey);
+                if (wrote) {
+                    emit self->videoReadyForPlayback(messageId, QUrl::fromLocalFile(outPath).toString());
+                } else {
+                    emit self->videoPlaybackError(
+                        messageId, err == "not_downloaded" || err == "incomplete"
+                                       ? ChatBackend::tr("Видео ещё загружается, попробуйте позже.")
+                                       : ChatBackend::tr("Не удалось подготовить видео: ") + err);
                 }
             });
         });
@@ -2067,7 +2457,15 @@ void ChatBackend::ensureGalleryPreview(const QString &peer, const QString &messa
                     if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
                 }
             }
-            const QByteArray previewBytes = bytes.isEmpty() ? QByteArray() : makePreviewBytes(bytes);
+            // Картинка → даунскейл; не-картинка (видео-mp4) → кадр-постер.
+            QByteArray previewBytes;
+            if (!bytes.isEmpty()) {
+                QImage probe;
+                if (probe.loadFromData(bytes))
+                    previewBytes = makePreviewBytes(bytes);
+                else
+                    previewBytes = makeVideoPosterBytes(bytes, messageId);
+            }
             QMetaObject::invokeMethod(self, [self, requestKey, messageId, previewBytes, err]() {
                 if (!self) return;
                 self->m_previewInFlightIds.remove(requestKey);
@@ -2227,7 +2625,10 @@ QVariantList ChatBackend::parseMessages(const QString &json) const
         // Превью image: путь через EncryptedImageProvider, plaintext только в RAM.
         // Доступно когда мы уже расшифровали байты (ensureImagePreview залил их).
         const bool isImage          = isImageAttachment(kind, mimeType);
-        const bool providerHas      = isImage && m_imageProvider && !messageId.isEmpty()
+        // Видео тоже имеет превью-кадр (постер) в EncryptedImageProvider — иначе
+        // preview_source не выставится и кадр в ленте «не просчитывается».
+        const bool isVideo          = (kind == QStringLiteral("video"));
+        const bool providerHas      = (isImage || isVideo) && m_imageProvider && !messageId.isEmpty()
                                   && m_imageProvider->contains(messageId);
         const QString previewSource = providerHas
                                           ? QStringLiteral("image://secure/") + messageId

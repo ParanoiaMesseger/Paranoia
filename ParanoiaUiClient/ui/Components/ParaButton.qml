@@ -7,6 +7,11 @@ Button {
     property bool secondary: false
     property bool destructive: false
 
+    // На Windows нативный стиль рисует рамку фокуса (голубой прямоугольник
+    // с меньшим радиусом, чем у пилюли). Кнопка кликается своим MouseArea,
+    // клавиатурный фокус ей не нужен — гасим рамку отказом от фокуса.
+    focusPolicy: Qt.NoFocus
+
     implicitHeight: 46
     implicitWidth: 200
 

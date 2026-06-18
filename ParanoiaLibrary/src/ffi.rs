@@ -2365,10 +2365,14 @@ fn message_to_json(m: &Message) -> serde_json::Value {
             obj.insert("reply_sender".into(), serde_json::json!(reply_sender));
             obj.insert("reply_text".into(), serde_json::json!(reply_text));
         }
-        MessageContent::File(file) | MessageContent::Image(file) | MessageContent::Voice(file) => {
+        MessageContent::File(file)
+        | MessageContent::Image(file)
+        | MessageContent::Voice(file)
+        | MessageContent::Video(file) => {
             let kind = match &m.content {
                 MessageContent::Image(_) => "image",
                 MessageContent::Voice(_) => "voice",
+                MessageContent::Video(_) => "video",
                 _ => "file",
             };
             obj.insert("kind".into(), serde_json::json!(kind));
