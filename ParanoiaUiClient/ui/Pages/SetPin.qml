@@ -72,19 +72,15 @@ Rectangle {
         }
     }
 
+    // Имя векторной AppIcon (Unicode-глифы ✗⚠◉✓✦ не рендерятся на Android).
     readonly property string attackIcon: {
         switch (level) {
-        case 1: return "✗"
-        case 2:
-            return "⚠"
-        case 3:
-            return "◉"
-        case 4:
-            return "✓"
-        case 5:
-            return "✦"
-        default:
-            return "·"
+        case 1: return "x"
+        case 2: return "warning"
+        case 3: return "circleDot"
+        case 4: return "check"
+        case 5: return "star"
+        default: return "circleDot"
         }
     }
 
@@ -369,10 +365,13 @@ Rectangle {
                                 anchors.rightMargin: 12
                                 spacing: 10
 
-                                Text {
-                                    text: root.attackIcon
-                                    font.pixelSize: 18
-                                    color: Theme.success
+                                AppIcon {
+                                    width: 18
+                                    height: 18
+                                    name: root.attackIcon
+                                    iconColor: root.levelColor
+                                    fillColor: root.levelColor
+                                    strokeWidth: 2
                                 }
 
                                 ColumnLayout {

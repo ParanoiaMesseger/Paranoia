@@ -94,12 +94,18 @@ namespace
 #elif defined(Q_OS_WIN)
         return {QStringLiteral("paranoia-windows-x86_64-installer.exe"), QStringLiteral("windows")};
 #elif defined(Q_OS_LINUX)
+        // Десктоп-клиент ставится из .deb (dpkg -i). Имена строго по реальным
+        // ассетам релиза. ⚠️ НЕ использовать generic «amd64»/«x86_64»/«linux» —
+        // они матчат СЕРВЕРНЫЕ сырые бинари (`paranoia-amd64`/`paranoia-arm64`/
+        // `paranoia-armhf`, идут в списке раньше .deb) → dpkg падает «не Debian-
+        // пакет». Десктоп-.deb сейчас только x86_64; для arm имён нет в релизе →
+        // selectDownloadUrl уйдёт на страницу релиза (а не в серверный бинарь).
         const QString arch = QSysInfo::currentCpuArchitecture();
         if (arch == QStringLiteral("arm64") || arch == QStringLiteral("aarch64"))
-            return {QStringLiteral("paranoia-arm64"), QStringLiteral("linux")};
+            return {QStringLiteral("paranoia-linux-arm64.deb")};
         if (arch == QStringLiteral("arm") || arch == QStringLiteral("armhf"))
-            return {QStringLiteral("paranoia-armhf"), QStringLiteral("linux")};
-        return {QStringLiteral("paranoia-linux-x86_64-installer"), QStringLiteral("amd64"), QStringLiteral("x86_64")};
+            return {QStringLiteral("paranoia-linux-armhf.deb")};
+        return {QStringLiteral("paranoia-linux-x86_64.deb"), QStringLiteral("linux-x86_64.deb")};
 #else
         return {};
 #endif
@@ -111,18 +117,19 @@ namespace
         // (абсолютные ссылки, в отличие от относительных links у GitLab).
         const QJsonArray assets          = release.value(QStringLiteral("assets")).toArray();
         const QStringList preferredNames = preferredUpdateAssetNames();
-        QString fallback;
         for (const auto &assetValue : assets) {
             const QJsonObject asset = assetValue.toObject();
             const QString name      = asset.value(QStringLiteral("name")).toString();
             const QString url       = asset.value(QStringLiteral("browser_download_url")).toString().trimmed();
             if (url.isEmpty()) continue;
-            if (fallback.isEmpty()) fallback = url;
             for (const auto &preferred : preferredNames) {
                 if (name.contains(preferred, Qt::CaseInsensitive)) return url;
             }
         }
-        return fallback.isEmpty() ? QString::fromLatin1(kReleasePageUrl) : fallback;
+        // Подходящего пакета для этой платформы/арки в релизе нет — НЕ качаем
+        // случайный ассет (мог бы оказаться чужой архой/серверным бинарём/apk и
+        // снести систему через dpkg). Открываем страницу релиза для ручного выбора.
+        return QString::fromLatin1(kReleasePageUrl);
     }
 }
 

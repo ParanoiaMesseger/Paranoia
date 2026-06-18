@@ -118,11 +118,15 @@ build_one_abi() {
     if [ -f "$openh264_prefix_pre/lib/libopenh264.a" ]; then
         openh264_hash="$(sha256sum "$openh264_prefix_pre/lib/libopenh264.a" 2>/dev/null | awk '{print $1}' | head -c 16)"
     fi
-    local current_id="ffmpeg=$FFMPEG_VERSION openh264=$openh264_hash"
+    # feat=transcode1 — набор компонентов для транскода видео (avformat/swresample/
+    # демуксеры/aac…). Меняем маркер при смене configure-флагов → форс пересборки.
+    local current_id="ffmpeg=$FFMPEG_VERSION openh264=$openh264_hash feat=transcode2-pic"
     if [ "$FORCE_REBUILD" != "1" ] \
        && [ -f "$prefix/lib/libavcodec.a" ] \
        && [ -f "$prefix/lib/libavutil.a" ] \
        && [ -f "$prefix/lib/libswscale.a" ] \
+       && [ -f "$prefix/lib/libavformat.a" ] \
+       && [ -f "$prefix/lib/libswresample.a" ] \
        && [ -f "$prefix/include/libavcodec/avcodec.h" ] \
        && [ -f "$sentinel" ] \
        && [ "$(cat "$sentinel" 2>/dev/null)" = "$current_id" ]; then
@@ -207,12 +211,15 @@ build_one_abi() {
             --sysroot="$TOOLCHAIN/sysroot"
             --enable-static
             --disable-shared
+            # PIC обязателен: libParanoia.so линкуется как shared/PIE. Без него
+            # NEON-asm таблиц tx/FFT (ff_tx_tab_*, тянутся AAC+swresample для
+            # транскода) даёт R_AARCH64_ADR_PREL_PG_HI21 против локального символа
+            # → «recompile with -fPIC» на линковке APK.
+            --enable-pic
             --disable-programs
             --disable-doc
             --disable-autodetect
             --disable-avdevice
-            --disable-avformat
-            --disable-swresample
             --disable-postproc
             --disable-network
             --disable-everything
@@ -220,6 +227,11 @@ build_one_abi() {
             --enable-avutil
             --enable-swscale
             --enable-avfilter
+            # avformat + swresample — для ТРАНСКОДА видео-вложений (демукс
+            # исходника, ремукс в mp4, ресемпл аудио в AAC). В звонках не нужны
+            # (там raw NAL), включены для VideoTranscoder. Network остаётся off.
+            --enable-avformat
+            --enable-swresample
             # Минимальный набор фильтров для видео-pipeline'а звонков:
             #   buffer/buffersink — вход/выход графа
             #   transpose         — повороты 90°/270°
@@ -239,6 +251,33 @@ build_one_abi() {
             --enable-filter=null
             --enable-decoder=h264
             --enable-parser=h264
+            # ── Транскод видео-вложений (только локальный файл отправителя) ──
+            --enable-protocol=file
+            --enable-demuxer=mov
+            --enable-demuxer=matroska
+            --enable-muxer=mp4
+            --enable-muxer=mov
+            --enable-decoder=hevc
+            --enable-decoder=mpeg4
+            --enable-decoder=vp8
+            --enable-decoder=vp9
+            --enable-parser=hevc
+            --enable-parser=vp8
+            --enable-parser=vp9
+            --enable-parser=mpeg4video
+            --enable-decoder=aac
+            --enable-decoder=mp3
+            --enable-decoder=opus
+            --enable-decoder=vorbis
+            --enable-decoder=ac3
+            --enable-decoder=pcm_s16le
+            --enable-parser=aac
+            --enable-parser=opus
+            --enable-encoder=aac
+            --enable-bsf=aac_adtstoasc
+            --enable-bsf=h264_mp4toannexb
+            --enable-bsf=hevc_mp4toannexb
+            --enable-bsf=extract_extradata
             --extra-cflags="$extra_cflags"
             --pkg-config-flags=--static
         )
@@ -267,6 +306,8 @@ build_one_abi() {
        || [ ! -f "$prefix/lib/libavutil.a" ] \
        || [ ! -f "$prefix/lib/libswscale.a" ] \
        || [ ! -f "$prefix/lib/libavfilter.a" ] \
+       || [ ! -f "$prefix/lib/libavformat.a" ] \
+       || [ ! -f "$prefix/lib/libswresample.a" ] \
        || [ ! -f "$prefix/include/libavcodec/avcodec.h" ] \
        || [ ! -f "$prefix/include/libavfilter/avfilter.h" ]; then
         echo "ERROR: FFmpeg install for $abi did not produce expected files" >&2

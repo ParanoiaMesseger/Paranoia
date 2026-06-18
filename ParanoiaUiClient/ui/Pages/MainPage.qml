@@ -45,6 +45,7 @@ Rectangle {
     signal openVersionInfo()
     signal openChangePin()
     signal openMasking()
+    signal openDataManagement()
 
     function reserveDomainsText(domains) {
         if (!domains || domains.length === 0)
@@ -622,7 +623,7 @@ Rectangle {
                         model:            root.filteredDialogs()
                         clip:             true
 
-                        ScrollBar.vertical: ScrollBar {}
+                        ScrollBar.vertical: AppScrollBar {}
 
                         delegate: Rectangle {
                             id: dlgItem
@@ -1000,17 +1001,6 @@ Rectangle {
                     width:            280
                     spacing:          12
 
-                    Text {
-                        Layout.alignment: Qt.AlignHCenter
-                        text:             qsTr("Добавить профиль или сервер")
-                        color:            Theme.textPrimary
-                        font.pixelSize:   Theme.fontLg
-                        font.family:      Theme.fontFamily
-                        font.weight:      Font.Medium
-                    }
-
-                    Item { Layout.preferredHeight: 8 }
-
                     ParaButton {
                         Layout.fillWidth: true
                         text:             qsTr("Импорт")
@@ -1050,6 +1040,13 @@ Rectangle {
                         text:             qsTr("Версия приложения")
                         secondary:        true
                         onClicked:        root.openVersionInfo()
+                    }
+
+                    ParaButton {
+                        Layout.fillWidth: true
+                        text:             qsTr("Управление данными")
+                        secondary:        true
+                        onClicked:        root.openDataManagement()
                     }
                 }
             }

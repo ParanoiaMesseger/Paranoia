@@ -31,6 +31,17 @@
 #include <QNetworkRequest>
 #include <QPointer>
 #include <QUrl>
+#include <QDir>
+#include <QDirIterator>
+#include <QStandardPaths>
+#include <QThreadPool>
+#include <QRandomGenerator>
+#include <cstring>
+#if defined(Q_OS_WIN)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #include <QJsonParseError>
 #include <QMutexLocker>
 #include <QThreadPool>
@@ -1560,6 +1571,206 @@ void MainBackend::clearDialogHistory(const QString &peer)
             else
                 emit self->serverHistoryError(MainBackend::tr("Ошибка очистки диалога: ") + err);
         });
+    });
+}
+
+// ── Управление данными / самоликвидация ───────────────────────────────────────
+namespace
+{
+    qint64 treeSizeBytes(const QString &path)
+    {
+        const QFileInfo fi(path);
+        if (!fi.exists()) return 0;
+        if (fi.isFile()) return fi.size();
+        qint64 total = 0;
+        QDirIterator it(path, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            it.next();
+            total += it.fileInfo().size();
+        }
+        return total;
+    }
+
+    void fsyncFile(QFile &f)
+    {
+#if defined(Q_OS_WIN)
+        _commit(f.handle());
+#else
+        ::fsync(f.handle());
+#endif
+    }
+
+    // Затирание по ГОСТ: 3 прохода (случайные данные → 0xFF → 0x00), затем удаление.
+    // ⚠️ На flash/SSD/eMMC (все телефоны) in-place перезапись НЕ гарантирует
+    // физического стирания (wear-leveling) — реальная защита это crypto-erase
+    // (затирание ключа vault делает зашифрованные данные невосстановимыми).
+    void gostWipeFile(const QString &path)
+    {
+        QFile f(path);
+        const qint64 size = f.size();
+        if (size <= 0 || !f.open(QIODevice::ReadWrite)) {
+            QFile::remove(path);
+            return;
+        }
+        QByteArray buf(64 * 1024, '\0');
+        for (int pass = 0; pass < 3; ++pass) {
+            if (!f.seek(0)) break;
+            qint64 remaining = size;
+            while (remaining > 0) {
+                const int chunk = static_cast<int>(qMin<qint64>(remaining, buf.size()));
+                if (pass == 0) {
+                    auto *d = reinterpret_cast<quint32 *>(buf.data());
+                    for (int i = 0; i < chunk / 4 + 1; ++i)
+                        d[i] = QRandomGenerator::system()->generate();
+                } else {
+                    std::memset(buf.data(), pass == 1 ? 0xFF : 0x00, static_cast<size_t>(chunk));
+                }
+                if (f.write(buf.constData(), chunk) != chunk) break;
+                remaining -= chunk;
+            }
+            f.flush();
+            fsyncFile(f);
+        }
+        f.close();
+        QFile::remove(path);
+    }
+
+    void gostWipeTree(const QString &root)
+    {
+        if (root.isEmpty() || !QFileInfo::exists(root)) return;
+        QStringList files;
+        QDirIterator it(root, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+        while (it.hasNext())
+            files << it.next();
+        for (const auto &fp : files)
+            gostWipeFile(fp);
+        QDir(root).removeRecursively();
+    }
+} // namespace
+
+QVariantList MainBackend::storageBreakdown() const
+{
+    const QString root  = Paths::appDataRoot().path();
+    const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+
+    qint64 attachments = 0, messages = 0, keys = 0, dicts = 0, cacheSz = 0;
+
+    const QDir profilesDir(root + QStringLiteral("/profiles"));
+    const auto profiles = profilesDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const auto &p : profiles) {
+        const QString pp = profilesDir.filePath(p);
+        attachments += treeSizeBytes(pp + QStringLiteral("/attachment-cache"));
+        for (const auto &dbf : {"/paranoia.db", "/paranoia.db-wal", "/paranoia.db-shm"})
+            messages += treeSizeBytes(pp + QString::fromLatin1(dbf));
+        keys += treeSizeBytes(pp + QStringLiteral("/client.json"));
+        keys += treeSizeBytes(pp + QStringLiteral("/dialogs.json"));
+    }
+    for (const auto &kf : {"/vault.json", "/device_key.json", "/profiles.json", "/pending_registration_key.json", "/admins.crypt"})
+        keys += treeSizeBytes(root + QString::fromLatin1(kf));
+    dicts   = treeSizeBytes(root + QStringLiteral("/dictionaries"));
+    cacheSz = treeSizeBytes(cache);
+
+    QVariantList out;
+    auto add = [&out](const QString &label, qint64 bytes, const QString &color) {
+        out.append(QVariantMap{{"label", label}, {"bytes", static_cast<qreal>(bytes)}, {"color", color}});
+    };
+    add(MainBackend::tr("Вложения"), attachments, "#C91122");
+    add(MainBackend::tr("Сообщения"), messages, "#E08A2B");
+    add(MainBackend::tr("Профили и ключи"), keys, "#3FA66A");
+    add(MainBackend::tr("Словари"), dicts, "#3F7FA6");
+    add(MainBackend::tr("Кэш"), cacheSz, "#8A6BB0");
+    return out;
+}
+
+void MainBackend::clearCaches()
+{
+    const QString root  = Paths::appDataRoot().path();
+    const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, root, cache]() {
+        // Кэш вложений каждого профиля (перекачается/перешифруется по запросу).
+        QDir profilesDir(root + QStringLiteral("/profiles"));
+        for (const auto &p : profilesDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+            QDir(profilesDir.filePath(p) + QStringLiteral("/attachment-cache")).removeRecursively();
+        // Временные файлы (видео/голос материализация, Qt pipeline cache).
+        if (!cache.isEmpty()) {
+            QDir cdir(cache);
+            for (const auto &e : cdir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden)) {
+                const QFileInfo fi(cdir.filePath(e));
+                if (fi.isDir())
+                    QDir(fi.absoluteFilePath()).removeRecursively();
+                else
+                    QFile::remove(fi.absoluteFilePath());
+            }
+        }
+        if (self)
+            QMetaObject::invokeMethod(self.data(), [self]() {
+                if (self) emit self->cachesCleared();
+            });
+    });
+}
+
+void MainBackend::selfDestruct()
+{
+    // Снимок сессий — серверное удаление нужно делать, пока FFI/ключи живы.
+    const auto sessions = SessionStore::instance()->allSessions();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, sessions]() {
+        // ── Фаза 1: удалить все диалоги со всех серверов загруженных профилей ──
+        int totalDialogs = 0;
+        for (const auto &s : sessions)
+            totalDialogs += s->dialogs.size();
+        int done = 0;
+        for (const auto &s : sessions) {
+            for (const auto &dlg : s->dialogs) {
+                {
+                    QMutexLocker lk(&s->ffiMutex);
+                    if (s->ffi) {
+                        const QString myId   = s->serverId.isEmpty() ? s->username : s->serverId;
+                        const QString peerId = dlg.peerServerId.isEmpty() ? dlg.peer : dlg.peerServerId;
+                        // best-effort: офлайн-сервер/ошибку игнорируем — локальный
+                        // вайп всё равно отвяжет устройство криптографически.
+                        s->ffi->delete_dialogue_range_keyring(myId, peerId, dlg.keyringJson(), 0,
+                                                              std::numeric_limits<quint64>::max());
+                    }
+                }
+                ++done;
+                if (self && totalDialogs > 0)
+                    emit self->selfDestructProgress(QStringLiteral("server"),
+                                                    static_cast<double>(done) / totalDialogs);
+            }
+        }
+
+        // ── Фаза 2: освободить хэндлы БД (снять сессии) + crypto-erase vault ──
+        if (self) {
+            QMetaObject::invokeMethod(
+                self.data(),
+                []() {
+                    ParanoiaFFI::vault_lock();
+                    auto all = SessionStore::instance()->allSessions();
+                    for (auto &s : all)
+                        SessionStore::instance()->removeSession(s);
+                },
+                Qt::BlockingQueuedConnection);
+        }
+
+        // ── Фаза 3: затирание локального хранилища по ГОСТ ──
+        if (self) emit self->selfDestructProgress(QStringLiteral("wipe"), 0.0);
+        const QString root  = Paths::appDataRoot().path();
+        const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        // Сначала ключевые файлы — crypto-erase: без ключа vault всё остальное
+        // (зашифрованные вложения/БД) невосстановимо мгновенно.
+        gostWipeFile(root + QStringLiteral("/vault.json"));
+        gostWipeFile(root + QStringLiteral("/device_key.json"));
+        gostWipeFile(root + QStringLiteral("/profiles.json"));
+        if (self) emit self->selfDestructProgress(QStringLiteral("wipe"), 0.3);
+        gostWipeTree(root);
+        if (self) emit self->selfDestructProgress(QStringLiteral("wipe"), 0.8);
+        gostWipeTree(cache);
+        if (self) {
+            emit self->selfDestructProgress(QStringLiteral("wipe"), 1.0);
+            emit self->selfDestructFinished();
+        }
     });
 }
 

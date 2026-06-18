@@ -374,6 +374,65 @@ Canvas {
             return
         }
 
+        if (name === "play") {
+            ctx.beginPath()
+            ctx.moveTo(7, 5)
+            ctx.lineTo(19, 12)
+            ctx.lineTo(7, 19)
+            ctx.closePath()
+            ctx.fill()
+            return
+        }
+
+        if (name === "pause") {
+            ctx.fillRect(7, 5, 3.4, 14)
+            ctx.fillRect(13.6, 5, 3.4, 14)
+            return
+        }
+
+        if (name === "warning") {
+            ctx.beginPath()
+            ctx.moveTo(12, 4)
+            ctx.lineTo(21, 19.5)
+            ctx.lineTo(3, 19.5)
+            ctx.closePath()
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(12, 10)
+            ctx.lineTo(12, 14.5)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.arc(12, 17, 0.9, 0, 2 * Math.PI)
+            ctx.fill()
+            return
+        }
+
+        if (name === "circleDot") {
+            ctx.beginPath()
+            ctx.arc(12, 12, 7, 0, 2 * Math.PI)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.arc(12, 12, 3, 0, 2 * Math.PI)
+            ctx.fill()
+            return
+        }
+
+        if (name === "star") {
+            // Четырёхлучевая «искра» (✦).
+            ctx.beginPath()
+            ctx.moveTo(12, 3)
+            ctx.lineTo(13.7, 10.3)
+            ctx.lineTo(21, 12)
+            ctx.lineTo(13.7, 13.7)
+            ctx.lineTo(12, 21)
+            ctx.lineTo(10.3, 13.7)
+            ctx.lineTo(3, 12)
+            ctx.lineTo(10.3, 10.3)
+            ctx.closePath()
+            ctx.fill()
+            return
+        }
+
         if (name === "check") {
             ctx.beginPath()
             ctx.moveTo(5, 12.5)

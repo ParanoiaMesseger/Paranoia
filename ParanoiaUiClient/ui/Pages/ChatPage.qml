@@ -133,6 +133,11 @@ Rectangle {
     // CallPage.qml тянет QtMultimedia — её нет в сборках без VoIP, поэтому
     // компонент создаётся динамически только при VoIPAvailable=true.
     property var callPageComponent: null
+    // VideoViewer.qml тоже тянет QtMultimedia — грузим динамически так же.
+    property var videoViewerComponent: null
+    // Одиночный аудио-плеер голосовых (VoicePlayer.qml, тоже QtMultimedia).
+    property var voicePlayer: null
+    property string pendingVoicePlayId: ""
 
     Timer {
         id: sendUnlockTimer
@@ -328,6 +333,51 @@ Rectangle {
         errorTimer.restart()
     }
 
+    // Открыть видео: материализуем расшифрованный mp4 (асинхронно) и по
+    // готовности пушим полноэкранный плеер. Плеер тянет QtMultimedia, поэтому
+    // доступен только в VoIP/Video-сборках (см. videoViewerComponent).
+    property string pendingVideoPlayId: ""
+    // true пока идёт транскод видео перед отправкой — держит панель «Подготовка
+    // видео» видимой непрерывно (errorTimer её не прячет, см. onVideoPrepareProgress).
+    property bool videoPreparing: false
+
+    // Длительность текущей записи голосового (мс) — для таймера в оверлее.
+    property int recordingMs: 0
+    function formatDuration(ms) {
+        var s = Math.floor((ms || 0) / 1000)
+        var m = Math.floor(s / 60)
+        s = s % 60
+        return m + ":" + (s < 10 ? "0" + s : s)
+    }
+    function openVideo(messageId, filename) {
+        if (!VoIPAvailable || !root.videoViewerComponent
+                || root.videoViewerComponent.status !== Component.Ready) {
+            errorText.text = qsTr("Проигрывание видео недоступно в этой сборке.")
+            errorBar.visible = true
+            errorTimer.restart()
+            return
+        }
+        root.pendingVideoPlayId = messageId
+        root._pendingVideoName = filename || "video.mp4"
+        errorText.text = qsTr("Подготовка видео…")
+        errorBar.visible = true
+        errorTimer.restart()
+        Chat.cacheVideoForPlayback(messageId)
+    }
+    property string _pendingVideoName: ""
+
+    // Воспроизведение/пауза голосового сообщения. Файл материализуется тем же
+    // FFI-путём, что и видео (cacheVideoForPlayback), играет VoicePlayer инлайн.
+    function toggleVoice(messageId) {
+        if (!VoIPAvailable || !root.voicePlayer) return
+        if (root.voicePlayer.currentId === messageId) {
+            root.voicePlayer.toggle(messageId, "")  // уже загружено — pause/resume
+            return
+        }
+        root.pendingVoicePlayId = messageId
+        Chat.cacheVideoForPlayback(messageId)
+    }
+
     // Собрать медиа/файлы/ссылки из списка сообщений. Работает и с composed-строками
     // (photo_group → photos_json), и с сырыми (отдельные kind=="image"). Вход —
     // oldest-first; на выходе разворачиваем в newest-first (как лента).
@@ -358,6 +408,12 @@ Rectangle {
                 var iProv  = m.preview_source || ""
                 media.push({ id: m.id, local: iLocal, ready: (iLocal.length > 0 || iProv.length > 0),
                              filename: (m.filename && m.filename.length > 0) ? m.filename : "attachment.bin",
+                             ts: m.ts, size: m.size || 0 })
+            } else if (m.kind === "video") {
+                // Видео — в «Медиа» с пометкой isVideo (плашка ▶ на плитке).
+                var vProv = m.preview_source || ""
+                media.push({ id: m.id, local: "", ready: vProv.length > 0, isVideo: true,
+                             filename: (m.filename && m.filename.length > 0) ? m.filename : "video.mp4",
                              ts: m.ts, size: m.size || 0 })
             } else if (m.kind === "file") {
                 files.push({ id: m.id, name: root.fileNameFor(m), size: m.size,
@@ -1233,6 +1289,55 @@ Rectangle {
             // десктопе: подпись берётся из поля ввода, 1 фото → обычно, >1 → группа.
             root.sendSelectedPhotos(uris)
         }
+        // ── Видео: транскод перед отправкой («Подготовка…») ──
+        // ── Голосовое: тик длительности записи ──
+        function onVoiceRecordingDurationMs(ms) {
+            root.recordingMs = ms
+        }
+        function onVideoPrepareProgress(peer, fraction) {
+            if (peer !== root.peer) return
+            // Панель держится постоянно (видна, пока videoPreparing) — у больших
+            // видео апдейты процента редкие, errorTimer её не спрячет (см. таймер).
+            root.videoPreparing = true
+            errorText.text = qsTr("Подготовка видео… %1%").arg(Math.round(fraction * 100))
+            errorBar.visible = true
+        }
+        function onVideoPrepareFinished(peer, ok) {
+            if (peer !== root.peer) return
+            root.videoPreparing = false
+            if (ok) {
+                errorText.text = qsTr("Видео готово, отправляю…")
+                errorBar.visible = true
+                errorTimer.restart()   // теперь можно скрыть по таймеру
+            } else {
+                errorTimer.restart()
+            }
+        }
+        // ── Видео/голосовое: материализация для проигрывания (один FFI-путь) ──
+        function onVideoReadyForPlayback(messageId, fileUrl) {
+            if (messageId === root.pendingVoicePlayId) {
+                root.pendingVoicePlayId = ""
+                if (root.voicePlayer) root.voicePlayer.toggle(messageId, fileUrl)
+                return
+            }
+            if (messageId !== root.pendingVideoPlayId) return
+            root.pendingVideoPlayId = ""
+            errorBar.visible = false
+            if (root.videoViewerComponent && root.videoViewerComponent.status === Component.Ready) {
+                stackView.push(root.videoViewerComponent,
+                               { source: fileUrl, title: root._pendingVideoName })
+            }
+        }
+        function onVideoPlaybackError(messageId, error) {
+            if (messageId === root.pendingVoicePlayId) root.pendingVoicePlayId = ""
+            if (messageId !== root.pendingVideoPlayId && messageId !== root.pendingVoicePlayId) {
+                // не наш — но всё равно покажем
+            }
+            root.pendingVideoPlayId = ""
+            errorText.text = error
+            errorBar.visible = true
+            errorTimer.restart()
+        }
         function onReceiveError(msg) {
             root.downloadingAttachmentId = ""
             errorText.text = msg
@@ -1267,6 +1372,16 @@ Rectangle {
                 Qt.resolvedUrl("CallPage.qml"), Component.PreferSynchronous);
             if (root.callPageComponent.status === Component.Error)
                 console.warn("CallPage load error:", root.callPageComponent.errorString());
+            root.videoViewerComponent = Qt.createComponent(
+                Qt.resolvedUrl("../Components/VideoViewer.qml"), Component.PreferSynchronous);
+            if (root.videoViewerComponent.status === Component.Error)
+                console.warn("VideoViewer load error:", root.videoViewerComponent.errorString());
+            var vpc = Qt.createComponent(
+                Qt.resolvedUrl("../Components/VoicePlayer.qml"), Component.PreferSynchronous);
+            if (vpc.status === Component.Ready)
+                root.voicePlayer = vpc.createObject(root);
+            else if (vpc.status === Component.Error)
+                console.warn("VoicePlayer load error:", vpc.errorString());
         }
         // Тяжёлую загрузку диалога (Chat.openChat — синхронный FFI: расшифровка
         // кэша диалога, ~0.5с фриз GUI-потока) ОТКЛАДЫВАЕМ на ~кадр. Так сперва
@@ -1323,6 +1438,9 @@ Rectangle {
     Component.onDestruction: {
         saveDraft()
         Chat.stopChat()
+        // Чистим расшифрованные playback-файлы (видео/голос) при выходе из диалога —
+        // чтобы plaintext-медиа не залёживалось в кэше.
+        Chat.clearPlaybackCache()
     }
 
     ParaFileDialog {
@@ -1428,7 +1546,7 @@ Rectangle {
                     interactive: contentHeight > height
                     flickableDirection: Flickable.VerticalFlick
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    ScrollBar.vertical: AppScrollBar { policy: ScrollBar.AsNeeded }
 
                     Flow {
                         id: reactionsFlowMenu
@@ -1863,9 +1981,10 @@ Rectangle {
 
             Repeater {
                 model: [
-                    { label: qsTr("Файл"),   icon: "file"  },
-                    { label: qsTr("Фото"),   icon: "image" },
-                    { label: qsTr("Видео"),  icon: "video" }
+                    { label: qsTr("Файл"),       icon: "file"  },
+                    { label: qsTr("Фото"),       icon: "image" },
+                    { label: qsTr("Видео"),      icon: "video" },
+                    { label: qsTr("Голосовое"),  icon: "mic"   }
                 ]
                 delegate: Rectangle {
                     required property int index
@@ -1908,9 +2027,13 @@ Rectangle {
                                 // на desktop — обычный FileDialog с фильтром изображений.
                                 if (Qt.platform.os === "android") Chat.pickPhotoFromGallery()
                                 else photoDialog.open()
-                            } else {
+                            } else if (index === 2) {
                                 if (Qt.platform.os === "android") Chat.pickVideoFromGallery()
                                 else videoDialog.open()
+                            } else {
+                                // Голосовое: начинаем запись, показываем оверлей записи.
+                                root.recordingMs = 0
+                                Chat.startVoiceRecording()
                             }
                         }
                     }
@@ -2392,7 +2515,7 @@ Rectangle {
                 // далеко от низа меньше «прыгает», уходит самопрокрутка на 1-2 сообщения.
                 cacheBuffer: Math.round(Math.max(height, 600) * 2)
 
-                ScrollBar.vertical: ScrollBar {}
+                ScrollBar.vertical: AppScrollBar {}
 
                 // ── Анимации блоков ленты ────────────────────────────────────
                 // add: новейшее (index 0) «всплывает» облачком (scale 0→1 БЕЗ overshoot —
@@ -2463,14 +2586,18 @@ Rectangle {
                     readonly property real _rv: _animating ? root._revealValue : 1.0
                     readonly property string mimeType: model.mime_type || ""
                     readonly property bool isImage: root.isImageMessage(model.kind, mimeType)
+                    readonly property bool isVideo: model.kind === "video"
+                    readonly property bool isVoice: model.kind === "voice"
+                    // Визуальное медиа в пузыре (превью-картинкой): фото ИЛИ видео.
+                    readonly property bool isVisualMedia: isImage || isVideo
                     readonly property bool isPhotoGroup: model.kind === "photo_group"
                     readonly property var groupPhotos: {
                         if (!isPhotoGroup) return []
                         try { return JSON.parse(model.photos_json || "[]") } catch (e) { return [] }
                     }
-                    readonly property bool hasAttachment: model.kind === "file" || model.kind === "image" || model.kind === "voice" || isImage
+                    readonly property bool hasAttachment: model.kind === "file" || model.kind === "image" || model.kind === "voice" || model.kind === "video" || isImage
                     readonly property bool showMessageText: !hasAttachment && !isPhotoGroup && (model.text || "").length > 0
-                    readonly property bool showFileCard: hasAttachment && !isImage
+                    readonly property bool showFileCard: hasAttachment && !isVisualMedia && !isVoice
                     // «Простыня»: текст занимает больше ~10 строк на экране (высота уже
                     // посчитана с учётом переноса при текущей ширине пузыря) → показываем
                     // кнопку-уголки для чтения на весь экран.
@@ -2643,7 +2770,7 @@ Rectangle {
                 readonly property bool hasReactions: reactions && reactions.length > 0
 
                 Component.onCompleted: {
-                    if (isImage && previewSource.length === 0)
+                    if (isVisualMedia && previewSource.length === 0)
                         Chat.ensureImagePreview(model.id)
                 }
 
@@ -2684,9 +2811,10 @@ Rectangle {
 
                     width: Math.min(Math.max(showMessageText ? msgText.implicitWidth : 0,
                                              hasReply ? messageReplyPreview.implicitWidth : 0,
-                                             isImage ? imagePreview.implicitWidth : 0,
+                                             isVisualMedia ? imagePreview.implicitWidth : 0,
                                              isPhotoGroup ? photoMosaic.implicitWidth : 0,
                                              showFileCard ? fileCard.implicitWidth : 0,
+                                             isVoice ? voiceCard.implicitWidth : 0,
                                              hasReactions ? reactionsFlow.implicitWidth : 0,
                                              metaRow.implicitWidth,
                                              isMe ? 0 : senderLabel.implicitWidth) + 24,
@@ -2694,9 +2822,10 @@ Rectangle {
                     implicitHeight: (isMe ? 0 : senderLabel.implicitHeight + 2)
                                   + (hasReply ? messageReplyPreview.implicitHeight + 6 : 0)
                                   + (showMessageText ? (_clampText ? _maxInlineH : msgText.implicitHeight) : 0)
-                                  + (isImage ? imagePreview.implicitHeight + 6 : 0)
+                                  + (isVisualMedia ? imagePreview.implicitHeight + 6 : 0)
                                   + (isPhotoGroup ? photoMosaic.implicitHeight + 6 : 0)
                                   + (showFileCard ? fileCard.implicitHeight + 6 : 0)
+                                  + (isVoice ? voiceCard.implicitHeight + 6 : 0)
                                   + (hasReactions ? reactionsFlow.implicitHeight + 6 : 0)
                                   + metaRow.implicitHeight + 16
                     // Скруглённый пузырь-«облачко»: углы крупные, но нижний угол со
@@ -2882,8 +3011,8 @@ Rectangle {
                         anchors.right: parent.right
                         anchors.leftMargin: 12
                         anchors.rightMargin: 12
-                        height: isImage ? Math.min(340, Math.max(170, width * 0.66)) : 0
-                        visible: isImage
+                        height: isVisualMedia ? Math.min(340, Math.max(170, width * 0.66)) : 0
+                        visible: isVisualMedia
                         radius: Theme.radiusMd
                         color: Theme.bgInput
                         border.width: previewSource.length > 0 ? 0 : 1
@@ -2913,7 +3042,10 @@ Rectangle {
                         Column {
                             anchors.centerIn: parent
                             spacing: 6
-                            visible: previewSource.length === 0
+                            // Спиннер «Загрузка превью» — только для фото. У видео
+                            // отсутствие постера штатно (крупный файл) → показываем
+                            // плашку ▶ ниже, а не вечный спиннер.
+                            visible: previewSource.length === 0 && isImage
                             BusyIndicator {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 width: 28
@@ -2929,10 +3061,32 @@ Rectangle {
                             }
                         }
 
+                        // Плашка воспроизведения поверх постера видео.
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 58; height: 58
+                            radius: 29
+                            visible: isVideo
+                            color: "#B30B0F14"
+                            border.width: 1
+                            border.color: "#66FFFFFF"
+                            z: 2
+                            AppIcon {
+                                anchors.centerIn: parent
+                                anchors.horizontalCenterOffset: 2 // оптическая центровка треугольника
+                                width: 26; height: 26
+                                name: "play"
+                                iconColor: "#F7FAFF"
+                                fillColor: "#F7FAFF"
+                                strokeWidth: 2
+                            }
+                        }
+
                         MouseArea {
                             anchors.fill: parent
                             hoverEnabled: true
-                            onClicked: root.openPhoto(previewSource, model.id, attachmentName)
+                            onClicked: isVideo ? root.openVideo(model.id, attachmentName)
+                                               : root.openPhoto(previewSource, model.id, attachmentName)
                         }
 
                         Rectangle {
@@ -2962,6 +3116,75 @@ Rectangle {
                                 hoverEnabled: true
                                 enabled: !isDownloading
                                 onClicked: root.openSaveDialog(model.id, attachmentName)
+                            }
+                        }
+                    }
+
+                    // ── Голосовое сообщение: play/pause + длительность ──
+                    Rectangle {
+                        id: voiceCard
+                        anchors.top: showMessageText ? msgText.bottom : (hasReply ? messageReplyPreview.bottom : (isMe ? parent.top : senderLabel.bottom))
+                        anchors.topMargin: 6
+                        anchors.left: parent.left
+                        anchors.leftMargin: 12
+                        height: isVoice ? 52 : 0
+                        visible: isVoice
+                        radius: Theme.radiusMd
+                        color: Theme.bgInput
+                        border.width: 1
+                        border.color: Theme.border
+                        implicitWidth: 220
+                        implicitHeight: height
+
+                        readonly property bool isCurrent: root.voicePlayer && root.voicePlayer.tick >= 0
+                                                          && root.voicePlayer.currentId === model.id
+                        readonly property bool isPlaying: isCurrent && root.voicePlayer.playing
+                        readonly property real playPos: isCurrent ? root.voicePlayer.position : 0
+                        readonly property real playDur: isCurrent ? root.voicePlayer.duration : 0
+
+                        Rectangle {
+                            id: voicePlayBtn
+                            width: 38; height: 38; radius: 19
+                            anchors.left: parent.left; anchors.leftMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: voicePlayArea.containsMouse ? Theme.accentHover : Theme.accent
+                            AppIcon {
+                                anchors.centerIn: parent
+                                anchors.horizontalCenterOffset: voiceCard.isPlaying ? 0 : 2
+                                width: 18; height: 18
+                                name: voiceCard.isPlaying ? "pause" : "play"
+                                iconColor: "#FFFFFF"; fillColor: "#FFFFFF"; strokeWidth: 2
+                            }
+                            MouseArea {
+                                id: voicePlayArea
+                                anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.toggleVoice(model.id)
+                            }
+                        }
+
+                        Column {
+                            anchors.left: voicePlayBtn.right; anchors.leftMargin: 10
+                            anchors.right: parent.right; anchors.rightMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 5
+                            // Тонкая дорожка прогресса.
+                            Rectangle {
+                                width: parent.width; height: 3; radius: 1.5
+                                color: Theme.border
+                                Rectangle {
+                                    width: parent.width * (voiceCard.playDur > 0 ? Math.min(1, voiceCard.playPos / voiceCard.playDur) : 0)
+                                    height: parent.height; radius: parent.radius
+                                    color: Theme.accent
+                                }
+                            }
+                            Text {
+                                text: voiceCard.isCurrent && voiceCard.playDur > 0
+                                      ? root.formatDuration(voiceCard.playPos) + " / " + root.formatDuration(voiceCard.playDur)
+                                      : qsTr("Голосовое сообщение")
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontXs
+                                font.family: Theme.fontFamily
                             }
                         }
                     }
@@ -3047,7 +3270,7 @@ Rectangle {
 
                     Flow {
                         id: reactionsFlow
-                        anchors.top: isPhotoGroup ? photoMosaic.bottom : (isImage ? imagePreview.bottom : (showFileCard ? fileCard.bottom : msgText.bottom))
+                        anchors.top: isPhotoGroup ? photoMosaic.bottom : (isVisualMedia ? imagePreview.bottom : (isVoice ? voiceCard.bottom : (showFileCard ? fileCard.bottom : msgText.bottom)))
                         anchors.topMargin: 6
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -3097,7 +3320,7 @@ Rectangle {
 
                     Row {
                         id: metaRow
-                        anchors.top: hasReactions ? reactionsFlow.bottom : (isPhotoGroup ? photoMosaic.bottom : (isImage ? imagePreview.bottom : (showFileCard ? fileCard.bottom : msgText.bottom)))
+                        anchors.top: hasReactions ? reactionsFlow.bottom : (isPhotoGroup ? photoMosaic.bottom : (isVisualMedia ? imagePreview.bottom : (isVoice ? voiceCard.bottom : (showFileCard ? fileCard.bottom : msgText.bottom))))
                         anchors.topMargin: hasReactions ? 4 : 0
                         anchors.right: parent.right
                         anchors.rightMargin: 10
@@ -3465,7 +3688,10 @@ Rectangle {
             color: Theme.errorBg
             visible: false
 
-            Timer { id: errorTimer; interval: 3000; onTriggered: errorBar.visible = false }
+            // Пока идёт транскод видео (videoPreparing) — НЕ прячем панель, даже
+            // если между апдейтами процента прошло >interval (у больших видео
+            // апдейты редкие, иначе плашка «Подготовка видео» мигала бы).
+            Timer { id: errorTimer; interval: 3000; onTriggered: if (!root.videoPreparing) errorBar.visible = false }
 
             Text {
                 id: errorText
@@ -3491,6 +3717,73 @@ Rectangle {
                 anchors.top: parent.top
                 width: parent.width; height: 1
                 color: Theme.separator
+            }
+
+            // ── Оверлей записи голосового (поверх инпута, пока идёт запись) ──
+            Rectangle {
+                anchors.fill: parent
+                anchors.topMargin: 1
+                color: Theme.bgDark
+                visible: Chat.voiceRecording
+                z: 20
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 14
+                    anchors.rightMargin: 8
+                    spacing: 12
+
+                    // Пульсирующая красная точка.
+                    Rectangle {
+                        Layout.preferredWidth: 12; Layout.preferredHeight: 12; radius: 6
+                        color: Theme.error
+                        SequentialAnimation on opacity {
+                            running: Chat.voiceRecording; loops: Animation.Infinite
+                            NumberAnimation { from: 1.0; to: 0.25; duration: 650 }
+                            NumberAnimation { from: 0.25; to: 1.0; duration: 650 }
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: qsTr("Запись… %1").arg(root.formatDuration(root.recordingMs))
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontMd
+                        font.family: Theme.fontFamily
+                    }
+                    // Отмена (корзина).
+                    Rectangle {
+                        Layout.preferredWidth: 40; Layout.preferredHeight: 40; radius: 20
+                        color: cancelVoiceArea.containsMouse ? Theme.bgInput : "transparent"
+                        AppIcon {
+                            anchors.centerIn: parent
+                            width: 22; height: 22; name: "trash"
+                            iconColor: Theme.textSecondary; strokeWidth: 1.8
+                        }
+                        MouseArea {
+                            id: cancelVoiceArea
+                            anchors.fill: parent; hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: Chat.cancelVoiceRecording()
+                        }
+                    }
+                    // Отправить.
+                    Rectangle {
+                        Layout.preferredWidth: 44; Layout.preferredHeight: 44; radius: 22
+                        color: sendVoiceArea.containsMouse ? Theme.accentHover : Theme.accent
+                        AppIcon {
+                            anchors.centerIn: parent
+                            anchors.horizontalCenterOffset: -1
+                            width: 22; height: 22; name: "send"
+                            iconColor: "#FFFFFF"; fillColor: "#FFFFFF"; strokeWidth: 1.8
+                        }
+                        MouseArea {
+                            id: sendVoiceArea
+                            anchors.fill: parent; hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: Chat.sendVoiceRecording()
+                        }
+                    }
+                }
             }
 
             ColumnLayout {
@@ -3531,7 +3824,7 @@ Rectangle {
                         anchors.fill: parent
                         clip: true
                         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                        ScrollBar.vertical: AppScrollBar { policy: ScrollBar.AsNeeded }
 
                         background: Rectangle {
                             radius: 20          // почти круглая пилюля — в тон круглой кнопке отправки

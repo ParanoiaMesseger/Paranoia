@@ -62,7 +62,7 @@ jobs_count() { if command -v nproc >/dev/null 2>&1; then nproc; else echo 4; fi;
 
 prefix="$OUT_DIR/$TAG"
 openh264_hash="$(sha256sum "$OPENH264_PREFIX/lib/libopenh264.a" | awk '{print $1}' | head -c 16)"
-current_id="ffmpeg=$FFMPEG_VERSION openh264=$openh264_hash"
+current_id="ffmpeg=$FFMPEG_VERSION openh264=$openh264_hash feat=transcode1"
 sentinel="$prefix/.paranoia-build-id"
 if [ "$FORCE_REBUILD" != "1" ] \
    && [ -f "$prefix/lib/libavcodec.a" ] \
@@ -87,8 +87,6 @@ rm -rf "$builddir"; mkdir -p "$builddir"
         --disable-doc
         --disable-autodetect
         --disable-avdevice
-        --disable-avformat
-        --disable-swresample
         --disable-postproc
         --disable-network
         --disable-everything
@@ -97,6 +95,11 @@ rm -rf "$builddir"; mkdir -p "$builddir"
         --enable-avutil
         --enable-swscale
         --enable-avfilter
+        # avformat + swresample нужны для ТРАНСКОДА видео-вложений (демукс
+        # исходного контейнера, ремукс в mp4, ресемпл аудио в AAC). В звонках
+        # они не используются (там raw NAL), но включены для VideoTranscoder.
+        --enable-avformat
+        --enable-swresample
         # Минимальный набор фильтров video-pipeline'а звонков (см. android-скрипт).
         --enable-filter=buffer
         --enable-filter=buffersink
@@ -109,6 +112,39 @@ rm -rf "$builddir"; mkdir -p "$builddir"
         --enable-filter=null
         --enable-decoder=h264
         --enable-parser=h264
+        # ── Транскод видео-вложений (только локально выбранный отправителем
+        #    файл; входящее видео играет нативный плеер ОС, не наш ffmpeg) ──
+        # Контейнеры-источники: mp4/mov/m4v/3gp (mov), mkv/webm (matroska).
+        --enable-protocol=file
+        --enable-demuxer=mov
+        --enable-demuxer=matroska
+        # Запись результата в mp4.
+        --enable-muxer=mp4
+        --enable-muxer=mov
+        # Декодеры исходного видео (камеры телефонов: H.264 / HEVC; webm: vp8/9).
+        --enable-decoder=hevc
+        --enable-decoder=mpeg4
+        --enable-decoder=vp8
+        --enable-decoder=vp9
+        --enable-parser=hevc
+        --enable-parser=vp8
+        --enable-parser=vp9
+        --enable-parser=mpeg4video
+        # Аудио-дорожка: декод исходной + кодирование в AAC для mp4.
+        --enable-decoder=aac
+        --enable-decoder=mp3
+        --enable-decoder=opus
+        --enable-decoder=vorbis
+        --enable-decoder=ac3
+        --enable-decoder=pcm_s16le
+        --enable-parser=aac
+        --enable-parser=opus
+        --enable-encoder=aac
+        # Bitstream-фильтры для корректной упаковки в mp4.
+        --enable-bsf=aac_adtstoasc
+        --enable-bsf=h264_mp4toannexb
+        --enable-bsf=hevc_mp4toannexb
+        --enable-bsf=extract_extradata
         # OpenH264 (BSD) software H.264 encoder/decoder.
         --enable-libopenh264
         --enable-encoder=libopenh264
@@ -124,7 +160,7 @@ rm -rf "$builddir"; mkdir -p "$builddir"
     make install
 )
 
-for f in libavcodec libavutil libswscale libavfilter; do
+for f in libavcodec libavutil libswscale libavfilter libavformat libswresample; do
     test -f "$prefix/lib/$f.a" || { echo "ERROR: $f.a not produced" >&2; exit 1; }
 done
 test -f "$prefix/include/libavcodec/avcodec.h" || { echo "ERROR: headers missing" >&2; exit 1; }

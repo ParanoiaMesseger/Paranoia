@@ -162,6 +162,7 @@ Rectangle {
                 clip: true
                 contentWidth: availableWidth
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ScrollBar.vertical: AppScrollBar {}
                 // Вертикальное центрирование короткого контента (не липнет к верху).
                 topPadding: Math.max(0, (height - exportCol.implicitHeight) / 2)
 
@@ -233,7 +234,7 @@ Rectangle {
                                     model: profileCombo.delegateModel
                                     currentIndex: profileCombo.highlightedIndex
                                     clip: true
-                                    ScrollBar.vertical: ScrollBar {
+                                    ScrollBar.vertical: AppScrollBar {
                                         policy: profilePopupList.contentHeight > profilePopupList.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                                     }
                                 }
@@ -280,7 +281,7 @@ Rectangle {
                                 anchors.fill: parent
                                 model: []
                                 clip: true
-                                ScrollBar.vertical: ScrollBar {}
+                                ScrollBar.vertical: AppScrollBar {}
 
                                 delegate: Rectangle {
                                     width: ListView.view.width
@@ -399,6 +400,7 @@ Rectangle {
                 clip: true
                 contentWidth: availableWidth
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ScrollBar.vertical: AppScrollBar {}
                 // Вертикальное центрирование короткого контента (не липнет к верху).
                 topPadding: Math.max(0, (height - importCol.implicitHeight) / 2)
 

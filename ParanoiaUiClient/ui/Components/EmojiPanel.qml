@@ -104,7 +104,15 @@ Rectangle {
                         radius: 13
                         visible: panel.query.length > 0
                         color: clearArea.containsMouse ? Theme.bgCard : "transparent"
-                        Text { anchors.centerIn: parent; text: "✕"; color: Theme.textSecondary; font.pixelSize: 14 }
+                        // Векторная иконка (Canvas) — Unicode-глиф «✕» на части
+                        // платформ (Windows) не рендерится отсутствующим символом.
+                        AppIcon {
+                            anchors.centerIn: parent
+                            width: 16; height: 16
+                            name: "x"
+                            iconColor: Theme.textSecondary
+                            strokeWidth: 2
+                        }
                         MouseArea {
                             id: clearArea
                             anchors.fill: parent
@@ -129,7 +137,7 @@ Rectangle {
             cellHeight: 46
             model: panel.shownItems
             boundsBehavior: Flickable.StopAtBounds
-            ScrollBar.vertical: ScrollBar {}
+            ScrollBar.vertical: AppScrollBar {}
 
             // Пустой результат поиска.
             Text {

@@ -98,6 +98,7 @@ Rectangle {
             clip: true
             contentWidth: availableWidth
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical: AppScrollBar {}
 
             ColumnLayout {
                 anchors.horizontalCenter: parent.horizontalCenter

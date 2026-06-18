@@ -138,6 +138,21 @@ public:
     /// сам диалог и его ключи (можно продолжать общение).
     Q_INVOKABLE void clearDialogHistory(const QString &peer);
 
+    // ── Управление данными / самоликвидация ──────────────────────────────────
+    /// Разбивка занятого места по категориям для диаграммы: список
+    /// {label, bytes, color}. Считает реальные размеры на диске.
+    Q_INVOKABLE QVariantList storageBreakdown() const;
+    /// Очистить регенерируемый кэш (кэш вложений профилей + временные файлы
+    /// видео/голоса/Qt) БЕЗ удаления сообщений/ключей/профилей. Асинхронно;
+    /// по завершении — cachesCleared.
+    Q_INVOKABLE void clearCaches();
+    /// САМОЛИКВИДАЦИЯ (необратимо!): удаляет все диалоги этого устройства со
+    /// всех серверов загруженных профилей, затем затирает локальное хранилище
+    /// по ГОСТ (3 прохода: случайные/единицы/нули) + crypto-erase vault, и
+    /// удаляет все профили/данные. Асинхронно; прогресс — selfDestructProgress,
+    /// завершение — selfDestructFinished (UI должен закрыть приложение).
+    Q_INVOKABLE void selfDestruct();
+
     /// Локальное отображаемое имя диалога (бывший username). Маршрутизация идёт
     /// по server_id (peerServerId) — оно не трогается; меняем только показываемое
     /// имя. Локально, не синхронизируется; пусто → показываем внутренний ключ.
@@ -214,6 +229,10 @@ signals:
     void dialogDeleted(const QString &peer);
     void serverHistoryCleared(const QString &peer);
     void serverHistoryError(const QString &msg);
+    // Самоликвидация: phase = "server"|"wipe", fraction 0..1.
+    void selfDestructProgress(const QString &phase, double fraction);
+    void selfDestructFinished();
+    void cachesCleared();
     // Cross-backend coordination
     void dialogRemoved(const QString &peer);
     void sessionReset();

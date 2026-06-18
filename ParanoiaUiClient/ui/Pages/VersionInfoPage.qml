@@ -68,6 +68,7 @@ Rectangle {
             contentWidth: availableWidth
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical: AppScrollBar {}
             // Вертикальное центрирование: короткий контент по центру вьюпорта
             // (не липнет к верху); высокий — обычный скролл (padding → 0).
             topPadding: Math.max(0, (height - versionCol.implicitHeight) / 2)

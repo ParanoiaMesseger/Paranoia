@@ -8,6 +8,9 @@
 
 class EncryptedImageProvider;
 class ActiveChatNotifier;
+class QMediaCaptureSession;
+class QMediaRecorder;
+class QAudioInput;
 
 class ChatBackend : public QObject
 {
@@ -17,6 +20,8 @@ class ChatBackend : public QObject
     Q_PROPERTY(bool messagesLoading READ messagesLoading NOTIFY messagesLoadingChanged)
     Q_PROPERTY(bool readReceiptsEnabled READ readReceiptsEnabled NOTIFY readReceiptsEnabledChanged)
     Q_PROPERTY(int filesInFlight READ filesInFlight NOTIFY filesInFlightChanged)
+    // Запись голосового сообщения (через QMediaRecorder).
+    Q_PROPERTY(bool voiceRecording READ voiceRecording NOTIFY voiceRecordingChanged)
 
 public:
     explicit ChatBackend(QObject *parent = nullptr);
@@ -25,6 +30,7 @@ public:
     bool messagesLoading() const;
     bool readReceiptsEnabled() const;
     int filesInFlight() const { return m_filesInFlight; }
+    bool voiceRecording() const { return m_voiceRecording; }
 
     /// Передать собственный ImageProvider — в него ChatBackend кладёт
     /// расшифрованные байты превью. Plaintext НЕ пишется на диск.
@@ -53,6 +59,23 @@ public:
     /// реализация была потеряна (незакоммичена) → скачивание молча падало. Восстановлено.
     Q_INVOKABLE void saveAttachmentToDefault(const QString &messageId);
     Q_INVOKABLE void ensureImagePreview(const QString &messageId);
+    /// Материализовать видео-вложение в расшифрованный временный mp4 для
+    /// проигрывания нативным плеером. Асинхронно: по готовности — сигнал
+    /// videoReadyForPlayback(messageId, fileUrl); при ошибке — videoPlaybackError.
+    Q_INVOKABLE void cacheVideoForPlayback(const QString &messageId);
+    /// Удалить конкретный материализованный playback-файл (расшифрованное
+    /// видео/голос) — вызывается при закрытии плеера, чтобы plaintext не залёживался.
+    Q_INVOKABLE void releasePlaybackFile(const QString &fileUrl);
+    /// Очистить ВЕСЬ playback-кэш (paranoia_play) — при выходе из диалога.
+    Q_INVOKABLE void clearPlaybackCache();
+
+    // ── Голосовые сообщения (запись с микрофона) ──
+    /// Начать запись голосового во временный файл. Эмитит voiceRecordingChanged.
+    Q_INVOKABLE void startVoiceRecording();
+    /// Остановить запись и ОТПРАВИТЬ как голосовое (audio/* → AttachmentKind::Voice).
+    Q_INVOKABLE void sendVoiceRecording();
+    /// Остановить запись и ВЫБРОСИТЬ (отмена).
+    Q_INVOKABLE void cancelVoiceRecording();
     /// Синхронно перерисовать модель из ТЕКУЩЕГО кэша (без FFI-раунда). Нужно
     /// для мгновенного показа оптимистичной мозаики при старте отправки.
     Q_INVOKABLE void emitCachedMessages();
@@ -115,6 +138,19 @@ signals:
     // отдельный sendFile-вызов (см. m_sendInFlightKeys), chunkIndex 1-based.
     // Если total <= chunkIndex — отправка завершена.
     void fileProgress(const QString &transferKey, quint32 chunkIndex, quint32 total);
+    // Видео транскодируется в H.264/mp4 ПЕРЕД отправкой. UI показывает
+    // «Подготовка…» с прогрессом 0.0..1.0. По завершении транскода — обычный
+    // upload-прогресс через fileProgress. finished(ok=false) → транскод не
+    // удался, отправляем исходный файл как есть.
+    void videoPrepareProgress(const QString &peer, double fraction);
+    void videoPrepareFinished(const QString &peer, bool ok);
+    // Видео расшифровано во временный файл и готово к проигрыванию: fileUrl —
+    // file://-путь к локальному mp4. UI открывает плеер на этот URL.
+    void videoReadyForPlayback(const QString &messageId, const QString &fileUrl);
+    void videoPlaybackError(const QString &messageId, const QString &error);
+    void voiceRecordingChanged();
+    // Длительность текущей записи, мс — UI рисует таймер.
+    void voiceRecordingDurationMs(qint64 ms);
     // Старт отправки фото-группы: UI сразу рисует оптимистичную мозаику. `photos`
     // — список QVariantMap{key, source(локальный file://), name}. Прогресс по
     // каждому фото приходит через fileProgress(key, ...); по завершении реальные
@@ -215,6 +251,17 @@ private:
     bool m_arrivedInFlight          = false;
     int m_activePollRetryCount      = 0;
     EncryptedImageProvider *m_imageProvider = nullptr;
+
+    // ── Голосовая запись (QMediaRecorder) ──
+    QMediaCaptureSession *m_captureSession = nullptr;
+    QMediaRecorder *m_voiceRecorder        = nullptr;
+    QAudioInput *m_audioInput              = nullptr;
+    QString m_voiceTempPath;
+    bool m_voiceRecording   = false;
+    bool m_voicePendingSend = false;
+    void ensureVoiceRecorder();
+    void finishVoiceRecording(bool send);
+    void setVoiceRecording(bool on);
 
     void loadHistory(const QString &peer);
     void appendMessages(const QString &peer, const QVariantList &messages);
