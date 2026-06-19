@@ -52,6 +52,13 @@ namespace Utils
     void upsertProfileManifest(const QString &profileId, const QString &server, const QString &username,
                                const bool makeLast);
 
+    // Запись профиля из манифеста (или пустой объект, если профиля нет).
+    QJsonObject profileManifestEntry(const QString &profileId);
+
+    // Слить произвольные поля (например localName / avatar) в запись профиля
+    // манифеста. Не создаёт запись, если профиля нет (возвращает false).
+    bool updateProfileManifestEntry(const QString &profileId, const QJsonObject &fields);
+
     bool decodeFixedBase64(const QString &value, int expectedSize, QByteArray *out = nullptr);
 
     quint64 readSeq(const QJsonValue &value, bool *ok);

@@ -169,6 +169,30 @@ namespace Utils
         writeJsonObjectFile(Paths::profilesManifest(), manifest);
     }
 
+    QJsonObject profileManifestEntry(const QString &profileId)
+    {
+        const QJsonArray profiles = loadProfilesManifest().value("profiles").toArray();
+        for (const auto &v : profiles)
+            if (v.toObject().value("id").toString() == profileId) return v.toObject();
+        return {};
+    }
+
+    bool updateProfileManifestEntry(const QString &profileId, const QJsonObject &fields)
+    {
+        QJsonObject manifest = loadProfilesManifest();
+        QJsonArray profiles  = manifest.value("profiles").toArray();
+        auto it              = std::ranges::find_if(
+            profiles, [&](const QJsonValue &v) { return v.toObject().value("id").toString() == profileId; });
+        if (it == profiles.end()) return false;
+        QJsonObject obj = it->toObject();
+        for (auto f = fields.begin(); f != fields.end(); ++f) obj[f.key()] = f.value();
+        obj["updated_at"]    = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        *it                  = obj;
+        manifest["profiles"] = profiles;
+        writeJsonObjectFile(Paths::profilesManifest(), manifest);
+        return true;
+    }
+
     bool decodeFixedBase64(const QString &value, int expectedSize, QByteArray *out)
     {
         const auto decoded = QByteArray::fromBase64(

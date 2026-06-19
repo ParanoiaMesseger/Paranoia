@@ -55,6 +55,13 @@ ApplicationWindow {
 
     function refreshShareTarget() {
         if (typeof Backend.takeShareTarget !== "function") return
+        // НЕ потреблять share-target, пока vault залочен: takeShareTarget()
+        // читает И ОЧИЩАЕТ native-хранилище (Android prefs / iOS app-group).
+        // Если потребить на залоченном экране (PIN), а потом что-то пойдёт не
+        // так до показа чата — payload уже стёрт («после ввода PIN не помнит,
+        // что нужно переслать»). Ждём разблокировки (vaultStatus === 2);
+        // onVaultStatusChanged дочитает share сразу после анлока.
+        if (Backend.vaultStatus !== 2) return
         const target = Backend.takeShareTarget()
         if (!target) return
         const text = String(target.text || "")
@@ -227,6 +234,10 @@ ApplicationWindow {
         // обращениям к destroyed-объекту в Qt 6.
         function onVaultStatusChanged() {
             Qt.callLater(function() {
+                // Vault только что разлочился (cold-start share через PIN) —
+                // дочитываем отложенный share-target ДО построения mainPage,
+                // чтобы binding shareTargetText/Files уже был заполнен.
+                appWindow.refreshShareTarget()
                 const next = appWindow.vaultGatePage()
                 if (next) stackView.replace(null, next)
             })
@@ -363,6 +374,9 @@ ApplicationWindow {
                     primaryDomain: primaryDomain
                 })
             }
+            onOpenProfileSettings: function (profileId) {
+                stackView.push(profileSettingsPage, { profileId: profileId })
+            }
             onOpenVersionInfo: stackView.push(versionInfoPage)
             onOpenChangePin: stackView.push(changePinPage)
             onOpenMasking: stackView.push(maskingPage)
@@ -429,6 +443,13 @@ ApplicationWindow {
     Component {
         id: addReserveDomainPage
         AddReserveDomainPage {
+            onBack: stackView.pop()
+        }
+    }
+
+    Component {
+        id: profileSettingsPage
+        ProfileSettingsPage {
             onBack: stackView.pop()
         }
     }

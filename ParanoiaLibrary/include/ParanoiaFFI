@@ -388,6 +388,10 @@ public:
 
     static int vault_lock() { return ::paranoia_vault_lock(); }
 
+    // Взвести флаг завершения: отменяет in-flight long-poll'ы, чтобы рабочие
+    // QThread'ы джойнились мгновенно при выходе (см. paranoia_begin_shutdown).
+    static void begin_shutdown() { ::paranoia_begin_shutdown(); }
+
     static int vault_verify_pin(QSTR pin) { return ::paranoia_vault_verify_pin(QS_RS(pin)); }
 
     static int vault_rekey_begin(QSTR new_pin) { return ::paranoia_vault_rekey_begin(QS_RS(new_pin)); }

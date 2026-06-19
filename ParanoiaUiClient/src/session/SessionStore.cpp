@@ -4,11 +4,26 @@
 
 SessionStore *SessionStore::instance()
 {
-    static SessionStore inst;
-    return &inst;
+    // Намеренно «утекающий» синглтон: НЕ освобождается в atexit. Иначе его
+    // деструктор бежал бы в __run_exit_handlers уже после остановки Qt/рантайма и
+    // закрывал бы SQLCipher-соединения в момент глобальной деструкции — это падало
+    // SIGSEGV в sqlite3FreeCodecArg (static destruction order). Чистое закрытие БД
+    // делаем заранее через shutdown() на aboutToQuit; ОС вернёт память на выходе.
+    static SessionStore *inst = new SessionStore();
+    return inst;
 }
 
 SessionStore::SessionStore(QObject *parent) : QObject(parent) {}
+
+void SessionStore::shutdown()
+{
+    // Гасим сессии, пока жив event-loop: дроп shared_ptr<ServerSession> →
+    // ParanoiaFFI → Rust paranoia_client_free → чистое закрытие SQLCipher-БД здесь,
+    // а не в atexit. Сигналы НЕ шлём — приложение уже завершается, реагировать
+    // на смену сессий некому (QML-движок может разрушаться).
+    m_activeSession.reset();
+    m_sessions.clear();
+}
 
 std::shared_ptr<ServerSession> SessionStore::activeSession() const { return m_activeSession; }
 

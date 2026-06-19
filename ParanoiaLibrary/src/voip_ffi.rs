@@ -507,13 +507,19 @@ pub extern "C" fn paranoia_call_poll(
             sig,
         };
 
-        let items: Vec<CallEnvelopeIn> = match rt.block_on(client.transport().call_poll(&core)) {
-            Ok(v) => v,
-            Err(e) => {
-                set_last_error(&format!("call_poll_failed: {e}"));
-                return ptr::null_mut();
-            }
-        };
+        let items: Vec<CallEnvelopeIn> =
+            match rt.block_on(crate::ffi::race_shutdown(client.transport().call_poll(&core))) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => {
+                    set_last_error(&format!("call_poll_failed: {e}"));
+                    return ptr::null_mut();
+                }
+                None => {
+                    // Процесс завершается — long-poll отменён, без ошибки-спама.
+                    set_last_error("shutdown");
+                    return ptr::null_mut();
+                }
+            };
 
         // Расшифровываем каждый payload подобранным master_key'ом.
         let mut out = Vec::with_capacity(items.len());

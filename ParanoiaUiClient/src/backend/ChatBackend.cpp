@@ -1118,7 +1118,7 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
             if (rc == 0) {
                 emit self->attachmentSaved(savedPath);
                 emit self->attachmentDownloaded(messageId, filename);
-                if (peer == self->m_activePeer) self->loadHistory(peer);
+                if (peer == self->m_activePeer) self->loadHistory(peer, false);
             } else {
                 emit self->receiveError(ChatBackend::tr("Не удалось сохранить файл: ") + userFacingAttachmentError(err));
             }
@@ -1225,7 +1225,7 @@ void ChatBackend::saveAttachmentToDefault(const QString &messageId)
             if (rc == 0 && !savedPath.isEmpty()) {
                 emit self->attachmentSaved(savedPath);
                 emit self->attachmentDownloaded(messageId, filename);
-                if (peer == self->m_activePeer) self->loadHistory(peer);
+                if (peer == self->m_activePeer) self->loadHistory(peer, false);
             } else {
                 emit self->receiveError(ChatBackend::tr("Не удалось сохранить файл: ")
                                         + (rc != 0 ? userFacingAttachmentError(err) : ChatBackend::tr("MediaStore")));
@@ -1378,7 +1378,7 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
                         self->m_previewRefreshPending = true;
                         QTimer::singleShot(60, self, [self, peer]() {
                             self->m_previewRefreshPending = false;
-                            if (peer == self->m_activePeer) self->loadHistory(peer);
+                            if (peer == self->m_activePeer) self->loadHistory(peer, false);
                         });
                     }
                     return;
@@ -2233,23 +2233,24 @@ void ChatBackend::pollActiveChat()
         uint64_t count = 0;
         bool failed    = false;
         QString error;
+        // Копируем handle под МГНОВЕННЫМ локом, сам сетевой poll — БЕЗ ffiMutex:
+        // иначе при потере сети connect_timeout висел бы под общим локом и морозил
+        // весь UI (история/отправка/превью встают в очередь). notify_count — сетевой,
+        // без записи в БД, безопасен без общего лока (как в ActiveChatNotifier).
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            failed = true;
+            error  = "client_not_ready";
+        } else {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            const int rc = ffi->notify_count_keyring(serverId, peerId, keyringJson, count);
+            if (rc != 0) {
                 failed = true;
-                error  = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                // КОРОТКИЙ опрос: FFI держит общий session->ffiMutex на время вызова.
-                // НЕЛЬЗЯ использовать здесь long-poll (notify_count_wait_keyring) — он
-                // удерживал бы мьютекс до 25с, блокируя ВСЕ остальные FFI (история/
-                // отправка/превью) → фриз UI. Long-poll для near-real-time требует
-                // ОТДЕЛЬНОГО соединения/handle, не общего ffiMutex (см. #35).
-                const int rc = session->ffi->notify_count_keyring(serverId, peerId, keyringJson, count);
-                if (rc != 0) {
-                    failed = true;
-                    error  = ParanoiaFFI::last_error();
-                }
+                error  = ParanoiaFFI::last_error();
             }
         }
         if (!self) return;
@@ -2313,7 +2314,7 @@ void ChatBackend::refreshArrivedStatus()
                 qWarning().noquote() << "Arrived status refresh failed:" << error;
                 return;
             }
-            if (changed > 0 && peer == self->m_activePeer) self->loadHistory(peer);
+            if (changed > 0 && peer == self->m_activePeer) self->loadHistory(peer, false);
         });
     });
 }
@@ -2345,7 +2346,7 @@ int ChatBackend::retryActiveNotifyDelayMs() const
 
 // ── Message helpers ───────────────────────────────────────────────────────────
 
-void ChatBackend::loadHistory(const QString &peer)
+void ChatBackend::loadHistory(const QString &peer, bool clearCache)
 {
     auto session = SessionStore::instance()->activeSession();
     if (!session) return;
@@ -2356,7 +2357,7 @@ void ChatBackend::loadHistory(const QString &peer)
     const QString keyringJson  = dlg->keyringJson();
     QPointer self(this);
     beginMessagesLoading();
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson]() {
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, clearCache]() {
         if (!self) return;
         QString json;
         {
@@ -2366,12 +2367,39 @@ void ChatBackend::loadHistory(const QString &peer)
                 json                 = session->ffi->history_keyring(serverId, peerId, keyringJson, 500);
             }
         }
-        QMetaObject::invokeMethod(self, [self, peer, json]() {
+        QMetaObject::invokeMethod(self, [self, peer, json, clearCache]() {
             if (!self) return;
             self->endMessagesLoading();
             if (peer != self->m_activePeer) return;
             if (json.isEmpty()) return;
             const QVariantList messages = self->parseMessages(json);
+            if (!clearCache) {
+                // Инкрементальный refresh (read-receipts/arrived, готовность превью,
+                // сохранение вложения): МЕРЖ свежей истории в кэш БЕЗ очистки —
+                // appendMessages обновляет статусы на месте, сохраняет реакции и
+                // ключи строк. Лента НЕ пересобирается на каждый апдейт.
+                if (!messages.isEmpty()) self->appendMessages(peer, messages);
+                if (peer == self->m_activePeer)
+                    emit self->messagesReceived(peer, self->m_messageCache[peer]);
+                return;
+            }
+            // Снимок уже применённых (live) реакций ПЕРЕД очисткой кэша: реакция,
+            // пришедшая поллингом, ещё может отсутствовать в history (серверная/
+            // локальная задержка персиста) → после пересборки она бы исчезла и
+            // «мигала» до следующего апдейта. Сохраняем и восстановим ниже для тех
+            // сообщений, которым history реакций не дал.
+            QHash<QString, QVariantMap> reactionSnapshot;
+            for (const auto &m : std::as_const(self->m_messageCache[peer])) {
+                const QVariantMap mm = m.toMap();
+                const QString id     = mm.value(QStringLiteral("id")).toString();
+                const QString rj     = mm.value(QStringLiteral("reactions_json")).toString();
+                if (!id.isEmpty() && !rj.isEmpty() && rj != QStringLiteral("[]")) {
+                    reactionSnapshot.insert(
+                        id, QVariantMap{{QStringLiteral("reaction_events"),
+                                         mm.value(QStringLiteral("reaction_events"))},
+                                        {QStringLiteral("reactions_json"), rj}});
+                }
+            }
             self->m_messageCache[peer].clear();
             self->m_seenIds[peer].clear();
             self->m_appliedReactionIds[peer].clear();
@@ -2382,6 +2410,21 @@ void ChatBackend::loadHistory(const QString &peer)
                 return;
             }
             self->appendMessages(peer, messages);
+            // Восстановить live-реакции для сообщений, у которых history их не вернул.
+            if (!reactionSnapshot.isEmpty()) {
+                for (auto &v : self->m_messageCache[peer]) {
+                    QVariantMap mm     = v.toMap();
+                    const QString id   = mm.value(QStringLiteral("id")).toString();
+                    if (id.isEmpty() || !reactionSnapshot.contains(id)) continue;
+                    const QString rj = mm.value(QStringLiteral("reactions_json")).toString();
+                    if (rj.isEmpty() || rj == QStringLiteral("[]")) {
+                        const QVariantMap snap = reactionSnapshot.value(id);
+                        mm[QStringLiteral("reaction_events")] = snap.value(QStringLiteral("reaction_events"));
+                        mm[QStringLiteral("reactions_json")]  = snap.value(QStringLiteral("reactions_json"));
+                        v = mm;
+                    }
+                }
+            }
             // Вернуть не отправленные (failed/в очереди) — loadHistory затёр кэш, а в FFI
             // их нет; иначе при перезаходе в диалог они пропадали.
             self->reinjectOutbox(peer);

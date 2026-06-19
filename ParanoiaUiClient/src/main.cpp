@@ -30,6 +30,7 @@
 #include <ParanoiaFFI>
 #endif
 #include "utils/adminStorage.hpp"
+#include "utils/ClipboardUtils.hpp"
 #include "utils/KeyInjector.hpp"
 #include "backend/ChatBackend.hpp"
 #include "backend/EncryptedImageProvider.hpp"
@@ -38,6 +39,7 @@
 #include "backend/NotificationCoordinator.hpp"
 #include "backend/VersionInfoBackend.hpp"
 #include "platform/PlatformNotifications.hpp"
+#include "session/SessionStore.hpp"
 #include "spell/SpellChecker.hpp"
 #if defined(DESKTOP_OS)
 #include "backend/NativeFileDialog.hpp"
@@ -202,6 +204,9 @@ int main(int argc, char *argv[])
                      &ChatBackend::prefetchAllDialogs);
     QObject::connect(&notifications, &NotificationCoordinator::networkRestored, &chatBackend,
                      &ChatBackend::onNetworkRestored);
+    // Индикатор «Подключение»: состояние связи из форграунд-поллинга.
+    QObject::connect(&notifications, &NotificationCoordinator::connectivityChanged, &backend,
+                     [&backend](bool online) { backend.setConnectionOnline(online); });
     QObject::connect(&notifications, &NotificationCoordinator::sessionReset, &chatBackend,
                      &ChatBackend::onSessionReset);
     QObject::connect(&backend, &MainBackend::dialogRemoved, &chatBackend, &ChatBackend::onDialogRemoved);
@@ -225,6 +230,17 @@ int main(int argc, char *argv[])
                      [imageProvider]() { imageProvider->clear(); });
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
                      [imageProvider]() { imageProvider->clear(); });
+    // Взводим флаг завершения ПЕРВЫМ: отменяет in-flight long-poll'ы (call/poll,
+    // notify), чтобы рабочие QThread'ы (CallSignalingClient/ActiveChatNotifier)
+    // джойнились мгновенно при выходе. Иначе их QThread-деструктор абортит процесс
+    // ("QThread: Destroyed while thread is still running", SIGABRT при закрытии).
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     []() { ParanoiaFFI::begin_shutdown(); });
+    // Закрываем SQLCipher-БД всех сессий, ПОКА жив event-loop. Иначе соединения
+    // доживали до atexit-деструкции синглтона SessionStore и падали в sqlite3Close
+    // (static destruction order, SIGSEGV в sqlite3FreeCodecArg «при закрытии»).
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     []() { SessionStore::instance()->shutdown(); });
 
     KeyInjector keyInjector;
     engine.rootContext()->setContextProperty("KeyInjector", &keyInjector);
@@ -261,6 +277,9 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("DesktopTrayEnabled", DesktopTray::desktopTrayEnabled());
     paranoia::platform::OrientationLock orientationLock;
     engine.rootContext()->setContextProperty("OrientationLock", &orientationLock);
+
+    ClipboardUtils clipboardUtils;
+    engine.rootContext()->setContextProperty("ClipboardUtils", &clipboardUtils);
 #if PARANOIA_HAS_VOIP
     paranoia::voip::VoipSystem voipSystem(engine, backend);
 #endif

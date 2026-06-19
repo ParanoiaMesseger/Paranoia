@@ -107,7 +107,20 @@ Item {
                         const p = mosaic.progressMap[tkey]
                         return (p === undefined) ? 0 : p
                     }
-                    readonly property bool loading: tkey.length > 0 && prog < 0.999
+                    // Различаем «уже грузится» (для плитки пошёл прогресс) и «ждёт
+                    // очереди» (фото группы отправляются по одному, остальные ждут).
+                    // Раньше у ВСЕХ ещё-не-отправленных рисовалось кольцо «3%» → плитки
+                    // в очереди выглядели как застрявшая отправка. Теперь у активной —
+                    // честное кольцо прогресса, у ожидающих — индикатор ожидания.
+                    readonly property bool uploading: {
+                        const _tick = mosaic.progressTick
+                        return tkey.length > 0 && mosaic.progressMap[tkey] !== undefined && prog < 0.999
+                    }
+                    readonly property bool queued: {
+                        const _tick = mosaic.progressTick
+                        return tkey.length > 0 && mosaic.progressMap[tkey] === undefined
+                    }
+                    readonly property bool loading: uploading || queued
 
                     // Committed-плитка без превью (ленивая загрузка) — запросить
                     // расшифровку; по готовности syncTiles обновит ТОЛЬКО эту строку,
@@ -151,12 +164,38 @@ Item {
                         visible: tile.loading
                         color: "#66020103"
                     }
+                    // Индикатор ОЖИДАНИЯ очереди — фото ещё не начало грузиться.
+                    // Полное кольцо-«дорожка» с мягкой пульсацией (без дуги прогресса):
+                    // явно отличается от активной отправки и не выглядит «застрявшим».
+                    Canvas {
+                        id: waitRing
+                        anchors.centerIn: parent
+                        width: Math.min(40, tile.width * 0.5)
+                        height: width
+                        visible: tile.queued
+                        onPaint: {
+                            const ctx = getContext("2d")
+                            ctx.reset()
+                            const cx = width / 2, cy = height / 2, r = width / 2 - 3
+                            ctx.lineWidth = 3
+                            ctx.strokeStyle = "#CCFFFFFF"
+                            ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke()
+                        }
+                        Component.onCompleted: requestPaint()
+                        onVisibleChanged: if (visible) requestPaint()
+                        SequentialAnimation on opacity {
+                            running: waitRing.visible
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 0.35; to: 0.9; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 0.9; to: 0.35; duration: 700; easing.type: Easing.InOutSine }
+                        }
+                    }
                     Canvas {
                         id: ring
                         anchors.centerIn: parent
                         width: Math.min(40, tile.width * 0.5)
                         height: width
-                        visible: tile.loading
+                        visible: tile.uploading
                         // Детерминированный прогресс отправки плитки ∈ [0..1]. Плавная
                         // анимация сглаживает грубые скачки по чанкам в текущее заполнение
                         // (БЕЗ вращения — это честный ring-progress, а не спиннер).

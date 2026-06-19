@@ -33,6 +33,17 @@ Rectangle {
 
     readonly property string activeProfileId: currentProfileId()
 
+    // Отображаемое имя активного профиля = локальный ник (если задан), иначе
+    // username (server_id/ФИО). ЕДИНЫЙ источник для шапки/пикера/настроек —
+    // чтобы не было «ник в настройках один, в шапке другой». Реактивно по
+    // sessionsData (обновляется на смене профиля/sessionsChanged).
+    readonly property string activeDisplayName: {
+        for (let i = 0; i < sessionsData.length; ++i)
+            if (sessionsData[i].isActive)
+                return sessionsData[i].displayName || sessionsData[i].username || Backend.username
+        return Backend.username
+    }
+
     signal openChat(string profileId, string peer)
     signal registerClient()
     signal installNewServer()
@@ -42,6 +53,7 @@ Rectangle {
     signal openUpdateKey(string peer)
     signal openRegisterUser(string domain)
     signal openAddReserveDomain(string targetType, string targetId, string primaryDomain)
+    signal openProfileSettings(string profileId)
     signal openVersionInfo()
     signal openChangePin()
     signal openMasking()
@@ -145,7 +157,13 @@ Rectangle {
         target: Chat
         function onDialogsChanged() { root.allDialogs = Backend.getDialogs() }
         // Photo picker (Android) вернул фото под аватар диалога → ставим его.
-        function onAvatarPhotoPicked(peer, uri) { Backend.setDialogAvatar(peer, uri) }
+        function onAvatarPhotoPicked(peer, uri) {
+            // Аватар профиля помечается префиксом "profile:" и обрабатывается в
+            // ProfileSettingsPage — здесь его НЕ трогаем (иначе для content:// temp
+            // удалился бы до обработчика профиля).
+            if (peer.startsWith("profile:")) return
+            Backend.setDialogAvatar(peer, uri)
+        }
     }
 
     Connections {
@@ -395,16 +413,50 @@ Rectangle {
 
                         Row {
                             anchors.left:           parent.left
-                            anchors.right:          reserveClientButton.left
+                            // Резерв теперь в «Настройках профиля» — кнопки «Резерв»
+                            // в шапке больше нет; тянемся до бейджа профилей.
+                            anchors.right:          sessionBadge.visible ? sessionBadge.left : parent.right
                             anchors.top:            parent.top
                             anchors.bottom:         parent.bottom
                             anchors.leftMargin:     16
                             anchors.rightMargin:    4
                             spacing:                8
 
+                            // Индикатор связи: когда форграунд-поллинг не достучался
+                            // (нет сети/сервер недоступен) — показываем крутящееся
+                            // «Подключение…» вместо адреса/имени. RotationAnimator на
+                            // render-потоке крутится, даже если GUI-поток занят.
+                            readonly property bool _connecting: Backend.connectionState === "connecting"
+                            Row {
+                                id: connIndicator
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 5
+                                visible: parent._connecting
+                                AppIcon {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: 13; height: 13
+                                    name: "refresh"
+                                    iconColor: Theme.textSecondary
+                                    strokeWidth: 2
+                                    RotationAnimator on rotation {
+                                        running: connIndicator.visible
+                                        from: 0; to: 360; duration: 900
+                                        loops: Animation.Infinite
+                                    }
+                                }
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: qsTr("Подключение…")
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSm
+                                    font.family: Theme.fontFamily
+                                }
+                            }
+
                             Text {
                                 id: srvUrlText
                                 anchors.verticalCenter: parent.verticalCenter
+                                visible: !parent._connecting
                                 text:  Backend.server
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSm
@@ -412,16 +464,17 @@ Rectangle {
                                 font.weight:    Font.Medium
                                 elide: Text.ElideRight
                                 // URL не должен занимать всю строку — оставляем место имени.
-                                width: Math.min(implicitWidth, parent.width * 0.55)
+                                width: visible ? Math.min(implicitWidth, parent.width * 0.55) : 0
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                text:  "(" + Backend.username + ")"
+                                visible: !parent._connecting
+                                text:  "(" + root.activeDisplayName + ")"
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontXs
                                 font.family:    Theme.fontFamily
                                 // Длинное имя обрезаем по остатку строки (учитывая
-                                // индикатор маски), чтобы не наезжало на «Резерв».
+                                // индикатор маски), чтобы не наезжало на бейдж.
                                 elide: Text.ElideRight
                                 width: Math.max(0, parent.width - srvUrlText.width - parent.spacing
                                                 - (maskIndicator.visible ? maskIndicator.width + parent.spacing : 0))
@@ -484,38 +537,6 @@ Rectangle {
                                 font.pixelSize: 9
                                 font.family:    Theme.monoFamily
                                 font.weight:    Font.Medium
-                            }
-                        }
-
-                        Rectangle {
-                            id: reserveClientButton
-                            z: 2
-                            anchors.right: sessionBadge.visible ? sessionBadge.left : parent.right
-                            anchors.rightMargin: sessionBadge.visible ? 6 : 8
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: 72
-                            height: 26
-                            radius: 13   // пилюля, не «квадрат»
-                            color: reserveClientArea.containsMouse ? Theme.bgButton : Theme.bgCard
-                            border.width: 1
-                            border.color: Theme.border
-                            visible: Backend.loggedIn
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: qsTr("Резерв")
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontXs
-                                font.family: Theme.fontFamily
-                                font.weight: Font.Medium
-                            }
-
-                            MouseArea {
-                                id: reserveClientArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.openAddReserveDomain("client", root.activeProfileId, Backend.server)
                             }
                         }
 
@@ -1436,14 +1457,43 @@ Rectangle {
 
                     Row {
                         anchors.fill:        parent
-                        anchors.leftMargin:  10
-                        anchors.rightMargin: 10
+                        // Слева — место под шестерёнку (настройки), справа — под корзину.
+                        anchors.leftMargin:  34
+                        anchors.rightMargin: 32
                         spacing:             8
+
+                        // Аватар профиля (круг запечён в PNG) или буква-плейсхолдер.
+                        Item {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 30; height: 30
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: width / 2
+                                color: Theme.bgSecondary
+                                border.width: 1; border.color: Theme.border
+                                visible: !sessAvatarImg.visible
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (modelData.displayName || modelData.username || "?").charAt(0).toUpperCase()
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontMd
+                                    font.family: Theme.fontFamily
+                                }
+                            }
+                            Image {
+                                id: sessAvatarImg
+                                anchors.fill: parent
+                                source: modelData.avatar || ""
+                                visible: source.toString().length > 0
+                                asynchronous: true
+                                cache: false
+                            }
+                        }
 
                         Column {
                             anchors.verticalCenter: parent.verticalCenter
-                            // -30 — место под кнопку-корзину (удалить профиль) справа.
-                            width: parent.width - (modelData.totalUnread > 0 ? 48 : 0) - 8 - 30
+                            width: parent.width - 30 - 8 - (modelData.totalUnread > 0 ? 48 : 0)
                             spacing: 2
 
                             Text {
@@ -1456,10 +1506,13 @@ Rectangle {
                                 width:          parent.width
                             }
                             Text {
-                                text:           modelData.username
+                                // Ник профиля (или server_id как фолбэк).
+                                text:           modelData.displayName || modelData.username
                                 color:          Theme.textSecondary
                                 font.pixelSize: Theme.fontXs
                                 font.family:    Theme.fontFamily
+                                elide:          Text.ElideRight
+                                width:          parent.width
                             }
                         }
 
@@ -1494,6 +1547,29 @@ Rectangle {
                             // оставалось открытым (приходилось тапать мимо).
                             root.closeSessionSwitcher()
                             Backend.switchSession(modelData.profileId)
+                        }
+                    }
+
+                    // Настройки профиля (слева). z выше switchArea — клик открывает
+                    // экран настроек, а не переключает профиль.
+                    AppIcon {
+                        id: profileSettingsBtn
+                        anchors.left: parent.left
+                        anchors.leftMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 18; height: 18
+                        z: 5
+                        name: "settings"
+                        iconColor: profileSettingsArea.containsMouse ? Theme.accent : Theme.textSecondary
+                        MouseArea {
+                            id: profileSettingsArea
+                            anchors.fill: parent
+                            anchors.margins: -7
+                            hoverEnabled: true
+                            onClicked: {
+                                root.closeSessionSwitcher()
+                                root.openProfileSettings(modelData.profileId)
+                            }
                         }
                     }
 

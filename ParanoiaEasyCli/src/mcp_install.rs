@@ -33,6 +33,8 @@ pub struct InstallOpts {
     pub non_interactive: bool,
     pub dry_run: bool,
     pub json: bool,
+    /// Режим канала (push): создать channel-плагин вместо регистрации pull-MCP.
+    pub channel: bool,
 }
 
 // ─────────────────────────── реестр поддерживаемых хостов ────────────────────
@@ -544,6 +546,49 @@ fn install_binary(workdir: &Path, dry_run: bool) -> Result<PathBuf> {
 
 // ─────────────────────────────── мастер ──────────────────────────────────────
 
+/// Создать channel-плагин (push-режим): `<dir>/.claude-plugin/plugin.json` +
+/// `<dir>/.mcp.json` (server-ключ `paranoia`, env pull-сервера + PARANOIA_MCP_CHANNEL=1).
+fn write_channel_plugin(plugin_dir: &Path, spec: &RegSpec, dry_run: bool) -> Result<()> {
+    let manifest_dir = plugin_dir.join(".claude-plugin");
+    let plugin_json = manifest_dir.join("plugin.json");
+    let mcp_json = plugin_dir.join(".mcp.json");
+
+    let manifest = json!({
+        "name": "paranoia",
+        "description": "Paranoia messenger channel for Claude Code — push входящих как ходов агента (тулзы send/react). Pull-альтернатива: MCP-сервер paranoia-cli.",
+        "version": "0.0.1",
+        "keywords": ["paranoia", "messaging", "channel", "mcp"]
+    });
+
+    // env канала = env pull-сервера + флаг канала.
+    let mut env_obj = serde_json::Map::new();
+    for (k, v) in &spec.env {
+        env_obj.insert(k.clone(), Value::String(v.clone()));
+    }
+    env_obj.insert("PARANOIA_MCP_CHANNEL".into(), Value::String("1".into()));
+    let mcp = json!({
+        "mcpServers": {
+            "paranoia": {
+                "command": spec.command.clone(),
+                "args": spec.args.clone(),
+                "env": Value::Object(env_obj),
+            }
+        }
+    });
+
+    if dry_run {
+        eprintln!("[dry-run] записал бы {}", plugin_json.display());
+        eprintln!("[dry-run] записал бы {}", mcp_json.display());
+        return Ok(());
+    }
+    fs::create_dir_all(&manifest_dir).with_context(|| format!("mkdir {}", manifest_dir.display()))?;
+    fs::write(&plugin_json, serde_json::to_string_pretty(&manifest)? + "\n")
+        .with_context(|| format!("write {}", plugin_json.display()))?;
+    fs::write(&mcp_json, serde_json::to_string_pretty(&mcp)? + "\n")
+        .with_context(|| format!("write {}", mcp_json.display()))?;
+    Ok(())
+}
+
 pub fn run(opts: InstallOpts) -> Result<()> {
     let interactive = io::stdin().is_terminal() && !opts.non_interactive;
     if !opts.json {
@@ -680,8 +725,13 @@ pub fn run(opts: InstallOpts) -> Result<()> {
     let server_id = resolve_username(opts.username.clone(), &profiles, interactive)?;
     let peer = opts.peer.clone().unwrap_or_default();
 
-    // 7) хосты
-    let hosts = resolve_hosts(&real_home, &opts.hosts, interactive)?;
+    // 7) хосты (в режиме канала не нужны — канал включается флагом запуска, а не
+    //    регистрацией в хосте; см. ветку channel ниже)
+    let hosts = if opts.channel {
+        Vec::new()
+    } else {
+        resolve_hosts(&real_home, &opts.hosts, interactive)?
+    };
 
     // 8) спецификация регистрации
     let mut env: Vec<(String, String)> = vec![
@@ -718,6 +768,63 @@ pub fn run(opts: InstallOpts) -> Result<()> {
         ],
         env,
     };
+
+    // 8.5) РЕЖИМ КАНАЛА: вместо регистрации pull-MCP создаём channel-плагин
+    //      (push, как Telegram) и убираем pull-MCP, чтобы не было двойного дренажа.
+    if opts.channel {
+        let plugin_dir = workdir.join("channel-plugin");
+        write_channel_plugin(&plugin_dir, &spec, opts.dry_run)?;
+        // Убрать pull-MCP paranoia-cli из Claude Code (best-effort): иначе два
+        // читателя (pull-тулзы и push-луп) дренажат сообщения друг у друга.
+        let mut pull_removed = false;
+        if !opts.dry_run && binary_on_path("claude") {
+            for scope in ["user", "local"] {
+                let _ = std::process::Command::new("claude")
+                    .args(["mcp", "remove", "paranoia-cli", "--scope", scope])
+                    .status();
+            }
+            pull_removed = true;
+        }
+        let launch = "claude --dangerously-load-development-channels server:paranoia";
+        if opts.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "mode": "channel",
+                    "dry_run": opts.dry_run,
+                    "workdir": workdir.display().to_string(),
+                    "binary": spec.command,
+                    "server_id": server_id,
+                    "peer": peer,
+                    "source": prov_kind,
+                    "provision": prov_stats,
+                    "plugin_dir": plugin_dir.display().to_string(),
+                    "pull_mcp_removed": pull_removed,
+                    "launch": launch,
+                }))
+                .unwrap_or_default()
+            );
+        } else {
+            eprintln!();
+            eprintln!("Готово (режим КАНАЛА){}.", if opts.dry_run { " (dry-run)" } else { "" });
+            eprintln!("  workdir:    {}", workdir.display());
+            eprintln!("  бинарь:     {}", spec.command);
+            eprintln!("  server_id:  {server_id}");
+            eprintln!("  плагин:     {}", plugin_dir.display());
+            eprintln!(
+                "  pull-MCP:   {}",
+                if pull_removed { "удалён (paranoia-cli)" } else { "не трогал" }
+            );
+            eprintln!();
+            eprintln!("Запуск сессии с каналом (research-preview, Claude Code v2.1.80+):");
+            eprintln!("  cd {}", plugin_dir.display());
+            eprintln!("  {launch}");
+            eprintln!();
+            eprintln!("Вернуть pull-режим: paranoia-easy-cli … mcp install");
+        }
+        return Ok(());
+    }
 
     // 9) регистрация
     let mut results: Vec<(String, bool, String)> = Vec::new();

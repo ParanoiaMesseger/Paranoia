@@ -341,6 +341,14 @@ CSTR paranoia_last_error();
 // ────────────────────────────────────────────────────────────────────
 void paranoia_free_string(char *s);
 
+// ── Завершение процесса
+// ────────────────────────────────────────────────────
+// Взвести флаг завершения: in-flight long-poll'ы (call/poll, notify) отменяются,
+// чтобы рабочие потоки клиента джойнились мгновенно при выходе (иначе QThread
+// абортит процесс — "QThread: Destroyed while thread is still running"). Звать на
+// aboutToQuit ДО остановки потоков/закрытия БД. Идемпотентно.
+void paranoia_begin_shutdown(void);
+
 // ── VoIP сигналинг (HTTP /call/signal и /call/poll)
 // ────────────────────────────
 // Все возвращающие char* функции NULL на ошибке (paranoia_last_error()).

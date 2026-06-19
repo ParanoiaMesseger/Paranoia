@@ -24,6 +24,12 @@ public:
     void setActiveSession(const std::shared_ptr<ServerSession> &session);
     void removeSession(const std::shared_ptr<ServerSession> &session);
 
+    // Освобождает все сессии (а значит и Rust-клиенты с открытыми SQLCipher-БД),
+    // ПОКА жив Qt event-loop. Вызывается из main() на aboutToQuit, чтобы закрытие
+    // зашифрованной БД не происходило в atexit-деструкции синглтона (static
+    // destruction order) — там оно падало в sqlite3FreeCodecArg на протухшем кодеке.
+    void shutdown();
+
 signals:
     void activeSessionChanged();
     void sessionsChanged();

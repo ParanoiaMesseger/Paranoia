@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 mod dialogue_store;
 mod mcp_install;
 mod mcp_server;
+mod tui;
 mod ui_store;
 
 use dialogue_store::{
@@ -346,6 +347,23 @@ async fn cmd_send(
     let dialogue = build_dialogue(&client, server_url, username, peer)?;
     let msg = dialogue.send_text(text).await?;
     println!("Sent: id={} seq={:?}", msg.id, msg.server_seq);
+    Ok(())
+}
+
+/// REACT (эмодзи-реакция на сообщение по message_id)
+async fn cmd_react(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+    message_id: &str,
+    emoji: &str,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let msg = dialogue.send_reaction(message_id, emoji).await?;
+    println!("Reacted: id={} seq={:?}", msg.id, msg.server_seq);
     Ok(())
 }
 
@@ -826,6 +844,7 @@ fn profile_for_import<'a>(
             signing_key_ct_b64: String::new(),
             dialogues: Default::default(),
             names: Default::default(),
+            local_name: String::new(),
         });
     (profile, !existed)
 }
@@ -1242,6 +1261,9 @@ async fn cmd_mcp(
         });
     let ui_app_data_root = env("PARANOIA_UI_APP_DATA_ROOT");
     let ui_pin = env("PARANOIA_UI_PIN").or_else(|| env("PARANOIA_CLI_PIN"));
+    let channel = env("PARANOIA_MCP_CHANNEL")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
 
     let cfg = mcp_server::McpConfig {
         server_url: server_url.to_string(),
@@ -1253,6 +1275,7 @@ async fn cmd_mcp(
         log_path,
         ui_app_data_root,
         ui_pin,
+        channel,
     };
     mcp_server::serve(cfg).await
 }
@@ -1348,6 +1371,21 @@ enum Commands {
         #[command(subcommand)]
         cmd: Option<McpCmd>,
     },
+    /// Интерактивный консольный мессенджер (TUI): список диалогов, лента,
+    /// ввод, live-приём, реакции, вложения. Профиль — из --username/env.
+    Tui {
+        /// server_id профиля (иначе env PARANOIA_MCP_USERNAME/SELF_HASH или
+        /// единственный профиль в сторе)
+        #[arg(long)]
+        username: Option<String>,
+    },
+    /// Задать локальный ник профиля (показывается в выборе профиля в TUI)
+    ProfileName {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        name: String,
+    },
     /// Отправка текстового сообщения
     Send {
         #[arg(long)]
@@ -1356,6 +1394,17 @@ enum Commands {
         peer: String,
         #[arg(long)]
         text: String,
+    },
+    /// Отправить эмодзи-реакцию на сообщение по message_id
+    React {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+        #[arg(long)]
+        message_id: String,
+        #[arg(long)]
+        emoji: String,
     },
     /// Послать тестовый Offer-звонок peer'у (отладка приёма входящих в фоне)
     CallOffer {
@@ -1496,6 +1545,10 @@ enum McpCmd {
         /// Машиночитаемый вывод (JSON) на stdout
         #[arg(long)]
         json: bool,
+        /// Режим КАНАЛА (push): вместо регистрации pull-MCP создать channel-плагин
+        /// (PARANOIA_MCP_CHANNEL=1), убрать pull-MCP и показать команду запуска.
+        #[arg(long)]
+        channel: bool,
     },
 }
 
@@ -1538,6 +1591,13 @@ enum DialogueCmd {
 /// `PARANOIA_CLI_PIN` (по умолчанию — заведомо нестойкий "paranoia-cli-dev",
 /// который НЕ предназначен для прод-данных).
 fn init_vault_for_cli() -> Result<()> {
+    let pin = std::env::var("PARANOIA_CLI_PIN").unwrap_or_else(|_| "paranoia-cli-dev".to_string());
+    init_vault_with_pin(&pin)
+}
+
+/// Инициализировать/разблокировать CLI-vault в текущем каталоге заданным PIN.
+/// Вынесено из `init_vault_for_cli`, чтобы TUI мог спросить PIN интерактивно.
+fn init_vault_with_pin(pin: &str) -> Result<()> {
     use paranoia_lib::local_vault;
     let root = std::env::current_dir()
         .context("cwd")?
@@ -1547,13 +1607,12 @@ fn init_vault_for_cli() -> Result<()> {
     if let Err(e) = local_vault::recover_pending_rekey() {
         eprintln!("warn: recover_pending_rekey: {e}");
     }
-    let pin = std::env::var("PARANOIA_CLI_PIN").unwrap_or_else(|_| "paranoia-cli-dev".to_string());
     match local_vault::status().context("vault status")? {
         local_vault::VaultStatus::NotInitialized => {
-            local_vault::set_pin(&pin).context("vault set_pin")?;
+            local_vault::set_pin(pin).context("vault set_pin")?;
         }
         local_vault::VaultStatus::Locked => {
-            local_vault::unlock(&pin).context("vault unlock — wrong PARANOIA_CLI_PIN?")?;
+            local_vault::unlock(pin).context("vault unlock — неверный PIN?")?;
         }
         local_vault::VaultStatus::Unlocked => {}
     }
@@ -1584,7 +1643,10 @@ async fn main() -> Result<()> {
             ..
         }
     );
-    if !is_mcp_install {
+    // TUI сам инициализирует vault: спрашивает PIN интерактивно (если не в env),
+    // поэтому ранний init с дефолтным PIN ему не нужен.
+    let is_tui = matches!(&cli.command, Commands::Tui { .. });
+    if !is_mcp_install && !is_tui {
         init_vault_for_cli()?;
     }
 
@@ -1662,6 +1724,7 @@ async fn main() -> Result<()> {
                 non_interactive,
                 dry_run,
                 json,
+                channel,
             }) => {
                 mcp_install::run(mcp_install::InstallOpts {
                     server_url: cli.server_url.clone(),
@@ -1677,6 +1740,7 @@ async fn main() -> Result<()> {
                     non_interactive,
                     dry_run,
                     json,
+                    channel,
                 })?;
             }
             None => {
@@ -1703,6 +1767,36 @@ async fn main() -> Result<()> {
                 &cli.db_path,
                 &peer,
                 &text,
+            )
+            .await?;
+        }
+        Commands::Tui { username } => {
+            tui::run(
+                cli.server_url.clone(),
+                cli.reserve_server_urls.clone(),
+                cli.db_path.clone(),
+                username,
+            )
+            .await?;
+        }
+        Commands::ProfileName { username, name } => {
+            dialogue_store::set_profile_local_name(&username, &name)?;
+            println!("Профилю {username} задан ник: {name}");
+        }
+        Commands::React {
+            username,
+            peer,
+            message_id,
+            emoji,
+        } => {
+            cmd_react(
+                &cli.server_url,
+                &cli.reserve_server_urls,
+                &username,
+                &cli.db_path,
+                &peer,
+                &message_id,
+                &emoji,
             )
             .await?;
         }

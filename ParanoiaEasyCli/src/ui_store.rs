@@ -83,6 +83,23 @@ pub fn read_ui_profiles(
     pin: &str,
     selector: Option<&str>,
 ) -> Result<Vec<UiProfile>> {
+    unlock_ui_vault(app_data_root, pin)?;
+    let out = list_ui_profiles(app_data_root, selector)?;
+    if out.is_empty() {
+        bail!(
+            "в {} не найдено подходящих профилей{}",
+            app_data_root.join("profiles").display(),
+            selector
+                .map(|s| format!(" (фильтр: {s})"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(out)
+}
+
+/// Разлочить vault UI-клиента под `app_data_root` его PIN'ом (без чтения профилей).
+/// Делает то же переключение глобального vault, что и [`read_ui_profiles`].
+pub fn unlock_ui_vault(app_data_root: &Path, pin: &str) -> Result<()> {
     use paranoia_lib::local_vault;
 
     if !app_data_root.exists() {
@@ -102,13 +119,18 @@ pub fn read_ui_profiles(
         // После lock() сюда не попадём, но на всякий случай — уже разлочен, ок.
         local_vault::VaultStatus::Unlocked => {}
     }
+    Ok(())
+}
+
+/// Прочитать профили под УЖЕ разлоченным UI-vault. Пустой список — НЕ ошибка
+/// (свежий стор без профилей: после регистрации появятся). `selector` фильтрует
+/// по username / server_id / имени каталога.
+pub fn list_ui_profiles(app_data_root: &Path, selector: Option<&str>) -> Result<Vec<UiProfile>> {
+    use paranoia_lib::local_vault;
 
     let profiles_dir = app_data_root.join("profiles");
     if !profiles_dir.is_dir() {
-        bail!(
-            "нет каталога {} — в UI-сторе ещё нет профилей",
-            profiles_dir.display()
-        );
+        return Ok(Vec::new());
     }
 
     let mut out = Vec::new();
@@ -175,14 +197,117 @@ pub fn read_ui_profiles(
         });
     }
 
-    if out.is_empty() {
+    Ok(out)
+}
+
+// ── запись: device-key + создание профиля (для TUI «добавить профиль») ────────
+
+#[derive(Debug, Deserialize, Default)]
+struct UiDeviceKey {
+    #[serde(default)]
+    private_key_b64: String,
+}
+
+/// ECIES-приватный ключ устройства UI (32 байта) из `device_key.json`.
+/// Vault должен быть уже разлочен (см. [`unlock_ui_vault`]). Нужен для импорта
+/// зашифрованных экспортов (они адресованы device-pubkey этого устройства).
+pub fn ui_device_priv(app_data_root: &Path) -> Result<[u8; 32]> {
+    use paranoia_lib::local_vault;
+    let path = app_data_root.join("device_key.json");
+    if !path.exists() {
         bail!(
-            "в {} не найдено подходящих профилей{}",
-            profiles_dir.display(),
-            selector
-                .map(|s| format!(" (фильтр: {s})"))
-                .unwrap_or_default()
+            "{} не найден — запусти UI-клиент хотя бы раз (он создаёт device-ключ)",
+            path.display()
         );
     }
-    Ok(out)
+    let bytes = local_vault::decrypt_json_from_disk(&path)
+        .with_context(|| format!("decrypt {}", path.display()))?;
+    let dk: UiDeviceKey = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse {}", path.display()))?;
+    crate::validate_b64_32(&dk.private_key_b64, "device private key")
+}
+
+/// Публичный device-ключ UI-стора (base64) — на него адресуют экспорт.
+pub fn ui_device_pubkey_b64(app_data_root: &Path) -> Result<String> {
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
+    let priv_b = ui_device_priv(app_data_root)?;
+    let pubk = paranoia_lib::export::pubkey_from_private_key(&priv_b);
+    Ok(B64.encode(pubk))
+}
+
+/// Новый/импортируемый диалог для записи в `dialogs.json`.
+pub struct NewDialog {
+    pub peer: String,
+    pub peer_server_id: String,
+    pub local_name: String,
+    pub keyring: Vec<(u64, String)>,
+}
+
+/// Создать (или дополнить) профиль в UI-сторе: пишет `profiles/<pid>/client.json`
+/// и при наличии диалогов — `dialogs.json`, в том же зашифрованном vault-формате,
+/// что и UI-клиент. Vault должен быть разлочен. Возвращает profileId.
+///
+/// Диалоги мёржатся по `peerServerId` (существующие не дублируются). `paranoia.db`
+/// создаётся лениво при первом использовании клиентом.
+pub fn create_profile(
+    app_data_root: &Path,
+    server_url: &str,
+    username: &str,
+    private_key_b64: &str,
+    server_id: &str,
+    dialogs: &[NewDialog],
+) -> Result<String> {
+    use paranoia_lib::local_vault;
+
+    let pid = crate::dialogue_store::profile_id(server_url, server_id);
+    let dir = app_data_root.join("profiles").join(&pid);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create_dir_all {}", dir.display()))?;
+
+    let client = serde_json::json!({
+        "server": server_url,
+        "username": username,
+        "server_id": server_id,
+        "private_key": private_key_b64,
+    });
+    let client_bytes = serde_json::to_vec(&client).context("serialize client.json")?;
+    local_vault::encrypt_json_to_disk(&dir.join("client.json"), &client_bytes)
+        .context("write client.json")?;
+
+    if !dialogs.is_empty() {
+        let dpath = dir.join("dialogs.json");
+        let mut arr: Vec<serde_json::Value> = if dpath.exists() {
+            let b = local_vault::decrypt_json_from_disk(&dpath)
+                .with_context(|| format!("decrypt {}", dpath.display()))?;
+            serde_json::from_slice(&b).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for d in dialogs {
+            if d.peer_server_id.trim().is_empty() {
+                continue;
+            }
+            let exists = arr.iter().any(|v| {
+                v.get("peerServerId").and_then(|x| x.as_str()) == Some(d.peer_server_id.as_str())
+            });
+            if exists {
+                continue;
+            }
+            let keyring: Vec<serde_json::Value> = d
+                .keyring
+                .iter()
+                .map(|(s, k)| serde_json::json!({ "start_seq": s, "key": k }))
+                .collect();
+            arr.push(serde_json::json!({
+                "peer": d.peer,
+                "peerServerId": d.peer_server_id,
+                "localName": d.local_name,
+                "keyring": keyring,
+            }));
+        }
+        let b = serde_json::to_vec(&arr).context("serialize dialogs.json")?;
+        local_vault::encrypt_json_to_disk(&dpath, &b).context("write dialogs.json")?;
+    }
+
+    Ok(pid)
 }

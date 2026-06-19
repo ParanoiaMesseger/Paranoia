@@ -27,6 +27,9 @@ class MainBackend : public QObject
     /// "updated" (изменилось и применено), "error".
     Q_PROPERTY(QString maskingState READ maskingState NOTIFY maskingStateChanged)
     Q_PROPERTY(QString maskingProfileName READ maskingProfileName NOTIFY maskingStateChanged)
+    // Состояние связи с сервером для индикатора «Подключение»: "online" |
+    // "connecting" (поллинг не достучался — нет сети/сервер недоступен).
+    Q_PROPERTY(QString connectionState READ connectionState NOTIFY connectionStateChanged)
 
 public:
     explicit MainBackend(NotificationCoordinator &notifications, QObject *parent = nullptr);
@@ -42,6 +45,10 @@ public:
     int vaultStatus() const;
     QString maskingState() const { return m_maskingState; }
     QString maskingProfileName() const { return m_maskingProfileName; }
+    QString connectionState() const { return m_connectionState; }
+    /// Обновить состояние связи (зовётся из NotificationCoordinator по результату
+    /// форграунд-поллинга). online → "online", иначе "connecting".
+    void setConnectionOnline(bool online);
 
     Q_INVOKABLE void vaultSetPin(const QString &pin);
     Q_INVOKABLE void vaultUnlock(const QString &pin);
@@ -132,6 +139,25 @@ public:
     /// Серверную дерегистрацию НЕ делает. Если удалён активный — переключает на
     /// другой профиль, а если их не осталось — переводит в состояние «не залогинен».
     Q_INVOKABLE void deleteProfile(const QString &profileId);
+
+    // ── Настройки профиля (локальные: ник/аватар в манифесте) ──
+    /// Ник профиля — локальный алиас, показывается в пикере вместо server_id.
+    Q_INVOKABLE void setProfileLocalName(const QString &profileId, const QString &name);
+    /// Аватар профиля из файла/URI (квадрат 64×64, круг запекается в PNG).
+    Q_INVOKABLE bool setProfileAvatar(const QString &profileId, const QString &fileUrl);
+    Q_INVOKABLE void clearProfileAvatar(const QString &profileId);
+    /// Поля для экрана настроек профиля (server/serverId/username/ник/аватар/резерв).
+    Q_INVOKABLE QVariantMap getProfileInfo(const QString &profileId) const;
+    /// Ник активного профиля (localName, иначе username) — единое отображаемое имя.
+    Q_INVOKABLE QString activeProfileDisplayName() const;
+    /// Аватар активного профиля как data:-URL (пусто, если не задан).
+    Q_INVOKABLE QString activeProfileAvatar() const;
+    /// Сменить первичный адрес сервера профиля (переезд на другой домен). Т.к.
+    /// profileId = SHA256(адрес+serverId), меняется и id → каталог профиля
+    /// мигрируется (диалоги/ключи/БД сохраняются), затем профиль перелогинивается.
+    /// Возвращает {ok:true} или {error:"..."}. ВНИМАНИЕ: profileId после успеха
+    /// меняется — UI должен вернуться к списку профилей.
+    Q_INVOKABLE QVariantMap changeProfileServer(const QString &profileId, const QString &newServerUrl);
 
     Q_INVOKABLE void deleteDialogLocal(const QString &peer);
     /// Очистить диалог: удалить всю историю и на сервере, и локально, оставив
@@ -251,6 +277,7 @@ signals:
     /// диалогов, сообщение.
     void corporateSyncFinished(bool ok, int updated, const QString &message);
     void maskingStateChanged();
+    void connectionStateChanged();
     /// Результат применения/сверки маскировки. ok, сообщение для UI.
     void maskingApplied(bool ok, const QString &message);
 
@@ -261,6 +288,7 @@ private:
     QString m_devicePrivkey;
     bool m_hasStoredClientProfiles = false;
     QString m_maskingState;
+    QString m_connectionState = QStringLiteral("online");
     QString m_maskingProfileName;
     void setHasStoredClientProfiles(bool hasProfiles);
     void setMaskingState(const QString &state, const QString &profileName = {});
