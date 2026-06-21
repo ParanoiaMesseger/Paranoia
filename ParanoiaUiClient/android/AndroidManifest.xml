@@ -58,7 +58,15 @@
              ParanoiaActivity.java, добивает зависший Qt-shutdown). И иконка
              лаунчера, и тап по уведомлению целятся прямо в неё (см.
              openAppIntent): Qt — singleton на процесс, любой activity-trampoline,
-             роняющий QtActivity в отдельную task, приводит к зависанию. -->
+             роняющий QtActivity в отдельную task, приводит к зависанию.
+
+             ⚠️ launchMode ОБЯЗАТЕЛЬНО singleTop, НЕ singleTask: Qt for Android
+             официально не поддерживает singleTask/singleInstance — реюз task'и при
+             живом/полумёртвом процессе даёт НЕУБИВАЕМЫЙ БЕЛЫЙ ЭКРАН на входе
+             (проверено: пробовали singleTask ради share-into-live-process — вернул
+             белый экран). share-warm (без PIN в живой процесс) надо решать иначе,
+             не через launchMode. Второй QtActivity-инстанс добивает watchdog
+             (ParanoiaActivity.onDestroy). -->
         <activity
             android:name="app.paranoia.client.ParanoiaActivity"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
@@ -72,11 +80,28 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Share-target: позволяем приложениям отправлять в Paranoia
-                 текст, изображения, видео и любые файлы через системный
-                 share-sheet. ParanoiaActivity.onCreate/onNewIntent читает
-                 Intent.EXTRA_TEXT / EXTRA_STREAM и сохраняет в shared
-                 prefs до открытия чата (см. ParanoiaAndroidUtils.takeShareTarget). -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="-- %%INSERT_APP_LIB_NAME%% --" />
+
+            <meta-data
+                android:name="android.app.arguments"
+                android:value="-- %%INSERT_APP_ARGUMENTS%% --" />
+        </activity>
+
+        <!-- Share-target живёт в ОТДЕЛЬНОЙ лёгкой не-Qt Activity (ShareActivity):
+             ловит ACTION_SEND/SEND_MULTIPLE, кладёт payload в prefs и запускает
+             launcher-intent (переиспользует живой ParanoiaActivity через onNewIntent,
+             как тап по иконке). Так нет второго QtActivity-инстанса/нового процесса
+             с залоченным vault'ом. taskAffinity="" + excludeFromRecents + noHistory +
+             Translucent.NoTitleBar — трамплин не светится и не оставляет следа. -->
+        <activity
+            android:name="app.paranoia.client.ShareActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -107,14 +132,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
-
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="-- %%INSERT_APP_LIB_NAME%% --" />
-
-            <meta-data
-                android:name="android.app.arguments"
-                android:value="-- %%INSERT_APP_ARGUMENTS%% --" />
         </activity>
 
         <service

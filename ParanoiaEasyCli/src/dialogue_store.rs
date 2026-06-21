@@ -28,6 +28,10 @@ pub struct ProfileDialogueStore {
     /// рантайм-стором (его пишет импорт профиля). Пусто — резолв по имени недоступен.
     #[serde(default)]
     pub names: HashMap<String, String>,
+    /// Локальный ник самого профиля (для выбора профиля в TUI по имени, а не
+    /// по hex-server_id). Задаётся `profile-name`. Пусто — показываем server_id.
+    #[serde(default)]
+    pub local_name: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +81,19 @@ pub fn profile_id(server_url: &str, username: &str) -> String {
     hasher.update(b"\n");
     hasher.update(username.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Задать локальный ник профиля (для выбора в TUI). Ищем по username (server_id) —
+/// он уникален; профиль должен уже существовать в сторе.
+pub fn set_profile_local_name(username: &str, name: &str) -> Result<()> {
+    let mut store = load_dialogue_store()?;
+    let p = store
+        .profiles
+        .values_mut()
+        .find(|p| p.username == username)
+        .with_context(|| format!("профиль с username={username} не найден в сторе"))?;
+    p.local_name = name.trim().to_string();
+    save_dialogue_store(&store)
 }
 
 /// Разрешить `peer` (имя ИЛИ hex-server_id) в server_id через профильный

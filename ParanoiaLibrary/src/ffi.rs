@@ -34,6 +34,41 @@ macro_rules! ffi_try {
     };
 }
 
+// ── Завершение процесса: отмена in-flight long-poll'ов ───────────────────────
+// При выходе клиента рабочие QThread'ы могут висеть в блокирующем long-poll
+// (call/poll и notify держатся на сервере до 25-30с). Если поток не успевает
+// завершиться, его QThread-деструктор абортит процесс ("QThread: Destroyed while
+// thread is still running", SIGABRT). C++ зовёт `paranoia_begin_shutdown()` на
+// aboutToQuit → флаг взводится → `race_shutdown` роняет in-flight long-poll'ы
+// (future дропается, reqwest рвёт соединение) → потоки джойнятся мгновенно.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_begin_shutdown() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Гонка long-poll-future против флага завершения. `Some(_)` — future завершился
+/// штатно; `None` — взведён shutdown (future отменён).
+pub(crate) async fn race_shutdown<F: std::future::Future>(fut: F) -> Option<F::Output> {
+    use std::sync::atomic::Ordering;
+    // Быстрый путь: уже завершаемся — даже не начинаем сетевой вызов.
+    if SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return None;
+    }
+    tokio::select! {
+        r = fut => Some(r),
+        _ = async {
+            loop {
+                if SHUTTING_DOWN.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        } => None,
+    }
+}
+
 // ── Thread-local хранилище последней ошибки ──────────────────────────────────
 
 thread_local! {
@@ -1294,16 +1329,23 @@ pub extern "C" fn paranoia_notify_count_wait_keyring(
             user_b,
             keyring_json,
             -1,
-            |h, dialogue| match h.rt.block_on(dialogue.notify_count_wait(long_poll_ms)) {
-                Ok(count) => {
+            |h, dialogue| match h
+                .rt
+                .block_on(race_shutdown(dialogue.notify_count_wait(long_poll_ms)))
+            {
+                Some(Ok(count)) => {
                     unsafe { *out_count = count };
                     0
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     set_last_error(&classify_network_error(
                         &anyhow_error_chain(&e),
                         "notify_error",
                     ));
+                    -1
+                }
+                None => {
+                    set_last_error("shutdown");
                     -1
                 }
             },

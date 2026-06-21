@@ -263,7 +263,12 @@ private:
     void finishVoiceRecording(bool send);
     void setVoiceRecording(bool on);
 
-    void loadHistory(const QString &peer);
+    // clearCache=true (открытие диалога) — полная пересборка кэша из истории.
+    // clearCache=false (апдейты: read-receipts/arrived, готовность превью,
+    // сохранение вложения) — МЕРЖ свежей истории в существующий кэш через
+    // appendMessages БЕЗ очистки: статусы обновляются на месте, реакции/ключи
+    // строк сохраняются, лента не пересобирается на каждый апдейт.
+    void loadHistory(const QString &peer, bool clearCache = true);
     void appendMessages(const QString &peer, const QVariantList &messages);
     void beginMessagesLoading();
     void endMessagesLoading();

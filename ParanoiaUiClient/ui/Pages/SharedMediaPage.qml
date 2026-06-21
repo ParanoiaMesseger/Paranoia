@@ -19,6 +19,10 @@ Rectangle {
     property var fileItems: []    // [{id,name,size,mime,ts}]
     property var linkItems: []    // [{url,ts,id,snippet}]
 
+    // «Перейти к вложению в самом диалоге» — обрабатывается в ChatPage (закрывает
+    // галерею, скроллит ленту к сообщению и подсвечивает его).
+    signal jumpToMessageRequested(string messageId)
+
     // Превью, уже расшифрованные в провайдер (id → true). Заполняется по сигналу
     // galleryPreviewReady; переприсваивание объекта → обновление source плиток.
     property var readyIds: ({})
@@ -445,6 +449,52 @@ Rectangle {
                                     root.toggleSel(modelData.id)
                                 }
                             }
+
+                            // Размер вложения — правый нижний угол.
+                            Rectangle {
+                                visible: !root.selectMode && (modelData.size || 0) > 0
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                anchors.margins: 4
+                                radius: 4
+                                color: "#99000000"
+                                width: sizeLabel.implicitWidth + 8
+                                height: sizeLabel.implicitHeight + 4
+                                Text {
+                                    id: sizeLabel
+                                    anchors.centerIn: parent
+                                    text: root.fileSize(modelData.size)
+                                    color: "#FFFFFF"
+                                    font.pixelSize: Theme.fontXs
+                                    font.family: Theme.fontFamily
+                                }
+                            }
+
+                            // Перейти к вложению в диалоге — правый верхний угол
+                            // (вне режима выделения; там же, где галочка выбора).
+                            Rectangle {
+                                visible: !root.selectMode
+                                anchors.top: parent.top
+                                anchors.right: parent.right
+                                anchors.margins: 6
+                                width: 26; height: 26
+                                radius: 13
+                                color: gotoMediaArea.containsMouse ? Theme.accent : "#80000000"
+                                AppIcon {
+                                    anchors.centerIn: parent
+                                    width: 15; height: 15
+                                    name: "goto"
+                                    iconColor: "#FFFFFF"
+                                    strokeWidth: 2
+                                }
+                                MouseArea {
+                                    id: gotoMediaArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.jumpToMessageRequested(modelData.messageId || modelData.id)
+                                }
+                            }
                         }
                     }
                 }
@@ -558,6 +608,31 @@ Rectangle {
                                 root.toggleSel(modelData.id)
                             }
                         }
+
+                        // Перейти к файлу в диалоге (слева от иконки скачивания).
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.right: parent.right
+                            anchors.rightMargin: 56
+                            width: 34; height: 34
+                            radius: Theme.radiusSm
+                            visible: !root.selectMode
+                            color: gotoFileArea.containsMouse ? Theme.bgButton : "transparent"
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 18; height: 18
+                                name: "goto"
+                                iconColor: Theme.textSecondary
+                                strokeWidth: 2
+                            }
+                            MouseArea {
+                                id: gotoFileArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.jumpToMessageRequested(modelData.id)
+                            }
+                        }
                     }
                 }
             }
@@ -615,7 +690,7 @@ Rectangle {
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.leftMargin: 14
-                            anchors.rightMargin: root.selectMode ? 50 : 14
+                            anchors.rightMargin: 50
                             spacing: 4
 
                             Text {
@@ -665,6 +740,32 @@ Rectangle {
                             onPressAndHold: {
                                 root.selectMode = true
                                 root.toggleSel(modelData.id)
+                            }
+                        }
+
+                        // Перейти к сообщению со ссылкой в диалоге.
+                        Rectangle {
+                            anchors.right: parent.right
+                            anchors.rightMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 28; height: 28
+                            radius: Theme.radiusSm
+                            visible: !root.selectMode
+                            z: 2
+                            color: gotoLinkArea.containsMouse ? Theme.bgButton : "transparent"
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 16; height: 16
+                                name: "goto"
+                                iconColor: Theme.textSecondary
+                                strokeWidth: 2
+                            }
+                            MouseArea {
+                                id: gotoLinkArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.jumpToMessageRequested(modelData.id)
                             }
                         }
                     }

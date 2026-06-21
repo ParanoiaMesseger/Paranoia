@@ -1350,6 +1350,14 @@ void MainBackend::setMaskingState(const QString &state, const QString &profileNa
     if (changed) emit maskingStateChanged();
 }
 
+void MainBackend::setConnectionOnline(bool online)
+{
+    const QString next = online ? QStringLiteral("online") : QStringLiteral("connecting");
+    if (m_connectionState == next) return;
+    m_connectionState = next;
+    emit connectionStateChanged();
+}
+
 QVariantMap MainBackend::activeMaskingConfig() const
 {
     const auto session = SessionStore::instance()->activeSession();
@@ -1776,6 +1784,44 @@ void MainBackend::selfDestruct()
 
 // ── Локальные имя / аватар диалога ────────────────────────────────────────────
 
+namespace
+{
+    // Превратить выбранный файл изображения в base64 PNG: квадрат 64×64
+    // (cover+crop по центру), КРУГ запекается прямо в PNG (антиалиасинг,
+    // прозрачные углы) → UI рисует готовый кружок обычным Image без QML-маски.
+    // Пусто при ошибке. content:// резолвится во временную копию, удаляем после.
+    QString bakeCircleAvatarBase64(const QString &fileUrl)
+    {
+        const bool isContentUri = fileUrl.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
+        const QString localPath = Utils::resolveImportPath(fileUrl);
+        if (localPath.isEmpty()) return {};
+        QImage img(localPath);
+        if (isContentUri) QFile::remove(localPath);
+        if (img.isNull()) return {};
+
+        constexpr int kSide = 64;
+        const QImage scaled = img.scaled(kSide, kSide, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        const QImage square = scaled.copy((scaled.width() - kSide) / 2, (scaled.height() - kSide) / 2, kSide, kSide);
+        QImage circular(kSide, kSide, QImage::Format_ARGB32_Premultiplied);
+        circular.fill(Qt::transparent);
+        {
+            QPainter painter(&circular);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            QPainterPath clip;
+            clip.addEllipse(0.5, 0.5, kSide - 1.0, kSide - 1.0);
+            painter.setClipPath(clip);
+            painter.drawImage(0, 0, square);
+        }
+        QByteArray png;
+        QBuffer buf(&png);
+        buf.open(QIODevice::WriteOnly);
+        if (!circular.save(&buf, "PNG")) return {};
+        buf.close();
+        return QString::fromLatin1(png.toBase64());
+    }
+}
+
 void MainBackend::setDialogLocalName(const QString &peer, const QString &name)
 {
     auto session = SessionStore::instance()->activeSession();
@@ -1795,45 +1841,11 @@ bool MainBackend::setDialogAvatar(const QString &peer, const QString &fileUrl)
     if (!session) return false;
     Dialog *dlg = session->findDialog(peer);
     if (!dlg) return false;
-
-    const bool isContentUri = fileUrl.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
-    const QString localPath = Utils::resolveImportPath(fileUrl);
-    if (localPath.isEmpty()) return false;
-    QImage img(localPath);
-    // content:// резолвится во временную копию в кэше — удаляем после чтения
-    // (file:// — это пользовательский файл, его НЕ трогаем).
-    if (isContentUri) QFile::remove(localPath);
-    if (img.isNull()) return false;
-
-    // Квадрат 64×64: cover по меньшей стороне + кроп по центру.
-    constexpr int kSide = 64;
-    const QImage scaled = img.scaled(kSide, kSide, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-    const QImage square = scaled.copy((scaled.width() - kSide) / 2, (scaled.height() - kSide) / 2, kSide, kSide);
-
-    // КРУГ ЗАПЕКАЕМ В САМ PNG (антиалиасинг, прозрачные углы) — чтобы UI показывал
-    // готовый кружок ОБЫЧНЫМ Image, БЕЗ QML-маски/MultiEffect. Прежний вариант с
-    // `layer.enabled:true`-маской создавал ShaderEffectSource/FBO на КАЖДУЮ строку
-    // списка и хедер даже без аватара → на реальном GPU/Wayland это вешало UI при
-    // входе в любой диалог (offscreen/софт-рендер не воспроизводил). См. memory.
-    QImage circular(kSide, kSide, QImage::Format_ARGB32_Premultiplied);
-    circular.fill(Qt::transparent);
-    {
-        QPainter painter(&circular);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        QPainterPath clip;
-        clip.addEllipse(0.5, 0.5, kSide - 1.0, kSide - 1.0);
-        painter.setClipPath(clip);
-        painter.drawImage(0, 0, square);
-    }
-
-    QByteArray png;
-    QBuffer buf(&png);
-    buf.open(QIODevice::WriteOnly);
-    if (!circular.save(&buf, "PNG")) return false;
-    buf.close();
-
-    dlg->avatar = QString::fromLatin1(png.toBase64());
+    // Круг запекается в PNG обычным Image без QML-маски (прежний вариант с
+    // layer.enabled-маской создавал FBO на каждую строку → вешал UI; см. memory).
+    const QString b64 = bakeCircleAvatarBase64(fileUrl);
+    if (b64.isEmpty()) return false;
+    dlg->avatar = b64;
     session->saveDialogs();
     emit dialogsChanged();
     return true;
@@ -1857,6 +1869,153 @@ void MainBackend::clearDialogAvatar(const QString &peer)
     dlg->avatar.clear();
     session->saveDialogs();
     emit dialogsChanged();
+}
+
+// ── Настройки профиля: ник / аватар (локальные, в манифесте профилей) ──────────
+
+void MainBackend::setProfileLocalName(const QString &profileId, const QString &name)
+{
+    if (profileId.isEmpty()) return;
+    if (!Utils::updateProfileManifestEntry(profileId, QJsonObject{{"localName", name.trimmed()}})) return;
+    emit sessionsChanged();
+}
+
+bool MainBackend::setProfileAvatar(const QString &profileId, const QString &fileUrl)
+{
+    if (profileId.isEmpty()) return false;
+    const QString b64 = bakeCircleAvatarBase64(fileUrl);
+    if (b64.isEmpty()) return false;
+    if (!Utils::updateProfileManifestEntry(profileId, QJsonObject{{"avatar", b64}})) return false;
+    emit sessionsChanged();
+    return true;
+}
+
+void MainBackend::clearProfileAvatar(const QString &profileId)
+{
+    if (profileId.isEmpty()) return;
+    if (!Utils::updateProfileManifestEntry(profileId, QJsonObject{{"avatar", QString()}})) return;
+    emit sessionsChanged();
+}
+
+QVariantMap MainBackend::getProfileInfo(const QString &profileId) const
+{
+    const QJsonObject entry = Utils::profileManifestEntry(profileId);
+    const QString localName = entry.value("localName").toString().trimmed();
+    const QString avatar    = entry.value("avatar").toString();
+    QString server          = entry.value("server").toString();
+    QString username        = entry.value("username").toString();
+    QString serverId;
+    QVariantList reserve;
+    // server_id и резерв живут только в загруженной сессии; для незагруженного
+    // профиля отдаём что есть из манифеста (server/username), остальное пусто.
+    if (const auto session = SessionStore::instance()->sessionForProfile(profileId)) {
+        server   = session->server;
+        username = session->username;
+        serverId = session->serverId;
+        reserve  = Utils::stringListToJsonArray(session->reserveServerUrls).toVariantList();
+    }
+    return QVariantMap{
+        {"profileId", profileId},
+        {"server", server},
+        {"serverId", serverId},
+        {"username", username},
+        {"localName", localName},
+        {"avatar", avatar.isEmpty() ? QString() : (QStringLiteral("data:image/png;base64,") + avatar)},
+        {"reserveServerUrls", reserve},
+    };
+}
+
+QString MainBackend::activeProfileDisplayName() const
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const QString localName = Utils::profileManifestEntry(session->profileId).value("localName").toString().trimmed();
+    return localName.isEmpty() ? session->username : localName;
+}
+
+QString MainBackend::activeProfileAvatar() const
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const QString avatar = Utils::profileManifestEntry(session->profileId).value("avatar").toString();
+    return avatar.isEmpty() ? QString() : (QStringLiteral("data:image/png;base64,") + avatar);
+}
+
+QVariantMap MainBackend::changeProfileServer(const QString &profileId, const QString &newServerUrl)
+{
+    if (profileId.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Не указан профиль."));
+    auto *store        = SessionStore::instance();
+    const auto session = store->sessionForProfile(profileId);
+    if (!session) return ParanoiaFFI::errorResult(MainBackend::tr("Профиль не загружен."));
+
+    const QString newServer = Utils::normalizedServerUrl(newServerUrl.trimmed());
+    if (newServer.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Неверный адрес сервера."));
+    if (Utils::normalizedServerUrl(session->server) == newServer)
+        return QVariantMap{{"ok", true}, {"unchanged", true}};
+
+    // serverId (личность) при переезде НЕ меняется — меняется только адрес.
+    const QString serverId     = session->serverId;
+    const QString privateKey   = session->private_key;
+    const QString username      = session->username;
+    const QString oldServer     = session->server;
+    const QStringList reserves   = session->reserveServerUrls;
+    const QString newProfileId   = Utils::profileIdFor(newServer, serverId);
+    if (newProfileId == profileId)
+        return ParanoiaFFI::errorResult(MainBackend::tr("Адрес совпадает с текущим."));
+
+    // Уже есть профиль на этом адресе для той же личности — не затираем.
+    if (!Utils::profileManifestEntry(newProfileId).isEmpty()
+        || QDir(Paths::profileDir(newProfileId).absolutePath()).exists())
+        return ParanoiaFFI::errorResult(MainBackend::tr("Профиль для этого адреса уже существует."));
+
+    const bool wasActive       = (store->activeSession() == session);
+    const QJsonObject oldEntry = Utils::profileManifestEntry(profileId);
+    const QString localName    = oldEntry.value("localName").toString();
+    const QString avatar       = oldEntry.value("avatar").toString();
+    const QStringList reservesForNew = Utils::normalizedServerUrls(reserves, newServer);
+
+    // 1) Снять сессию — освобождает FFI-handle и закрывает SQLCipher-БД старого
+    //    каталога (иначе перенос/повторное открытие на новом пути небезопасны).
+    if (wasActive) store->setActiveSession({});
+    store->removeSession(session);
+
+    // 2) Перенести каталог профиля old → new (диалоги/ключи/БД/вложения целиком).
+    const QString oldDir = Paths::profileDir(profileId).absolutePath();
+    const QString newDir = Paths::profileDir(newProfileId).absolutePath();
+    if (!QDir().rename(oldDir, newDir)) {
+        // Каталог не тронут → возвращаем профиль как был (релогин на старый адрес).
+        loginClientInternal(oldServer, username, privateKey, reserves, wasActive, false, QJsonObject{});
+        return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось перенести данные профиля."));
+    }
+
+    // 3) Манифест: убрать старую запись, создать новую (с переносом ника/аватара).
+    {
+        QJsonObject manifest = Utils::loadProfilesManifest();
+        QJsonArray kept;
+        for (const auto &v : manifest.value("profiles").toArray())
+            if (v.toObject().value("id").toString() != profileId) kept.append(v);
+        manifest["profiles"] = kept;
+        if (manifest.value("last_profile_id").toString() == profileId)
+            manifest["last_profile_id"] = QString();
+        Utils::writeJsonObjectFile(Paths::profilesManifest(), manifest);
+    }
+    Utils::upsertProfileManifest(newProfileId, newServer, username, wasActive);
+    QJsonObject carry;
+    if (!localName.isEmpty()) carry["localName"] = localName;
+    if (!avatar.isEmpty()) carry["avatar"] = avatar;
+    if (!carry.isEmpty()) Utils::updateProfileManifestEntry(newProfileId, carry);
+
+    // 4) Переписать client.json мигрированного каталога на новый адрес (маскировку
+    //    и прочие метаданные saveClientConfigForProfile сохраняет).
+    const QStringList turn = turnUrlsFromObject(Utils::readJsonObjectFile(Paths::profileClient(newProfileId)));
+    ServerSession::saveClientConfigForProfile(newProfileId, newServer, username, serverId, privateKey,
+                                              reservesForNew, turn);
+
+    // 5) Перелогин на новый адрес: каталог уже на месте → диалоги/ключи подхватятся;
+    //    финальный upsert манифеста сохранит уже записанные ник/аватар.
+    loginClientInternal(newServer, username, privateKey, reservesForNew, wasActive, false, QJsonObject{});
+    emit sessionsChanged();
+    return QVariantMap{{"ok", true}, {"newProfileId", newProfileId}};
 }
 
 // ── Export / Import ───────────────────────────────────────────────────────────
@@ -2008,19 +2167,44 @@ QVariantMap MainBackend::importProfile(const QString &filePath, bool activate)
     QStringList activateReserveServerUrls;
     const auto mergeKeyringEntry = [](QList<Dialog> &dialogs, const QString &peer, const QString &peerServerId,
                                       const QByteArray &key, quint64 startSeq) -> int {
-        for (auto &dlg : dialogs) {
-            if (dlg.peer != peer) continue;
-            if (dlg.peerServerId.isEmpty() && !peerServerId.isEmpty()) dlg.peerServerId = peerServerId;
-            for (const auto &entry : dlg.keyring) {
+        // Резолв по СТАБИЛЬНОМУ peerServerId (метки могут совпадать у разных
+        // собеседников — см. upsertDialogKeyringEntry), фолбэк по метке только
+        // для диалогов без конфликтующего server_id — чтобы импорт не «угнал»
+        // чужой диалог с его локальным именем/аватаром.
+        Dialog *target = nullptr;
+        if (!peerServerId.isEmpty())
+            for (auto &dlg : dialogs)
+                if (dlg.peerServerId == peerServerId) { target = &dlg; break; }
+        if (!target)
+            for (auto &dlg : dialogs)
+                if (dlg.peer == peer && (dlg.peerServerId.isEmpty() || dlg.peerServerId == peerServerId)) {
+                    target = &dlg;
+                    break;
+                }
+        if (target) {
+            if (target->peerServerId.isEmpty() && !peerServerId.isEmpty()) target->peerServerId = peerServerId;
+            for (const auto &entry : target->keyring) {
                 if (entry.startSeq != startSeq) continue;
                 return entry.key == key ? 0 : -1;
             }
-            dlg.keyring.append({startSeq, key});
-            std::sort(dlg.keyring.begin(), dlg.keyring.end(),
+            target->keyring.append({startSeq, key});
+            std::sort(target->keyring.begin(), target->keyring.end(),
                       [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
             return 1;
         }
-        dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, key}}, QString(), QString()});
+        QString label = peer;
+        auto labelTaken = [&dialogs](const QString &candidate) {
+            for (const auto &d : dialogs)
+                if (d.peer == candidate) return true;
+            return false;
+        };
+        if (labelTaken(label)) {
+            const QString suffix = peerServerId.left(6);
+            label = suffix.isEmpty() ? label : QStringLiteral("%1 (%2)").arg(peer, suffix);
+            for (int n = 2; labelTaken(label); ++n)
+                label = QStringLiteral("%1 (%2)").arg(peer, QString::number(n));
+        }
+        dialogs.append({label, peerServerId, QList<DialogKeyEntry>{{startSeq, key}}, QString(), QString()});
         return 1;
     };
     if (allowClientImport) {
@@ -2290,27 +2474,60 @@ void MainBackend::upsertDialogKeyringEntry(const QString &peer, const QString &p
     auto session = SessionStore::instance()->activeSession();
     if (!session) return;
     auto &dialogs = session->dialogs;
-    for (auto &d : dialogs) {
-        if (d.peer == peer) {
-            if (!peerServerId.isEmpty()) d.peerServerId = peerServerId;
-            if (resetKeyring) d.keyring.clear();
-            bool replaced = false;
-            for (auto &entry : d.keyring)
-                if (entry.startSeq == startSeq) {
-                    entry.key = sessionKey;
-                    replaced  = true;
-                    break;
-                }
-            if (!replaced) { d.keyring.append({startSeq, sessionKey}); }
-            std::sort(d.keyring.begin(), d.keyring.end(),
-                      [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
-            emit dialogsChanged();
-            session->saveDialogs();
-            m_notifications->schedulePoll();
-            return;
-        }
+
+    // Идентичность диалога на сервере — это peerServerId (стабилен), а НЕ метка
+    // `peer` (пользователь её меняет, и она может совпасть у разных собеседников,
+    // в т.ч. с ФИО из корп-роster или зарезервированным «Избранное»). Поэтому
+    // СНАЧАЛА ищем диалог по peerServerId. Иначе при совпадении меток ключи,
+    // локальное имя и аватар «перескакивают» на чужой диалог.
+    Dialog *target = session->findDialogByServerId(peerServerId);
+    // Фолбэк по метке — только для диалогов БЕЗ привязанного server_id
+    // (например, заведён вручную до обмена ключами). Диалог с ДРУГИМ непустым
+    // peerServerId не трогаем — это и есть защита от «угона».
+    if (!target) {
+        for (auto &d : dialogs)
+            if (d.peer == peer && (d.peerServerId.isEmpty() || d.peerServerId == peerServerId)) {
+                target = &d;
+                break;
+            }
     }
-    dialogs.append({peer, peerServerId, QList<DialogKeyEntry>{{startSeq, sessionKey}}, QString(), QString()});
+
+    if (target) {
+        if (!peerServerId.isEmpty()) target->peerServerId = peerServerId;
+        if (resetKeyring) target->keyring.clear();
+        bool replaced = false;
+        for (auto &entry : target->keyring)
+            if (entry.startSeq == startSeq) {
+                entry.key = sessionKey;
+                replaced  = true;
+                break;
+            }
+        if (!replaced) { target->keyring.append({startSeq, sessionKey}); }
+        std::sort(target->keyring.begin(), target->keyring.end(),
+                  [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
+        emit dialogsChanged();
+        session->saveDialogs();
+        m_notifications->schedulePoll();
+        return;
+    }
+
+    // Новый диалог. Метка `peer` — это сквозной ключ маршрутизации в UI
+    // (сообщения/черновики/звонки/уведомления), поэтому она ОБЯЗАНА быть
+    // уникальной: при коллизии с уже существующим (другим) собеседником
+    // дизамбигуируем меткой, иначе два разных диалога станут неотличимы.
+    QString label = peer;
+    auto labelTaken = [&dialogs](const QString &candidate) {
+        for (const auto &d : dialogs)
+            if (d.peer == candidate) return true;
+        return false;
+    };
+    if (labelTaken(label)) {
+        const QString suffix = peerServerId.left(6);
+        label = suffix.isEmpty() ? label : QStringLiteral("%1 (%2)").arg(peer, suffix);
+        for (int n = 2; labelTaken(label); ++n)
+            label = QStringLiteral("%1 (%2)").arg(peer, QString::number(n));
+    }
+    dialogs.append({label, peerServerId, QList<DialogKeyEntry>{{startSeq, sessionKey}}, QString(), QString()});
     emit dialogsChanged();
     session->saveDialogs();
     m_notifications->schedulePoll();
@@ -2323,11 +2540,21 @@ QVariantList MainBackend::getSessionList() const
     const auto activeSession = SessionStore::instance()->activeSession();
     QVariantList result;
     for (const auto &session : SessionStore::instance()->allSessions()) {
+        // Ник и аватар профиля — локальные, лежат в манифесте (не секрет, правятся
+        // из «Настроек профиля»). username хранит server_id (легаси) и в пикере
+        // показывается лишь как фолбэк, если ник не задан.
+        const QJsonObject entry = Utils::profileManifestEntry(session->profileId);
+        const QString localName = entry.value("localName").toString().trimmed();
+        const QString avatar    = entry.value("avatar").toString();
         result.append(QVariantMap{
             {"profileId", session->profileId},
             {"server", session->server},
+            {"serverId", session->serverId},
             {"reserveServerUrls", Utils::stringListToJsonArray(session->reserveServerUrls).toVariantList()},
             {"username", session->username},
+            {"localName", localName},
+            {"displayName", localName.isEmpty() ? session->username : localName},
+            {"avatar", avatar.isEmpty() ? QString() : (QStringLiteral("data:image/png;base64,") + avatar)},
             {"isActive", session == activeSession},
             {"totalUnread", m_notifications->totalUnreadForProfile(session->profileId)},
         });

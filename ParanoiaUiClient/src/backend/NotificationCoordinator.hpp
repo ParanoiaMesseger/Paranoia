@@ -46,6 +46,9 @@ signals:
     void notificationHintPeerChanged();
     void dialogsChanged();
     void networkRestored();
+    // Результат форграунд-поллинга: достучались (online) или нет (нет сети/сервер
+    // недоступен) — для индикатора «Подключение» в UI.
+    void connectivityChanged(bool online);
     void sessionReset();
     void sessionSwitched();
 

@@ -20,6 +20,11 @@ public:
     bool isLoggedIn() const;
     Dialog *findDialog(const QString &peer);
     const Dialog *findDialog(const QString &peer) const;
+    // Поиск по СТАБИЛЬНОМУ идентификатору собеседника на сервере. В отличие от
+    // метки `peer` (её пользователь меняет и она может совпасть у разных
+    // собеседников) peerServerId уникален — на нём держится корректная
+    // привязка ключей/имени/аватара. Пустой serverId не матчит ничего.
+    Dialog *findDialogByServerId(const QString &serverId);
     void saveDialogs() const;
     void loadDialogs();
     void saveClientConfig() const;

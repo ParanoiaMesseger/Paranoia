@@ -294,16 +294,21 @@ void NotificationCoordinator::pollNotifications(PollMode mode)
         for (const auto &target : targets) {
             uint64_t count    = 0;
             const QString key = target.profileId + QLatin1Char(':') + target.peer;
+            // Копируем handle под МГНОВЕННЫМ локом, сам сетевой poll делаем БЕЗ
+            // ffiMutex (как ActiveChatNotifier): иначе при потере сети connect_timeout
+            // висел бы под общим локом и морозил весь UI (см. фикс «намертво»).
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&target.session->ffiMutex);
-                if (!target.session->ffi) continue;
-                const int rc = target.session->ffi->notify_unread_count_keyring(target.session->serverId, target.peerServerId,
-                                                                         target.keyringJson, count);
-                if (rc != 0) {
-                    anyFailed = true;
-                    if (error.isEmpty()) error = ParanoiaFFI::last_error();
-                    continue;
-                }
+                ffi = target.session->ffi;
+            }
+            if (!ffi) continue;
+            const int rc = ffi->notify_unread_count_keyring(target.session->serverId, target.peerServerId,
+                                                            target.keyringJson, count);
+            if (rc != 0) {
+                anyFailed = true;
+                if (error.isEmpty()) error = ParanoiaFFI::last_error();
+                continue;
             }
             counts.append({key, target.profileId, target.peer, static_cast<quint64>(count)});
         }
@@ -404,6 +409,8 @@ void NotificationCoordinator::applyNotifyCounts(PollMode mode, const QList<Notif
     }
     if (pendingChanged) emit dialogsChanged();
     if (hasNewPending) presentNotification(mode, total, hintProfileId, hintPeer);
+    // Индикатор связи — только по форграунд-поллингу (фон не должен дёргать UI).
+    if (mode == PollMode::Foreground) emit connectivityChanged(!anyFailed);
     if (anyFailed) {
         qWarning().noquote() << "Notify polling failed for some sessions:" << error;
         ++m_notifyRetryCount;
@@ -526,12 +533,16 @@ void NotificationCoordinator::runBackgroundPollFromService()
             const QString peersJson =
                 QString::fromUtf8(QJsonDocument(peers).toJson(QJsonDocument::Compact));
 
-            QString callJson;
+            // Long-poll БЕЗ удержания ffiMutex: 30с под общим локом морозили весь UI
+            // (отправка/приём/маскировка вставали в очередь). Копируем handle на миг,
+            // сетевой вызов — без лока (callPoll сетевой, без записи в БД).
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&target.session->ffiMutex);
-                if (!target.session->ffi) continue;
-                callJson = target.session->ffi->callPoll(user, peersJson, 30000);
+                ffi = target.session->ffi;
             }
+            if (!ffi) continue;
+            const QString callJson = ffi->callPoll(user, peersJson, 30000);
             if (callJson.isEmpty()) continue;
             QJsonParseError perr{};
             const auto doc = QJsonDocument::fromJson(callJson.toUtf8(), &perr);

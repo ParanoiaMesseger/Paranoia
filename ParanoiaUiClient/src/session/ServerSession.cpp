@@ -30,6 +30,14 @@ const Dialog *ServerSession::findDialog(const QString &peer) const
     return nullptr;
 }
 
+Dialog *ServerSession::findDialogByServerId(const QString &serverId)
+{
+    if (serverId.isEmpty()) return nullptr;
+    for (auto &d : dialogs)
+        if (d.peerServerId == serverId) return &d;
+    return nullptr;
+}
+
 void ServerSession::saveDialogs() const
 {
     if (!profileId.isEmpty()) Dialog::saveToPath(Paths::profileDialogs(profileId), dialogs);

@@ -14,7 +14,12 @@ Rectangle {
     // getDialogs по peer; обновляем по dialogsChanged. Пусто → fallback на peer/букву.
     property string displayName: peer
     property string avatar: ""
+    // Своё имя/аватар (активный профиль) — для бейджей реакций на свои реакции.
+    property string selfName: ""
+    property string selfAvatar: ""
     function _refreshPeerInfo() {
+        root.selfName = Backend.activeProfileDisplayName()
+        root.selfAvatar = Backend.activeProfileAvatar()
         const list = Backend.getDialogs()
         for (var i = 0; i < list.length; ++i) {
             if (list[i].peer === root.peer) {
@@ -111,6 +116,9 @@ Rectangle {
     // Прогресс загрузки фото по ключу (groupId:idx) ∈ [0..1]; tick форсирует биндинги.
     property var uploadProgress: ({})
     property int uploadTick: 0
+    // Сообщение для кратковременной подсветки при переходе из галереи вложений
+    // («перейти к вложению в диалоге»). Сбрасывается flashTimer'ом.
+    property string _flashMessageId: ""
     // Режим множественного выбора (ranged-delete).
     property bool selectionMode: false
     property var selectedIds: ({})  // объект как Set: { [messageId]: true }
@@ -127,6 +135,13 @@ Rectangle {
     // ChatPage из Main.qml. Применяются один раз на Component.onCompleted.
     property string shareTextInitial: ""
     property var shareFilesInitial: []
+
+    // Прикреплённые, но ещё НЕ отправленные вложения (стейджинг): пользователь
+    // прикрепляет файлы/фото (через «+», share, picker), при желании дописывает
+    // текст-подпись и отправляет всё разом кнопкой отправки. Каждый элемент:
+    // { path, name, kind } где kind ∈ "image"|"video"|"file".
+    property var pendingAttachments: []
+    readonly property bool hasPendingAttachments: pendingAttachments && pendingAttachments.length > 0
 
     signal back()
 
@@ -399,20 +414,20 @@ Rectangle {
                     // в провайдере (file:// или image://secure). Иначе галерея ДОТЯНЕТ
                     // превью по id (ensureGalleryPreview) — старые фото тоже попадают.
                     var pLocal = (p.source && p.source.indexOf("file://") === 0) ? p.source : ""
-                    media.push({ id: p.id, local: pLocal, ready: (p.source && p.source.length > 0) === true,
+                    media.push({ id: p.id, messageId: m.id, local: pLocal, ready: (p.source && p.source.length > 0) === true,
                                  filename: (p.name && p.name.length > 0) ? p.name : "attachment.bin",
                                  ts: m.ts, size: p.size || 0 })
                 }
             } else if (root.isImageMessage(m.kind, m.mime_type)) {
                 var iLocal = m.local_preview || ""
                 var iProv  = m.preview_source || ""
-                media.push({ id: m.id, local: iLocal, ready: (iLocal.length > 0 || iProv.length > 0),
+                media.push({ id: m.id, messageId: m.id, local: iLocal, ready: (iLocal.length > 0 || iProv.length > 0),
                              filename: (m.filename && m.filename.length > 0) ? m.filename : "attachment.bin",
                              ts: m.ts, size: m.size || 0 })
             } else if (m.kind === "video") {
                 // Видео — в «Медиа» с пометкой isVideo (плашка ▶ на плитке).
                 var vProv = m.preview_source || ""
-                media.push({ id: m.id, local: "", ready: vProv.length > 0, isVideo: true,
+                media.push({ id: m.id, messageId: m.id, local: "", ready: vProv.length > 0, isVideo: true,
                              filename: (m.filename && m.filename.length > 0) ? m.filename : "video.mp4",
                              ts: m.ts, size: m.size || 0 })
             } else if (m.kind === "file") {
@@ -1182,6 +1197,34 @@ Rectangle {
         return false
     }
 
+    // Переход к сообщению по id из галереи вложений: при необходимости расширяет
+    // окно ленты (сообщение могло быть вне последних _windowCount), затем скроллит
+    // и кратко подсвечивает пузырь. _allMessages — oldest-first, окно = последние N.
+    function jumpToMessageById(messageId) {
+        if (!messageId || messageId.length === 0) return
+        let idx = -1
+        for (let i = 0; i < root._allMessages.length; ++i)
+            if (root._allMessages[i].id === messageId) { idx = i; break }
+        if (idx >= 0) {
+            const needed = root._allMessages.length - idx + 4
+            if (root._windowCount < needed) {
+                root._windowCount = Math.min(root._allMessages.length, needed)
+                root.updateMessageModel(root._allMessages)
+            }
+        }
+        root._flashMessageId = messageId
+        flashTimer.restart()
+        // Геометрия делегатов досчитывается после обновления модели — скроллим в
+        // следующем кадре, иначе positionViewAtIndex может промахнуться.
+        Qt.callLater(function() { root.scrollToMessageId(messageId) })
+    }
+
+    Timer {
+        id: flashTimer
+        interval: 1700
+        onTriggered: root._flashMessageId = ""
+    }
+
     function restoreVisibleMessageAnchor(anchor) {
         if (!anchor || anchor.key.length === 0) return false
         for (let i = 0; i < msgModel.count; ++i) {
@@ -1285,9 +1328,10 @@ Rectangle {
             root.uploadTick++
         }
         function onAttachmentsPicked(uris) {
-            // Мобильный нативный пикер фото — тот же путь, что мультивыбор на
-            // десктопе: подпись берётся из поля ввода, 1 фото → обычно, >1 → группа.
-            root.sendSelectedPhotos(uris)
+            // Мобильный нативный пикер — складываем в стейджинг (как десктоп-диалоги).
+            // Тип угадываем по расширению (фото/видео), отправится при «Отправить».
+            for (var i = 0; i < uris.length; ++i)
+                root.stageAttachment(uris[i])
         }
         // ── Видео: транскод перед отправкой («Подготовка…») ──
         // ── Голосовое: тик длительности записи ──
@@ -1406,6 +1450,37 @@ Rectangle {
     }
     Timer { interval: 250; running: true; repeat: false; onTriggered: root._startOpenChat() }
 
+    // ── Стейджинг вложений ───────────────────────────────────────────────────
+    function guessAttachmentKind(path) {
+        const lp = String(path).toLowerCase()
+        if (/\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)(\?|$)/.test(lp)) return "image"
+        if (/\.(mp4|mov|mkv|webm|avi|m4v|3gp|ogv)(\?|$)/.test(lp)) return "video"
+        return "file"
+    }
+
+    function stageAttachment(p, kind) {
+        if (!p) return
+        const path = String(p)
+        if (path.length === 0) return
+        // Имя: последний сегмент пути без query (?...).
+        let name = path.split('?')[0]
+        name = name.substring(name.lastIndexOf('/') + 1)
+        if (name.length === 0) name = qsTr("вложение")
+        const arr = root.pendingAttachments.slice()
+        arr.push({ path: path, name: name, kind: kind || root.guessAttachmentKind(path) })
+        root.pendingAttachments = arr
+        msgInput.forceActiveFocus()
+    }
+
+    function removeAttachmentAt(i) {
+        if (i < 0 || i >= root.pendingAttachments.length) return
+        const arr = root.pendingAttachments.slice()
+        arr.splice(i, 1)
+        root.pendingAttachments = arr
+    }
+
+    function clearAttachments() { root.pendingAttachments = [] }
+
     function applyShareTarget() {
         if (root.shareTextInitial && root.shareTextInitial.length > 0) {
             const separator = (msgInput.text.length > 0 && !msgInput.text.endsWith("\n")) ? "\n" : ""
@@ -1418,20 +1493,12 @@ Rectangle {
             Chat.requestFileAccessPermissions()
             const files = root.shareFilesInitial
             root.shareFilesInitial = []
-            let sent = 0
+            // Раньше тут был мгновенный sendFile (молча падал на share-кэше и
+            // не давал дописать текст). Теперь — прикрепляем в стейджинг: юзер
+            // видит вложение, может добавить подпись и отправить кнопкой.
             for (let i = 0; i < files.length; ++i) {
                 const candidate = files[i] ? String(files[i]) : ""
-                if (candidate.length > 0) {
-                    Chat.sendFile(candidate)
-                    ++sent
-                }
-            }
-            // Видимая обратная связь: даже если sendFile позже упадёт в
-            // sendError, пользователь знает, что share-данные дошли до ChatPage.
-            if (sent > 0) {
-                errorText.text = qsTr("Получено вложений: %1 — идёт отправка").arg(sent)
-                errorBar.visible = true
-                errorTimer.restart()
+                if (candidate.length > 0) root.stageAttachment(candidate)
             }
         }
     }
@@ -1447,16 +1514,20 @@ Rectangle {
         id: attachDialog
         title: qsTr("Выберите файл")
         mode: "open"
-        onAccepted: Chat.sendFile(selectedFile)
+        onAccepted: root.stageAttachment(selectedFile, "file")
     }
 
     ParaFileDialog {
         id: photoDialog
         title: qsTr("Выберите фото")
-        // Мультивыбор: несколько фото уходят одной мозаикой-группой с подписью.
+        // Мультивыбор: несколько фото прикрепляются в стейджинг (отправятся
+        // мозаикой-группой с подписью при нажатии «Отправить»).
         mode: "openMultiple"
         nameFilters: [qsTr("Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)"), qsTr("Все файлы (*)")]
-        onAccepted: root.sendSelectedPhotos(selectedFiles)
+        onAccepted: {
+            for (var i = 0; i < selectedFiles.length; ++i)
+                root.stageAttachment(selectedFiles[i], "image")
+        }
     }
 
     ParaFileDialog {
@@ -1464,7 +1535,7 @@ Rectangle {
         title: qsTr("Выберите видео")
         mode: "open"
         nameFilters: [qsTr("Видео (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.3gp *.ogv)"), qsTr("Все файлы (*)")]
-        onAccepted: Chat.sendFile(selectedFile)
+        onAccepted: root.stageAttachment(selectedFile, "video")
     }
 
     ParaFileDialog {
@@ -2577,6 +2648,8 @@ Rectangle {
                     readonly property bool isSearchCurrent: isSearchMatch
                                                            && root.searchCurrentIndex >= 0
                                                            && root.searchMatchIndices[root.searchCurrentIndex] === delegateIndex
+                    // Кратковременная подсветка при переходе из галереи вложений.
+                    readonly property bool isFlash: root._flashMessageId.length > 0 && model.id === root._flashMessageId
                     readonly property bool isMe: model.isMe === true
                     // Анимация появления (один root-драйвер root._revealValue 0→1, для
                     // делегата с ключом == root._revealKey). Исходящие — пилюля втекает
@@ -2836,10 +2909,11 @@ Rectangle {
                     bottomRightRadius: isMe ? 2 : 18
                     bottomLeftRadius:  isMe ? 18 : 2
                     color: isMe ? Theme.bgButton : Theme.bgSecondary
-                    border.width: isSearchMatch ? (isSearchCurrent ? 3 : 2) : 1
+                    border.width: isSearchMatch ? (isSearchCurrent ? 3 : 2) : (isFlash ? 3 : 1)
                     border.color: isSearchMatch
                                   ? (isSearchCurrent ? Theme.accent : Theme.accentHover)
-                                  : (isMe ? Theme.accentDim : Theme.border)
+                                  : (isFlash ? Theme.accent : (isMe ? Theme.accentDim : Theme.border))
+                    Behavior on border.color { ColorAnimation { duration: 200 } }
 
                     // ВХОДЯЩИЕ: «принтер» — шторка цвета пузыря закрывает текст и уезжает
                     // ВНИЗ (height: full→0) → текст проявляется сверху-вниз, как печать.
@@ -3133,7 +3207,7 @@ Rectangle {
                         color: Theme.bgInput
                         border.width: 1
                         border.color: Theme.border
-                        implicitWidth: 220
+                        implicitWidth: 248
                         implicitHeight: height
 
                         readonly property bool isCurrent: root.voicePlayer && root.voicePlayer.tick >= 0
@@ -3163,9 +3237,29 @@ Rectangle {
                             }
                         }
 
+                        // Скачать аудио (голосовое = аудиофайл) — как у обычных вложений.
+                        Rectangle {
+                            id: voiceDownloadBtn
+                            width: 30; height: 30; radius: 15
+                            anchors.right: parent.right; anchors.rightMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: voiceDownloadArea.containsMouse ? Theme.bgCard : "transparent"
+                            AppIcon {
+                                anchors.centerIn: parent
+                                width: 18; height: 18; name: "download"
+                                iconColor: Theme.textSecondary; strokeWidth: 1.8
+                            }
+                            MouseArea {
+                                id: voiceDownloadArea
+                                anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openSaveDialog(model.id, attachmentName)
+                            }
+                        }
+
                         Column {
                             anchors.left: voicePlayBtn.right; anchors.leftMargin: 10
-                            anchors.right: parent.right; anchors.rightMargin: 12
+                            anchors.right: voiceDownloadBtn.left; anchors.rightMargin: 8
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 5
                             // Тонкая дорожка прогресса.
@@ -3283,10 +3377,17 @@ Rectangle {
                             model: reactions
                             delegate: Rectangle {
                                 required property var modelData
-                                readonly property string senderInitial: {
-                                    const s = modelData.sender_name || modelData.sender || ""
-                                    return s.length > 0 ? s.charAt(0).toUpperCase() : ""
+                                // Реактор в 1:1 диалоге — это либо я (mine), либо собеседник.
+                                // Имя/аватар берём из профиля (свой) / диалога (собеседник),
+                                // т.е. по НИКУ, а не по сырому sender_name (ФИО).
+                                readonly property string reactorName: {
+                                    const base = modelData.mine ? root.selfName : root.displayName
+                                    if (base && base.length > 0) return base
+                                    return modelData.sender_name || modelData.sender || ""
                                 }
+                                readonly property string reactorAvatar: modelData.mine ? root.selfAvatar : root.avatar
+                                readonly property string senderInitial:
+                                    reactorName.length > 0 ? reactorName.charAt(0).toUpperCase() : ""
                                 width: reactionRow.implicitWidth + 14
                                 height: 28
                                 radius: 14
@@ -3304,9 +3405,19 @@ Rectangle {
                                         font.pixelSize: 16
                                         font.family: Theme.fontFamily
                                     }
+                                    // Аватар реактора (круг уже запечён в PNG) — если задан.
+                                    Image {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 18; height: 18
+                                        visible: reactorAvatar.length > 0
+                                        source: reactorAvatar
+                                        asynchronous: true
+                                        cache: true
+                                    }
+                                    // Иначе — буква-инициал (по нику).
                                     Text {
                                         anchors.verticalCenter: parent.verticalCenter
-                                        visible: senderInitial.length > 0
+                                        visible: reactorAvatar.length === 0 && senderInitial.length > 0
                                         text: senderInitial
                                         color: Theme.textSecondary
                                         font.pixelSize: Theme.fontSm
@@ -3709,7 +3820,8 @@ Rectangle {
             // Высоту бара считаем по КАПНУТОЙ высоте текста (как у msgInputScroll, 124),
             // а не по сырой implicitHeight — иначе при >~6 строк текст-вьюха стоит на
             // 124, а бар рос до 200, давая растущие отступы вокруг текста (#38).
-            Layout.preferredHeight: Math.max(Math.min(msgInput.implicitHeight, 124) + 16 + (root.hasPendingReply ? 58 : 0),
+            Layout.preferredHeight: Math.max(Math.min(msgInput.implicitHeight, 124) + 16 + (root.hasPendingReply ? 58 : 0)
+                                             + (root.hasPendingAttachments ? 58 : 0),
                                              root.hasPendingReply ? 106 : 48)
             color: Theme.bgDark
 
@@ -3803,6 +3915,69 @@ Rectangle {
                     previewText: root.pendingReplyText
                     closeVisible: true
                     onCloseClicked: root.clearPendingReply()
+                }
+
+                // Полоса прикреплённых, но ещё не отправленных вложений (стейджинг).
+                // Чип: иконка по типу + имя + крестик удаления. Скролл по горизонтали.
+                ListView {
+                    id: stagedStrip
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.hasPendingAttachments ? 52 : 0
+                    visible: root.hasPendingAttachments
+                    orientation: ListView.Horizontal
+                    spacing: 6
+                    clip: true
+                    model: root.pendingAttachments
+
+                    delegate: Rectangle {
+                        height: 44
+                        width: chipRow.implicitWidth + 16
+                        radius: 10
+                        color: Theme.bgInput
+                        border.color: Theme.border
+                        border.width: 1
+
+                        Row {
+                            id: chipRow
+                            anchors.centerIn: parent
+                            spacing: 6
+
+                            AppIcon {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 20; height: 20
+                                name: modelData.kind === "video" ? "video"
+                                      : (modelData.kind === "image" ? "image" : "file")
+                                iconColor: Theme.accentHover
+                                strokeWidth: 1.8
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: modelData.name.length > 20
+                                      ? modelData.name.substring(0, 18) + "…"
+                                      : modelData.name
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSm
+                                font.family: Theme.fontFamily
+                            }
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 20; height: 20; radius: 10
+                                color: rmArea.containsMouse ? Theme.bgCard : "transparent"
+                                AppIcon {
+                                    anchors.centerIn: parent
+                                    width: 13; height: 13; name: "close"
+                                    iconColor: Theme.textSecondary; strokeWidth: 1.8
+                                }
+                                MouseArea {
+                                    id: rmArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.removeAttachmentAt(index)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 RowLayout {
@@ -3995,6 +4170,20 @@ Rectangle {
                                         && (event.modifiers & Qt.ControlModifier)) {
                                     sendBtn.clicked()
                                     event.accepted = true
+                                    return
+                                }
+                                // Desktop: Ctrl+V с картинкой в буфере (скриншот и т.п.).
+                                // TextArea сам изображение не вставляет — перехватываем,
+                                // сохраняем во временный PNG и шлём вложением. Текст
+                                // вставляется штатно (сюда не попадает — нет картинки).
+                                if (!root.isMobileOs
+                                        && (event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V
+                                        && typeof ClipboardUtils !== "undefined" && ClipboardUtils.hasImage()) {
+                                    var p = ClipboardUtils.saveImageToTemp()
+                                    if (p && p.length > 0) {
+                                        Chat.sendFile(p)
+                                        event.accepted = true
+                                    }
                                 }
                             }
                         }
@@ -4037,6 +4226,7 @@ Rectangle {
                             id: sendBtnVisual
                             readonly property bool hasContent: msgInput.text.trim().length > 0
                                                                || (msgInput.preeditText && msgInput.preeditText.trim().length > 0)
+                                                               || root.hasPendingAttachments
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
                             anchors.rightMargin: 4
@@ -4104,12 +4294,46 @@ Rectangle {
                             // визуально показано пользователю.
                             if (txt.length === 0 && msgInput.preeditText && msgInput.preeditText.length > 0)
                                 txt = String(msgInput.preeditText).trim()
-                            if (txt.length === 0) return
+
+                            const atts = root.pendingAttachments
+                            // Нечего отправлять — ни текста, ни вложений.
+                            if (atts.length === 0 && txt.length === 0) return
+
                             root.sendLocked = true
-                            if (root.hasPendingReply)
+
+                            if (atts.length > 0) {
+                                Chat.requestFileAccessPermissions()
+                                // Фото — одной группой с подписью; остальное (видео/файлы)
+                                // по одному. Подпись прикрепляется к фото-группе; если фото
+                                // нет, а текст есть — уходит отдельным сообщением.
+                                var images = []
+                                var others = []
+                                for (var i = 0; i < atts.length; ++i) {
+                                    if (atts[i].kind === "image") images.push(atts[i].path)
+                                    else others.push(atts[i].path)
+                                }
+                                var captionConsumed = false
+                                if (images.length === 1 && txt.length === 0) {
+                                    Chat.sendFile(images[0])
+                                } else if (images.length > 0) {
+                                    Chat.sendPhotoGroup(images, txt)
+                                    captionConsumed = txt.length > 0
+                                }
+                                for (var j = 0; j < others.length; ++j)
+                                    Chat.sendFile(others[j])
+                                if (txt.length > 0 && !captionConsumed) {
+                                    if (root.hasPendingReply)
+                                        Chat.sendTextReply(txt, root.pendingReplyId, root.pendingReplySender, root.pendingReplyText)
+                                    else
+                                        Chat.sendText(txt)
+                                }
+                                root.clearAttachments()
+                            } else if (root.hasPendingReply) {
                                 Chat.sendTextReply(txt, root.pendingReplyId, root.pendingReplySender, root.pendingReplyText)
-                            else
+                            } else {
                                 Chat.sendText(txt)
+                            }
+
                             msgInput.text = ""
                             root.clearDraft()
                             root.clearPendingReply()
@@ -4162,7 +4386,14 @@ Rectangle {
     // Экран «Вложения диалога» (медиа/файлы/ссылки) — пушится в общий stackView.
     Component {
         id: sharedMediaComponent
-        SharedMediaPage {}
+        SharedMediaPage {
+            // «Перейти к вложению в диалоге»: закрываем галерею и скроллим ленту
+            // к сообщению (с расширением окна и подсветкой).
+            onJumpToMessageRequested: function(messageId) {
+                stackView.pop()
+                Qt.callLater(function() { root.jumpToMessageById(messageId) })
+            }
+        }
     }
 
     // Полноэкранное чтение длинного текста (открывается из пузыря, см. openTextViewer).
@@ -4404,6 +4635,48 @@ Rectangle {
         }
         function onMessagesDeleted(peer) {
             if (peer === root.peer) Chat.fetchMessages()
+        }
+    }
+
+    // Desktop drag-and-drop: перетаскивание файлов из проводника → отправка
+    // вложениями. DropArea ловит только drag-события и не мешает обычному вводу.
+    // На мобильных не нужен.
+    DropArea {
+        id: fileDropArea
+        anchors.fill: parent
+        enabled: !root.isMobileOs
+        keys: ["text/uri-list"]
+
+        onDropped: function (drop) {
+            if (!drop.hasUrls) {
+                drop.accepted = false
+                return
+            }
+            var sent = 0
+            for (var i = 0; i < drop.urls.length; ++i) {
+                var u = String(drop.urls[i] || "")
+                if (u.length === 0) continue
+                Chat.sendFile(u)          // sendFile понимает file://-URL (normalizeLocalFilePath)
+                sent++
+            }
+            drop.accepted = sent > 0
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            z: 1000
+            visible: fileDropArea.containsDrag
+            color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
+            border.color: Theme.accent
+            border.width: 2
+            radius: 8
+            Text {
+                anchors.centerIn: parent
+                text: qsTr("Отпустите файлы, чтобы отправить")
+                color: Theme.accent
+                font.pixelSize: Theme.fontMd
+                font.family: Theme.fontFamily
+            }
         }
     }
 }

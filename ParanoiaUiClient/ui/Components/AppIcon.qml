@@ -836,5 +836,31 @@ Canvas {
             ctx.stroke()
             return
         }
+
+        if (name === "settings") {
+            // Шестерёнка: 8 радиальных зубцов + тело + отверстие.
+            const cx = 12, cy = 12
+            ctx.beginPath()
+            for (var i = 0; i < 8; ++i) {
+                const a = i * Math.PI / 4
+                const cosA = Math.cos(a), sinA = Math.sin(a)
+                ctx.moveTo(cx + 6.2 * cosA, cy + 6.2 * sinA)
+                ctx.lineTo(cx + 9.3 * cosA, cy + 9.3 * sinA)
+            }
+            ctx.stroke()
+            ctx.beginPath(); ctx.arc(cx, cy, 5.2, 0, Math.PI * 2); ctx.stroke()
+            ctx.beginPath(); ctx.arc(cx, cy, 2.0, 0, Math.PI * 2); ctx.stroke()
+            return
+        }
+
+        if (name === "goto") {
+            // «Перейти к элементу» — рамка + стрелка наружу вправо-вверх.
+            ctx.beginPath()
+            ctx.moveTo(13, 5); ctx.lineTo(6, 5); ctx.lineTo(6, 18); ctx.lineTo(19, 18); ctx.lineTo(19, 12)
+            ctx.stroke()
+            ctx.beginPath(); ctx.moveTo(11.5, 12.5); ctx.lineTo(19, 5); ctx.stroke()
+            ctx.beginPath(); ctx.moveTo(14, 5); ctx.lineTo(19, 5); ctx.lineTo(19, 10); ctx.stroke()
+            return
+        }
     }
 }

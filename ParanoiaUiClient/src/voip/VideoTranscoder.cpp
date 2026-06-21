@@ -1,6 +1,7 @@
 #include "VideoTranscoder.hpp"
 
 #include <QDebug>
+#include <QThread>
 #include <algorithm>
 
 extern "C" {
@@ -264,6 +265,11 @@ namespace paranoia::media
             vid.dec = avcodec_alloc_context3(cod);
             avcodec_parameters_to_context(vid.dec, st->codecpar);
             vid.dec->pkt_timebase = st->time_base;
+            // Многопоточный декод: родной h264-декодер хорошо параллелится по
+            // кадрам/слайсам — это половина стоимости транскода. 0 = по числу
+            // ядер. Обязательно ДО avcodec_open2.
+            vid.dec->thread_count = 0;
+            vid.dec->thread_type  = FF_THREAD_FRAME | FF_THREAD_SLICE;
             if ((ret = avcodec_open2(vid.dec, cod, nullptr)) < 0) {
                 setErr(error, QStringLiteral("open video decoder: %1").arg(avErr(ret)));
                 goto cleanup;
@@ -286,6 +292,13 @@ namespace paranoia::media
             vid.enc->framerate = st->avg_frame_rate.num ? st->avg_frame_rate : AVRational{30, 1};
             vid.enc->gop_size  = 60;
             vid.enc->max_b_frames = 0; // openh264 без B-кадров
+            // Многопоточный энкод: libopenh264 параллелит кодирование по слайсам
+            // через thread_count (iMultipleThreadIdc). Без этого энкод упирается
+            // в одно ядро — главный тормоз подготовки видео. libx264 (с его
+            // preset'ами) недоступен намеренно — он GPL, а наш ffmpeg собран
+            // только с BSD-libopenh264. Потолок 8: лишние слайсы режут качество
+            // при том же битрейте без выигрыша по скорости на типовых видео.
+            vid.enc->thread_count = std::clamp(QThread::idealThreadCount(), 1, 8);
             vid.enc->sample_aspect_ratio = vid.dec->sample_aspect_ratio;
             if (ofmt->oformat->flags & AVFMT_GLOBALHEADER)
                 vid.enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -313,8 +326,10 @@ namespace paranoia::media
                     av_free(copy);
             }
 
+            // SWS_FAST_BILINEAR заметно быстрее SWS_BILINEAR при практически
+            // неразличимом на видео качестве масштабирования.
             sws = sws_getContext(vid.dec->width, vid.dec->height, vid.dec->pix_fmt, dstW, dstH,
-                                 AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                 AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
             if (!sws) {
                 setErr(error, QStringLiteral("sws_getContext failed"));
                 goto cleanup;
