@@ -182,7 +182,7 @@ namespace
     QString userFacingAttachmentError(const QString &error)
     {
         if (error.contains(QStringLiteral("attachment_incomplete"), Qt::CaseInsensitive))
-            return ChatBackend::tr("Вложение загружено на сервер не полностью. Попросите отправить файл повторно.");
+            return ChatBackend::tr("Файл ещё дозагружается отправителем. Повторите через несколько секунд.");
         if (error.contains(QStringLiteral("attachment_bad_size"), Qt::CaseInsensitive) ||
             error.contains(QStringLiteral("attachment_bad_chunk"), Qt::CaseInsensitive))
             return ChatBackend::tr("Вложение повреждено. Попросите отправить файл повторно.");
@@ -397,6 +397,9 @@ void ChatBackend::openChat(const QString &peer)
         loadHistory(peer);
         fetchMessages();
         refreshArrivedStatus();
+        // Добить незавершённые исходящие передачи этого диалога (resumable): если
+        // отправка оборвалась в прошлый раз (выход/сеть/рестарт) — до-слать тело.
+        resumePendingTransfers();
         scheduleActiveChatPoll(0);
     }
     updateNotifier();
@@ -1001,6 +1004,17 @@ void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QStri
                 const QFileInfo info(path);
                 if (path.isEmpty() || !info.exists() || !info.isFile() || !info.isReadable())
                     err = QStringLiteral("file_read_error");
+                // Сразу переводим активную плитку из «ожидания» (пульс) в «отправку»
+                // (кольцо 0%) — ДО первого чанка. Фото шлются по одному, и основное
+                // время уходит на pull-before-push внутри движка; без этого засева
+                // плитка висела бы в пульсе почти всю свою отправку, а кольцо
+                // прогресса мелькало лишь под конец (видно только на первой плитке).
+                if (err.isEmpty()) {
+                    const QString seedKey = gp.key;
+                    QMetaObject::invokeMethod(self, [self, seedKey]() {
+                        if (self) emit self->fileProgress(seedKey, 0u, 1u);
+                    });
+                }
                 std::unique_ptr<ProgressCtx> ctx(new ProgressCtx{self.data(), gp.key});
                 {
                     QMutexLocker locker(&session->ffiMutex);
@@ -2266,6 +2280,9 @@ void ChatBackend::pollActiveChat()
             self->m_activePollRetryCount = 0;
             if (count > 0) self->fetchMessages();
             self->refreshArrivedStatus();
+            // Успешный цикл опроса = сеть жива → удобный момент добить
+            // незавершённые исходящие передачи (no-op, если журнал пуст).
+            self->resumePendingTransfers();
             self->scheduleActiveChatPoll();
         });
     });
@@ -2315,6 +2332,48 @@ void ChatBackend::refreshArrivedStatus()
                 return;
             }
             if (changed > 0 && peer == self->m_activePeer) self->loadHistory(peer, false);
+        });
+    });
+}
+
+void ChatBackend::resumePendingTransfers()
+{
+    if (m_resumeInFlight) return;
+    if (!applicationIsActive()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session || !session->isLoggedIn() || m_activePeer.isEmpty()) return;
+    const auto *dialog = session->findDialog(m_activePeer);
+    if (!dialog) return;
+    const QString keyringJson = dialog->keyringJson();
+    if (keyringJson.isEmpty()) return;
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dialog->peerServerId;
+    QPointer self(this);
+    m_resumeInFlight = true;
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson]() {
+        if (!self) return;
+        QString json;
+        // resume пушит пакеты (как обычная отправка) → держим ffiMutex на время
+        // вызова (handle !Send, операции на нём сериализуются). list_outbound
+        // дёшев, когда журнал пуст → сетевой работы нет, лок отпускается сразу.
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (session->ffi) {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                json = session->ffi->resume_pending_transfers_keyring(serverId, peerId, keyringJson);
+            }
+        }
+        QMetaObject::invokeMethod(self, [self, peer, json]() {
+            if (!self) return;
+            self->m_resumeInFlight = false;
+            // Непустой массив — какие-то передачи дошли до терминала (Sent/Failed);
+            // обновляем их статусы в ленте.
+            if (!json.isEmpty() && json != QStringLiteral("[]")) {
+                self->appendMessages(peer, self->parseMessages(json));
+                if (peer == self->m_activePeer) self->fetchMessages();
+            }
         });
     });
 }

@@ -152,6 +152,11 @@ char *paranoia_send_file_auto_json_keyring_with_progress(ParanoiaHandle *h, CSTR
 // paranoia_last_error() в "decryption_failed:<N>".
 char *paranoia_receive_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json);
 
+// Возобновить незавершённые исходящие файловые передачи диалога (resumable
+// transfers): до-слать недостающие чанки после обрыва. Возвращает JSON-массив
+// сообщений в терминальном статусе (Sent/Failed) или NULL при ошибке.
+char *paranoia_resume_pending_transfers_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json);
+
 // Проверить количество новых сообщений без загрузки payload.
 // Возвращает 0 при успехе и пишет результат в out_count.
 int paranoia_notify_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, uint64_t *out_count);

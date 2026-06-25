@@ -115,6 +115,11 @@ public:
     QString receive_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json)
     { return RS_QS(::paranoia_receive_keyring(ptr, QS_RS3(user_a, user_b, keyring_json))); }
 
+    // Возобновить незавершённые исходящие файловые передачи: до-слать недостающие
+    // чанки. Возвращает JSON-массив терминальных сообщений (Sent/Failed).
+    QString resume_pending_transfers_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json)
+    { return RS_QS(::paranoia_resume_pending_transfers_keyring(ptr, QS_RS3(user_a, user_b, keyring_json))); }
+
     int notify_count_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_count)
     { return ::paranoia_notify_count_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_count); }
 

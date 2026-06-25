@@ -1,8 +1,28 @@
-use crate::types::{DialogueKey, Message, MessageStatus};
+use crate::types::{AttachmentKind, DialogueKey, Message, MessageStatus};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::sync::{Mutex, MutexGuard};
+
+/// Запись журнала исходящей файловой передачи (resumable transfers). Хранится
+/// у отправителя, пока тело файла не доставлено на сервер целиком; позволяет
+/// до-слать недостающие чанки после обрыва. См. таблицу `outbound_transfers`.
+#[derive(Debug, Clone)]
+pub struct OutboundTransfer {
+    pub transfer_id: String,
+    pub dialogue: DialogueKey,
+    pub header_seq: u64,
+    pub chunk_count: u32,
+    pub chunk_sizes: Vec<usize>,
+    pub cache_path: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub kind: AttachmentKind,
+    pub total_size: usize,
+    pub group_id: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub attempts: u32,
+}
 
 pub struct LocalStore {
     pub(crate) conn: Mutex<Connection>,
@@ -101,6 +121,29 @@ impl LocalStore {
                 data        BLOB    NOT NULL,
                 timestamp   TEXT    NOT NULL,
                 PRIMARY KEY (transfer_id, chunk_index)
+            );
+
+            -- Журнал ИСХОДЯЩИХ файловых передач для возобновления (resumable
+            -- transfers). Строка живёт, пока тело файла не доставлено на сервер
+            -- полностью; при обрыве (выход из диалога, потеря сети, рестарт)
+            -- фоновый resume до-сылает недостающие seq, нарезая файл по
+            -- сохранённым chunk_sizes (идентичные границы). Только у отправителя,
+            -- в wire-пакеты не попадает. transfer_id == id отображаемого сообщения.
+            CREATE TABLE IF NOT EXISTS outbound_transfers (
+                transfer_id TEXT    PRIMARY KEY,
+                dialogue_a  TEXT    NOT NULL,
+                dialogue_b  TEXT    NOT NULL,
+                header_seq  INTEGER NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                chunk_sizes TEXT    NOT NULL,
+                cache_path  TEXT    NOT NULL,
+                filename    TEXT    NOT NULL,
+                mime_type   TEXT    NOT NULL,
+                kind        TEXT    NOT NULL,
+                total_size  INTEGER NOT NULL,
+                group_id    TEXT,
+                timestamp   TEXT    NOT NULL,
+                attempts    INTEGER NOT NULL DEFAULT 0
             );
         ",
         )?;
@@ -231,6 +274,99 @@ impl LocalStore {
             params![serde_json::to_string(&status)?, message_id],
         )?;
         Ok(())
+    }
+
+    // ── outbound transfers (resumable file sends) ─────────────────────────────
+
+    /// Записать/обновить журнал исходящей передачи (idempotent по transfer_id).
+    pub fn insert_outbound(&self, t: &OutboundTransfer) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO outbound_transfers
+             (transfer_id, dialogue_a, dialogue_b, header_seq, chunk_count, chunk_sizes,
+              cache_path, filename, mime_type, kind, total_size, group_id, timestamp, attempts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                t.transfer_id,
+                t.dialogue.a,
+                t.dialogue.b,
+                t.header_seq as i64,
+                t.chunk_count as i64,
+                serde_json::to_string(&t.chunk_sizes)?,
+                t.cache_path,
+                t.filename,
+                t.mime_type,
+                serde_json::to_string(&t.kind)?,
+                t.total_size as i64,
+                t.group_id,
+                t.timestamp.to_rfc3339(),
+                t.attempts as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Все незавершённые исходящие передачи диалога (для resume).
+    pub fn list_outbound(&self, dialogue: &DialogueKey) -> Result<Vec<OutboundTransfer>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT transfer_id, header_seq, chunk_count, chunk_sizes, cache_path, filename,
+                    mime_type, kind, total_size, group_id, timestamp, attempts
+             FROM outbound_transfers
+             WHERE dialogue_a = ?1 AND dialogue_b = ?2
+             ORDER BY header_seq ASC",
+        )?;
+        let dlg = dialogue.clone();
+        let rows = stmt.query_map(params![dialogue.a, dialogue.b], move |row| {
+            let chunk_sizes_json: String = row.get(3)?;
+            let kind_json: String = row.get(7)?;
+            let ts_str: String = row.get(10)?;
+            Ok(OutboundTransfer {
+                transfer_id: row.get(0)?,
+                dialogue: dlg.clone(),
+                header_seq: row.get::<_, i64>(1)? as u64,
+                chunk_count: row.get::<_, i64>(2)? as u32,
+                chunk_sizes: serde_json::from_str(&chunk_sizes_json).unwrap_or_default(),
+                cache_path: row.get(4)?,
+                filename: row.get(5)?,
+                mime_type: row.get(6)?,
+                kind: serde_json::from_str(&kind_json).unwrap_or(AttachmentKind::File),
+                total_size: row.get::<_, i64>(8)? as usize,
+                group_id: row.get(9)?,
+                timestamp: DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                attempts: row.get::<_, i64>(11)? as u32,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn delete_outbound(&self, transfer_id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM outbound_transfers WHERE transfer_id = ?1",
+            params![transfer_id],
+        )?;
+        Ok(())
+    }
+
+    /// Увеличить счётчик попыток resume; вернуть новое значение.
+    pub fn bump_outbound_attempts(&self, transfer_id: &str) -> Result<u32> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE outbound_transfers SET attempts = attempts + 1 WHERE transfer_id = ?1",
+            params![transfer_id],
+        )?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT attempts FROM outbound_transfers WHERE transfer_id = ?1",
+                params![transfer_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(n as u32)
     }
 
     /// Вернуть все server_seq у локальных сообщений диалога, у которых статус
@@ -646,4 +782,79 @@ pub struct AssembledFile {
     pub mime_type: String,
     pub data: Vec<u8>,
     pub timestamp: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod outbound_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CTR: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp_store() -> (std::path::PathBuf, LocalStore) {
+        let path = std::env::temp_dir().join(format!(
+            "paranoia-outbound-test-{}-{}.db",
+            std::process::id(),
+            CTR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = LocalStore::open(path.to_str().unwrap(), &[7u8; 32]).expect("open store");
+        (path, store)
+    }
+
+    fn sample(dlg: &DialogueKey, id: &str, header_seq: u64) -> OutboundTransfer {
+        OutboundTransfer {
+            transfer_id: id.to_string(),
+            dialogue: dlg.clone(),
+            header_seq,
+            chunk_count: 3,
+            chunk_sizes: vec![10, 20, 30],
+            cache_path: "/tmp/x.bin".to_string(),
+            filename: "x.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            kind: AttachmentKind::Image,
+            total_size: 60,
+            group_id: Some("grp1".to_string()),
+            timestamp: Utc::now(),
+            attempts: 0,
+        }
+    }
+
+    #[test]
+    fn outbound_roundtrip_and_delete() {
+        let (path, store) = tmp_store();
+        let dlg = DialogueKey { a: "a".into(), b: "b".into() };
+        store.insert_outbound(&sample(&dlg, "tid1", 5)).unwrap();
+
+        let list = store.list_outbound(&dlg).unwrap();
+        assert_eq!(list.len(), 1);
+        let t = &list[0];
+        assert_eq!(t.transfer_id, "tid1");
+        assert_eq!(t.header_seq, 5);
+        assert_eq!(t.chunk_count, 3);
+        assert_eq!(t.chunk_sizes, vec![10, 20, 30]); // воспроизводимая нарезка
+        assert_eq!(t.kind, AttachmentKind::Image);
+        assert_eq!(t.group_id.as_deref(), Some("grp1"));
+
+        // Чужой диалог не виден.
+        let other = DialogueKey { a: "c".into(), b: "d".into() };
+        assert!(store.list_outbound(&other).unwrap().is_empty());
+
+        assert_eq!(store.bump_outbound_attempts("tid1").unwrap(), 1);
+        assert_eq!(store.bump_outbound_attempts("tid1").unwrap(), 2);
+
+        store.delete_outbound("tid1").unwrap();
+        assert!(store.list_outbound(&dlg).unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn outbound_insert_is_idempotent_by_transfer_id() {
+        let (path, store) = tmp_store();
+        let dlg = DialogueKey { a: "a".into(), b: "b".into() };
+        store.insert_outbound(&sample(&dlg, "dup", 1)).unwrap();
+        store.insert_outbound(&sample(&dlg, "dup", 1)).unwrap();
+        assert_eq!(store.list_outbound(&dlg).unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
 }

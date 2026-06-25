@@ -77,6 +77,21 @@ async fn do_push(state: &Arc<AppState>, req: PushRequest) -> ApiResponse {
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
     match state.store.push(&dialogue_id, req.seq, &payload_bytes) {
         Ok(_) => {
+            // Поднять собственный last_seq отправителя до отправленного seq. Pull-
+            // before-push (MultiDevicePolicy) гарантирует, что отправитель уже
+            // подтянул всё до этого seq, поэтому отметка корректна и для статуса
+            // прочтения у партнёра. Делаем это ДО пробуждения ожидающих /notify,
+            // чтобы другие устройства того же аккаунта не посчитали своё сообщение
+            // новым (детерминированно закрывает гонку push→pull). Уважает opt-out
+            // receipts: при выключенных уведомлениях о прочтении last_seq заморожен
+            // (update_last_seq — no-op), и дедуп своих уведомлений для этого диалога
+            // не действует — приемлемый редкий край.
+            if let Err(e) = state
+                .store
+                .update_last_seq(&req.sender, &dialogue_id, req.seq)
+            {
+                warn!("push: failed to bump sender last_seq: {e}");
+            }
             // Разбудить long-poll `/notify`, ждущих этот диалог (если такие есть).
             // По dialogue_id будятся обе стороны — каждая пересчитает свои новые.
             state.dialogue_notify.notify(&dialogue_id).await;

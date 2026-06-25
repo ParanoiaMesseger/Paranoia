@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     crypto,
     packet::PacketInner,
-    store::LocalStore,
+    store::{LocalStore, OutboundTransfer},
     transport::{
         CoreArrivedGet, CoreArrivedSet, CoreDeterminate, CoreMap, CoreNotify, CorePull, CorePush,
         MapResponse, RawPacket, Transport,
@@ -25,6 +25,11 @@ use crate::{
 };
 
 const FILE_PULL_CHUNKS_PER_REQUEST: u32 = 4;
+
+/// Сколько заходов resume делаем по передаче до пометки Failed (тело так и не
+/// долилось — например, сервер недоступен очень долго). Защита от бесконечного
+/// журнала; на практике долив происходит за 1-2 захода после возврата сети.
+const RESUME_MAX_ATTEMPTS: u32 = 10;
 
 /// Размер чанка при загрузке эфемерного большого файла в blob-хранилище (один
 /// HTTP-запрос на чанк). Крупнее history-чанков — файлы большие, минимизируем
@@ -1085,7 +1090,7 @@ impl Dialogue {
         mime_type: String,
         path: &Path,
         group_id: Option<String>,
-        mut on_progress: F,
+        on_progress: F,
     ) -> Result<Vec<Message>>
     where
         F: FnMut(u32, u32),
@@ -1116,18 +1121,124 @@ impl Dialogue {
 
         let transfer_id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let header = MessageContent::FileHeader {
+        let cache_path_str = path.to_string_lossy().into_owned();
+
+        // ── Persist ДО заливки (resumable): сообщение со статусом Sending +
+        // запись в журнале outbound_transfers. Если заливка тела оборвётся
+        // (выход из диалога, потеря сети, kill процесса), фоновый resume
+        // (`resume_pending_transfers`) до-шлёт недостающие seq по сохранённым
+        // chunk_sizes. Раньше display_msg сохранялся только ПОСЛЕ всех чанков
+        // (Sent), а при обрыве передача висела на сервере недокачанной навсегда.
+        let mut display_msg = Message {
+            id: transfer_id.clone(),
+            dialogue: self.key.clone(),
+            sender: self.client_cfg.username.clone(),
+            content: attachment_content(
+                kind,
+                FileAttachment {
+                    filename: filename.clone(),
+                    mime_type: mime_type.clone(),
+                    size: total_size,
+                    data: Vec::new(),
+                    transfer_id: Some(transfer_id.clone()),
+                    cache_path: Some(cache_path_str.clone()),
+                    chunk_count: total,
+                    body_from_seq,
+                    body_to_seq,
+                    downloaded: true,
+                    group_id: group_id.clone(),
+                    ephemeral_file_id: None,
+                    ephemeral_expires_at: None,
+                },
+            ),
+            timestamp: now,
+            status: MessageStatus::Sending,
+            server_seq: Some(header_seq),
+        };
+        self.store.save_message(&display_msg)?;
+        self.store.insert_outbound(&OutboundTransfer {
             transfer_id: transfer_id.clone(),
-            kind,
+            dialogue: self.key.clone(),
+            header_seq,
+            chunk_count: total,
+            chunk_sizes: chunk_sizes.clone(),
+            cache_path: cache_path_str,
             filename: filename.clone(),
             mime_type: mime_type.clone(),
+            kind,
             total_size,
-            chunks: total,
             group_id: group_id.clone(),
-        };
-        self.push_packet(header_seq, &transfer_id, now, header)
-            .await?;
+            timestamp: now,
+            attempts: 0,
+        })?;
 
+        // Заливка тела (header + чанки). При успехе — журнал удаляем, статус Sent.
+        // При обрыве — оставляем Sending + журнал; resume добьёт позже (UI всё это
+        // время показывает «отправляется», а не вечную ошибку).
+        let present = std::collections::HashSet::new();
+        match self
+            .push_transfer_packets(
+                &transfer_id, kind, &filename, &mime_type, total_size, &chunk_sizes, header_seq,
+                &group_id, path, now, &present, on_progress,
+            )
+            .await
+        {
+            Ok(()) => {
+                self.store.delete_outbound(&transfer_id)?;
+                self.store
+                    .update_status(&transfer_id, MessageStatus::Sent)?;
+                display_msg.status = MessageStatus::Sent;
+            }
+            Err(e) => {
+                warn!("send: transfer {transfer_id} body incomplete, will resume: {e}");
+            }
+        }
+
+        Ok(vec![display_msg])
+    }
+
+    /// Залить недостающие пакеты файловой передачи: header (если его seq нет в
+    /// `present`) + чанки тела (нарезка по `chunk_sizes`, пропуск seq из
+    /// `present`). `on_progress(index, total)` — после каждой плитки. Возвращает
+    /// `Ok(())` когда все пакеты тела на сервере; `Err` — если push оборвался
+    /// (резюмируемо). Общий путь для первой отправки (`present` пуст) и для
+    /// resume (`present` = уже залитые seq). Чанк читается всегда (двигает
+    /// reader), пушится только отсутствующий — границы воспроизводимы по
+    /// сохранённым `chunk_sizes`.
+    #[allow(clippy::too_many_arguments)]
+    async fn push_transfer_packets<F>(
+        &self,
+        transfer_id: &str,
+        kind: AttachmentKind,
+        filename: &str,
+        mime_type: &str,
+        total_size: usize,
+        chunk_sizes: &[usize],
+        header_seq: u64,
+        group_id: &Option<String>,
+        path: &Path,
+        now: chrono::DateTime<Utc>,
+        present: &std::collections::HashSet<u64>,
+        mut on_progress: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u32, u32),
+    {
+        let total = chunk_sizes.len() as u32;
+        let body_from_seq = header_seq + 1;
+        if !present.contains(&header_seq) {
+            let header = MessageContent::FileHeader {
+                transfer_id: transfer_id.to_string(),
+                kind,
+                filename: filename.to_string(),
+                mime_type: mime_type.to_string(),
+                total_size,
+                chunks: total,
+                group_id: group_id.clone(),
+            };
+            self.push_packet(header_seq, transfer_id, now, header)
+                .await?;
+        }
         let mut reader =
             BufReader::new(File::open(path).map_err(|_| anyhow::anyhow!("file_read_error"))?);
         for (i, chunk_size) in chunk_sizes.iter().copied().enumerate() {
@@ -1136,57 +1247,119 @@ impl Dialogue {
                 .read_exact(&mut data)
                 .map_err(|_| anyhow::anyhow!("file_read_error"))?;
             let seq = body_from_seq + i as u64;
-            let content = MessageContent::FileChunk {
-                transfer_id: transfer_id.clone(),
-                index: i as u32,
-                total,
-                filename: filename.clone(),
-                mime_type: mime_type.clone(),
-                total_size,
-                data,
-            };
-            let chunk_id = format!("{transfer_id}:{i}");
-            self.push_packet(seq, &chunk_id, now, content).await?;
-            debug!(
-                "Sent chunk {}/{} for transfer {}",
-                i + 1,
-                total,
-                transfer_id
-            );
-            // Сообщаем подписчику о прогрессе ПОСЛЕ успешного push'а — callback
-            // получает уже отосланные индексы.
+            if !present.contains(&seq) {
+                let content = MessageContent::FileChunk {
+                    transfer_id: transfer_id.to_string(),
+                    index: i as u32,
+                    total,
+                    filename: filename.to_string(),
+                    mime_type: mime_type.to_string(),
+                    total_size,
+                    data,
+                };
+                let chunk_id = format!("{transfer_id}:{i}");
+                self.push_packet(seq, &chunk_id, now, content).await?;
+            }
             on_progress(i as u32 + 1, total);
         }
+        Ok(())
+    }
 
-        let display_msg = Message {
-            id: transfer_id.clone(),
-            dialogue: self.key.clone(),
-            sender: self.client_cfg.username.clone(),
-            content: attachment_content(
-                kind,
-                FileAttachment {
-                    filename,
-                    mime_type,
-                    size: total_size,
-                    data: Vec::new(),
-                    transfer_id: Some(transfer_id),
-                    cache_path: Some(path.to_string_lossy().into_owned()),
-                    chunk_count: total,
-                    body_from_seq,
-                    body_to_seq,
-                    downloaded: true,
-                    group_id,
-                    ephemeral_file_id: None,
-                    ephemeral_expires_at: None,
-                },
-            ),
-            timestamp: now,
-            status: MessageStatus::Sent,
-            server_seq: Some(header_seq),
-        };
-        self.store.save_message(&display_msg)?;
+    /// Множество seq из диапазона `(after_seq, to_seq]`, реально присутствующих
+    /// на сервере (по `/map`). Для resume — узнать, какие пакеты передачи уже
+    /// залиты, чтобы не слать их повторно.
+    async fn existing_seqs(
+        &self,
+        after_seq: u64,
+        to_seq: u64,
+    ) -> Result<std::collections::HashSet<u64>> {
+        let mut present = std::collections::HashSet::new();
+        let mut after = after_seq;
+        loop {
+            let m = self.fetch_map(after, to_seq).await?;
+            let last_end = m.runs.last().map(|(_, e)| *e);
+            for (b, e) in &m.runs {
+                for s in *b..=*e {
+                    present.insert(s);
+                }
+            }
+            if !m.truncated {
+                break;
+            }
+            match last_end {
+                Some(le) if le < to_seq => after = le,
+                _ => break,
+            }
+        }
+        Ok(present)
+    }
 
-        Ok(vec![display_msg])
+    /// Возобновить незавершённые исходящие файловые передачи диалога: до-слать
+    /// недостающие пакеты тех, что оборвались (выход из диалога, потеря сети,
+    /// рестарт). Возвращает сообщения, достигшие терминального статуса (`Sent` —
+    /// тело долито; `Failed` — исходный файл пропал или исчерпаны попытки) —
+    /// чтобы вызывающий обновил их в UI. Идемпотентно: дубли seq не шлются
+    /// (пропускаем по `/map`), повторный вызов на уже долитой передаче
+    /// безопасен.
+    pub async fn resume_pending_transfers(&self) -> Result<Vec<Message>> {
+        let pending = self.store.list_outbound(&self.key)?;
+        let mut updated = Vec::new();
+        for t in pending {
+            match self.resume_one(&t).await {
+                Ok(Some(msg)) => updated.push(msg),
+                Ok(None) => {}
+                Err(e) => warn!("resume transfer {}: {e}", t.transfer_id),
+            }
+        }
+        Ok(updated)
+    }
+
+    async fn resume_one(&self, t: &OutboundTransfer) -> Result<Option<Message>> {
+        // Исходный файл пропал (кэш очищен) — возобновить невозможно → Failed.
+        let path = Path::new(&t.cache_path);
+        if !fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
+            self.store
+                .update_status(&t.transfer_id, MessageStatus::Failed)?;
+            self.store.delete_outbound(&t.transfer_id)?;
+            return Ok(self.store.get_message_by_id(&self.key, &t.transfer_id)?);
+        }
+        let attempts = self.store.bump_outbound_attempts(&t.transfer_id)?;
+        let body_to_seq = t.header_seq + t.chunk_count as u64;
+        let present = self
+            .existing_seqs(t.header_seq.saturating_sub(1), body_to_seq)
+            .await?;
+        match self
+            .push_transfer_packets(
+                &t.transfer_id, t.kind, &t.filename, &t.mime_type, t.total_size, &t.chunk_sizes,
+                t.header_seq, &t.group_id, path, t.timestamp, &present, |_, _| {},
+            )
+            .await
+        {
+            Ok(()) => {
+                self.store.delete_outbound(&t.transfer_id)?;
+                self.store
+                    .update_status(&t.transfer_id, MessageStatus::Sent)?;
+                debug!("Resumed transfer {} to completion", t.transfer_id);
+                Ok(self.store.get_message_by_id(&self.key, &t.transfer_id)?)
+            }
+            Err(e) if attempts >= RESUME_MAX_ATTEMPTS => {
+                warn!(
+                    "resume transfer {} giving up after {attempts} attempts: {e}",
+                    t.transfer_id
+                );
+                self.store
+                    .update_status(&t.transfer_id, MessageStatus::Failed)?;
+                self.store.delete_outbound(&t.transfer_id)?;
+                Ok(self.store.get_message_by_id(&self.key, &t.transfer_id)?)
+            }
+            Err(e) => {
+                debug!(
+                    "resume transfer {} still incomplete (attempt {attempts}): {e}",
+                    t.transfer_id
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn write_attachment_to_path(

@@ -236,10 +236,18 @@ async fn worker_loop(
                         let _ = evt_tx.send(Evt::Status(format!("История: {e}")));
                     }
                 }
-                if let Ok((m, _)) = dlg.receive().await {
-                    let v: Vec<Msg> = m.iter().filter_map(|x| to_msg(x, &self_id, &names)).collect();
-                    if !v.is_empty() {
-                        let _ = evt_tx.send(Evt::New(peer.clone(), v));
+                match dlg.receive().await {
+                    Ok((m, _)) => {
+                        let v: Vec<Msg> =
+                            m.iter().filter_map(|x| to_msg(x, &self_id, &names)).collect();
+                        if !v.is_empty() {
+                            let _ = evt_tx.send(Evt::New(peer.clone(), v));
+                        }
+                    }
+                    // Раньше ошибка тут глоталась молча → «свежая история не
+                    // подгружается» без всякого следа. Показываем причину.
+                    Err(e) => {
+                        let _ = evt_tx.send(Evt::Status(format!("Приём по сети: {e}")));
                     }
                 }
                 let d = dlg.clone();
@@ -259,7 +267,10 @@ async fn worker_loop(
                                 }
                             }
                             Ok(_) => {}
-                            Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
+                            Err(e) => {
+                                let _ = tx.send(Evt::Status(format!("Приём по сети: {e}")));
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
                         }
                     }
                 }));
@@ -401,9 +412,20 @@ fn build_ctx(
     }
     ui_list.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 
+    // Резервные серверы: сперва из профиля UI (client.json), затем доп. из CLI.
+    // Без них клиент ходит ТОЛЬКО на primary; если тот лежит — приём молча
+    // не работает (а UI-клиент с резервом тем временем подтягивает историю).
+    let mut reserve_all: Vec<String> = Vec::new();
+    for r in up.reserve.iter().chain(reserve.iter()) {
+        let r = r.trim();
+        if !r.is_empty() && r != server_url && !reserve_all.iter().any(|x| x == r) {
+            reserve_all.push(r.to_string());
+        }
+    }
+
     let ctx = UiCtx {
         server_url,
-        reserve: reserve.to_vec(),
+        reserve: reserve_all,
         server_id,
         private_key: up.private_key.clone(),
         db_path,

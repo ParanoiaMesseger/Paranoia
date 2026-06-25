@@ -1328,10 +1328,13 @@ Rectangle {
             root.uploadTick++
         }
         function onAttachmentsPicked(uris) {
-            // Мобильный нативный пикер — складываем в стейджинг (как десктоп-диалоги).
-            // Тип угадываем по расширению (фото/видео), отправится при «Отправить».
+            // attachmentsPicked эмитится ТОЛЬКО для фото (видео уходит отдельным
+            // путём в consumePickedAttachment). Прикрепляем с явным kind="image":
+            // content://-URI из галереи не имеет расширения, и guessAttachmentKind
+            // классифицировал бы его как "file" → файлы уходили бы по одному вместо
+            // мозаики (regression после стейджинга вложений).
             for (var i = 0; i < uris.length; ++i)
-                root.stageAttachment(uris[i])
+                root.stageAttachment(uris[i], "image")
         }
         // ── Видео: транскод перед отправкой («Подготовка…») ──
         // ── Голосовое: тик длительности записи ──

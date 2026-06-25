@@ -1267,6 +1267,41 @@ pub extern "C" fn paranoia_receive_keyring(
     })
 }
 
+/// Возобновить незавершённые исходящие файловые передачи диалога: до-слать
+/// недостающие чанки тех, что оборвались (выход из диалога, потеря сети,
+/// рестарт). Возвращает JSON-массив сообщений, достигших терминального статуса
+/// (Sent — долито; Failed — исходный файл пропал/исчерпаны попытки), или NULL
+/// при ошибке. Освободить через paranoia_free_string. Идемпотентно — безопасно
+/// звать периодически/при реконнекте/открытии диалога.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_resume_pending_transfers_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("resume_error", || {
+        clear_last_error();
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.resume_pending_transfers()) {
+                Ok(msgs) => messages_to_c_string(&msgs),
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "resume_error",
+                    ));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
 /// Проверить количество новых серверных сообщений без загрузки payload.
 /// Возвращает 0 при успехе и пишет результат в out_count.
 #[unsafe(no_mangle)]

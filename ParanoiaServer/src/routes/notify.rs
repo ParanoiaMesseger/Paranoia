@@ -73,8 +73,15 @@ async fn do_notify(state: &Arc<AppState>, req: NotifyRequest) -> ApiResponse {
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.partner);
 
+    // Считаем «новые» относительно собственного last_seq отправителя: пакеты,
+    // отправленные этим же аккаунтом (с любого устройства) или уже прочитанные на
+    // другом устройстве, не считаются новыми — иначе своё сообщение всплывает
+    // уведомлением на других устройствах. Floor читается заново при каждом подсчёте
+    // (в т.ч. после пробуждения long-poll), поэтому гонка push→pull исключена:
+    // push поднимает last_seq отправителя ДО пробуждения ожидающих (см. push.rs).
+
     // Быстрая ветка: уже есть новые — отдать сразу.
-    match state.store.count_after(&dialogue_id, req.seq) {
+    match state.store.count_new_for_user(&dialogue_id, req.seq, &req.sender) {
         Ok(n) if n > 0 => return ok(n),
         Ok(_) => {}
         Err(e) => return fail(format!("{e}")),
@@ -93,14 +100,14 @@ async fn do_notify(state: &Arc<AppState>, req: NotifyRequest) -> ApiResponse {
     let waker = state.dialogue_notify.waker(&dialogue_id).await;
     let notified = waker.notified();
     tokio::pin!(notified);
-    match state.store.count_after(&dialogue_id, req.seq) {
+    match state.store.count_new_for_user(&dialogue_id, req.seq, &req.sender) {
         Ok(n) if n > 0 => return ok(n),
         Ok(_) => {}
         Err(e) => return fail(format!("{e}")),
     }
 
     let _ = tokio::time::timeout(Duration::from_millis(wait_ms as u64), notified.as_mut()).await;
-    match state.store.count_after(&dialogue_id, req.seq) {
+    match state.store.count_new_for_user(&dialogue_id, req.seq, &req.sender) {
         Ok(n) => ok(n),
         Err(e) => fail(format!("{e}")),
     }

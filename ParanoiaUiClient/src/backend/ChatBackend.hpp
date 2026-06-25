@@ -249,6 +249,7 @@ private:
     void decrementFilesInFlight();
     bool m_activePollInFlight       = false;
     bool m_arrivedInFlight          = false;
+    bool m_resumeInFlight           = false;
     int m_activePollRetryCount      = 0;
     EncryptedImageProvider *m_imageProvider = nullptr;
 
@@ -274,6 +275,10 @@ private:
     void endMessagesLoading();
     void pollActiveChat();
     void refreshArrivedStatus();
+    // Возобновить незавершённые исходящие файловые передачи активного диалога
+    // (resumable transfers): до-слать недостающие чанки после обрыва. Зовётся при
+    // открытии диалога и в цикле активного опроса (ретрай при возврате сети).
+    void resumePendingTransfers();
     void scheduleActiveChatPoll(int delayMs = -1);
     static int randomActiveNotifyDelayMs();
     int retryActiveNotifyDelayMs() const;
