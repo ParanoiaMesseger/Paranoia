@@ -131,6 +131,43 @@ pub struct Message {
     pub timestamp: DateTime<Utc>,
     pub status: MessageStatus,
     pub server_seq: Option<u64>,
+    /// Детерминированный id темы (ветки диалога), к которой относится сообщение.
+    /// `None` — сообщение в «Главной» (без темы). Производная от `topic_name`
+    /// через [`derive_topic_id`]; одинакова у обеих сторон и на всех устройствах.
+    #[serde(default)]
+    pub topic_id: Option<String>,
+    /// Отображаемое имя темы как его ввёл отправитель (last-write-wins). Едет по
+    /// проводу внутри шифртекста; `topic_id` пересчитывается из него локально.
+    #[serde(default)]
+    pub topic_name: Option<String>,
+}
+
+/// Нормализовать имя темы для детерминированного ключа: схлопнуть пробелы +
+/// lower-case. Гарантирует, что «Релиз», «релиз » и «релиз» сходятся в один
+/// `topic_id`. (Unicode-NFC — будущее усиление; здесь без новой зависимости.)
+pub fn normalize_topic_name(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Детерминированный `topic_id` темы из её имени, привязанный к диалогу.
+/// `DialogueKey` канонична (a<b), поэтому обе стороны и все устройства,
+/// набрав одно имя, сходятся в один id — без серверного реестра и без
+/// координации. Хеш имени живёт ТОЛЬКО внутри E2E-шифртекста, на сервер не
+/// попадает (словарная атака доступна лишь тому, у кого уже есть канал).
+pub fn derive_topic_id(key: &DialogueKey, name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = normalize_topic_name(name);
+    let mut h = Sha256::new();
+    h.update(b"paranoia:topic:v1\n");
+    h.update(key.a.as_bytes());
+    h.update(b"\n");
+    h.update(key.b.as_bytes());
+    h.update(b"\n");
+    h.update(normalized.as_bytes());
+    hex::encode(h.finalize())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -270,4 +307,33 @@ mod tests {
         assert_eq!(value["FileChunk"]["data"], json!("AQIDBA=="));
     }
 
+    #[test]
+    fn topic_id_is_deterministic_and_normalization_converges() {
+        let k = DialogueKey::new("alice", "bob");
+        // Регистр и лишние пробелы сходятся в один id.
+        let a = derive_topic_id(&k, "Релиз 0.3");
+        let b = derive_topic_id(&k, "  релиз   0.3 ");
+        assert_eq!(a, b, "нормализация должна сводить варианты к одному id");
+        // Разные имена — разные id.
+        assert_ne!(a, derive_topic_id(&k, "багфиксы"));
+    }
+
+    #[test]
+    fn topic_id_is_symmetric_across_participants() {
+        // DialogueKey канонична (a<b), поэтому обе стороны сходятся в один id.
+        let from_alice = DialogueKey::new("alice", "bob");
+        let from_bob = DialogueKey::new("bob", "alice");
+        assert_eq!(
+            derive_topic_id(&from_alice, "релиз"),
+            derive_topic_id(&from_bob, "релиз")
+        );
+    }
+
+    #[test]
+    fn topic_id_is_scoped_to_dialogue() {
+        // Одно имя в разных диалогах → разные id (salt = участники).
+        let k1 = DialogueKey::new("alice", "bob");
+        let k2 = DialogueKey::new("alice", "carol");
+        assert_ne!(derive_topic_id(&k1, "общее"), derive_topic_id(&k2, "общее"));
+    }
 }

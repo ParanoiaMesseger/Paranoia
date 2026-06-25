@@ -107,6 +107,47 @@ Java_app_paranoia_client_ParanoiaForegroundService_paranoiaServiceNotifyCountWai
     return (jlong)count;
 }
 
+// MULTI-notify long-poll: ОДИН запрос на N диалогов вместо N одиночных
+// (снимает «N диалогов = N запросов» — батарея фон-сервиса). items_json —
+// массив [{"partner":"<server_id>","seq":<u64>}, …]; сервер просыпается на ПЕРВОМ
+// зажёгшемся диалоге. Возвращает JSON-массив [{"partner":"…","n":<u64>}, …]
+// ТОЛЬКО зажжённых (n>0), либо null при ошибке (paranoia_last_error). Тот же
+// маскированный /notify (правок маскировки не нужно — режим по форме запроса).
+JNIEXPORT jstring JNICALL
+Java_app_paranoia_client_ParanoiaForegroundService_paranoiaServiceNotifyMultiWait(
+    JNIEnv *env, jclass cls,
+    jstring server_url, jstring reserve_urls_json,
+    jstring signing_key_b64, jstring sender_server_id,
+    jstring items_json, jint long_poll_ms)
+{
+    (void)cls;
+    const char *url    = take_chars(env, server_url);
+    const char *res    = take_chars(env, reserve_urls_json);
+    const char *sk     = take_chars(env, signing_key_b64);
+    const char *sender = take_chars(env, sender_server_id);
+    const char *items  = take_chars(env, items_json);
+
+    char *out      = NULL;
+    const int rc = paranoia_service_notify_multi_wait(
+        url ? url : "", res ? res : "", sk ? sk : "",
+        sender ? sender : "", items ? items : "",
+        long_poll_ms < 0 ? 0u : (uint32_t)long_poll_ms, &out);
+
+    release_chars(env, server_url, url);
+    release_chars(env, reserve_urls_json, res);
+    release_chars(env, signing_key_b64, sk);
+    release_chars(env, sender_server_id, sender);
+    release_chars(env, items_json, items);
+
+    if (rc != 0 || !out) {
+        if (out) paranoia_free_string(out);
+        return NULL;
+    }
+    jstring result = (*env)->NewStringUTF(env, out);
+    paranoia_free_string(out);
+    return result;
+}
+
 // Stateless опрос входящих звонков: возвращает JSON-массив конвертов
 // [{sender,kind,payload_json,ts_ms}] или null при ошибке (paranoia_last_error).
 JNIEXPORT jstring JNICALL

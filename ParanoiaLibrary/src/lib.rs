@@ -27,7 +27,7 @@ pub use admin::AdminKeyPair;
 pub use dialogue::Dialogue;
 pub use types::{
     AttachmentKind, ClientConfig, DialogueConfig, DialogueKey, DialogueKeyEntry, FileAttachment,
-    Message, MessageContent, MessageStatus,
+    Message, MessageContent, MessageStatus, derive_topic_id, normalize_topic_name,
 };
 
 use client_cover::ClientCover;
@@ -171,5 +171,43 @@ impl ParanoiaClient {
 
     pub fn last_pulled_seq(&self, key: &DialogueKey) -> anyhow::Result<u64> {
         self.store.get_last_pulled_seq(key)
+    }
+
+    /// Multi-notify: ОДИН long-poll-запрос следит за N диалогами сразу, заменяя N
+    /// отдельных `Dialogue::notify_*`. Снимает «N диалогов = N запросов» (батарея
+    /// фон-сервиса). `targets` — `(partner_server_id, dialogue_key)`. Курсор seq
+    /// берётся локально (`last_pulled_seq`); сервер сам отсекает уже прочитанное
+    /// (receipt-floor в `count_new_for_user`), поэтому per-диалог `/arrived` НЕ
+    /// нужен — корректная «непрочитанность» без лишних запросов. Подпись одна
+    /// (identity-ключ над `sender` ‖ (partner‖seq)*). Возвращает `(partner,
+    /// count_new)` ТОЛЬКО для зажжённых (`count_new > 0`).
+    pub async fn notify_unread_multi(
+        &self,
+        targets: &[(String, DialogueKey)],
+        long_poll_ms: u32,
+    ) -> anyhow::Result<Vec<(String, u64)>> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let username = self.config.username.clone();
+        let mut items = Vec::with_capacity(targets.len());
+        for (partner, key) in targets {
+            let seq = self.store.get_last_pulled_seq(key)?;
+            items.push((partner.clone(), seq));
+        }
+        // Тот же канон подписи, что в server/notify.rs do_notify_multi.
+        let mut canon = username.clone();
+        for (partner, seq) in &items {
+            canon.push_str(partner);
+            canon.push_str(&seq.to_string());
+        }
+        let sig = crate::crypto::sign(&self.config.signing_key, canon.as_bytes());
+        let core = crate::transport::CoreNotifyMulti {
+            sender: username,
+            items,
+            sig,
+            long_poll_ms,
+        };
+        self.transport.notify_multi(&core).await
     }
 }

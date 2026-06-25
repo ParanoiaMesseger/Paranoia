@@ -107,6 +107,13 @@ private:
     void pollBackgroundNotifications();
     void pollNotifications(PollMode mode);
     QList<PollTarget> buildPollTargets(PollMode mode) const;
+    // Сгруппировать targets по сессии и сделать ОДИН multi-notify на сессию
+    // (вместо N одиночных notify) — снимает «N диалогов = N запросов» (батарея).
+    // Сетевой вызов БЕЗ удержания ffiMutex (handle копируется под коротким локом).
+    // Возвращает счётчики только по зажжённым диалогам (n>0). Статика — вызывается
+    // с воркер-потока, не трогает члены координатора.
+    static QList<NotifyCount> pollCountsGrouped(const QList<PollTarget> &targets, bool &anyFailed,
+                                                QString &error);
     void applyNotifyCounts(PollMode mode, const QList<NotifyCount> &counts, bool anyFailed, const QString &error);
     void presentNotification(PollMode mode, quint64 total, const QString &profileId, const QString &peer);
     void rebuildBackgroundPollSnapshot();

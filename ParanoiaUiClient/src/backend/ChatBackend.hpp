@@ -39,6 +39,15 @@ public:
     Q_INVOKABLE void openChat(const QString &peer);
     Q_INVOKABLE void stopChat();
     Q_INVOKABLE void sendText(const QString &text);
+    /// Задать активную тему (ветку диалога): новые исходящие уходят в неё. Пустая
+    /// строка — «Главная». QML зовёт при выборе чипа темы. Применяется к FFI-хендлу
+    /// в момент каждой отправки (атомарно под ffiMutex), плюс капчурится в outbox.
+    Q_INVOKABLE void setActiveTopic(const QString &topicName);
+    /// Текущее имя активной темы (для QML).
+    Q_INVOKABLE QString activeTopic() const { return m_activeTopic; }
+    /// Удалить тему целиком (все её сообщения, у обеих сторон) — на сервере и
+    /// локально. По завершении эмитит messagesDeleted(peer).
+    Q_INVOKABLE void deleteTopic(const QString &topicName);
     /// Повторная отправка ранее упавшего (status=failed) исходящего сообщения по его
     /// client_token (тап по крестику в пузыре). Возвращает статус в "sending" и
     /// перезапускает сетевую отправку из сохранённой записи аутбокса.
@@ -115,6 +124,12 @@ public:
     Q_INVOKABLE QString getDraft(const QString &peer) const;
     Q_INVOKABLE void setDraft(const QString &peer, const QString &text);
     Q_INVOKABLE void clearDraft(const QString &peer);
+
+    // Последний выбранный фильтр темы (ветки) диалога — восстанавливается при входе.
+    // Хранится в Dialog::lastTopic (внутри dialogs.json), как и draft. Сентинелы
+    // "__all__"/"__main__" или имя темы; пусто → "__all__" (все).
+    Q_INVOKABLE QString getLastTopic(const QString &peer) const;
+    Q_INVOKABLE void setLastTopic(const QString &peer, const QString &topic);
 
 signals:
     void messagesReceived(const QString &peer, const QVariantList &messages);
@@ -196,6 +211,9 @@ private:
     static void iosAvatarPickedTrampoline(void *ctx, const char *path);
 #endif
     QString m_activePeer;
+    // Активная тема (ветка) открытого диалога: новые исходящие уходят в неё.
+    // Пусто — «Главная». Сбрасывается при openChat.
+    QString m_activeTopic;
     // Peer, для которого открыт photo picker под АВАТАР (Android). Выставляется
     // в pickAvatarFromGallery, потребляется one-shot в consumePickedAttachment.
     QString m_pendingAvatarPeer;
@@ -232,6 +250,7 @@ private:
         QString replyText;
         qint64  ts = 0;
         QString status = QStringLiteral("sending");   // sending | failed
+        QString topic;                                 // имя темы (пусто — «Главная»)
     };
     QMap<QString, OutboxItem> m_outbox;   // client_token → запись
     void insertOptimisticText(const OutboxItem &item, const QString &clientToken);

@@ -287,31 +287,10 @@ void NotificationCoordinator::pollNotifications(PollMode mode)
     QPointer self(this);
     m_notifyPollInFlight = true;
     QThreadPool::globalInstance()->start([self, targets, mode]() {
-        QList<NotifyCount> counts;
-        QString error;
-        bool anyFailed = false;
         if (!self) return;
-        for (const auto &target : targets) {
-            uint64_t count    = 0;
-            const QString key = target.profileId + QLatin1Char(':') + target.peer;
-            // Копируем handle под МГНОВЕННЫМ локом, сам сетевой poll делаем БЕЗ
-            // ffiMutex (как ActiveChatNotifier): иначе при потере сети connect_timeout
-            // висел бы под общим локом и морозил весь UI (см. фикс «намертво»).
-            std::shared_ptr<ParanoiaFFI> ffi;
-            {
-                QMutexLocker locker(&target.session->ffiMutex);
-                ffi = target.session->ffi;
-            }
-            if (!ffi) continue;
-            const int rc = ffi->notify_unread_count_keyring(target.session->serverId, target.peerServerId,
-                                                            target.keyringJson, count);
-            if (rc != 0) {
-                anyFailed = true;
-                if (error.isEmpty()) error = ParanoiaFFI::last_error();
-                continue;
-            }
-            counts.append({key, target.profileId, target.peer, static_cast<quint64>(count)});
-        }
+        QString error;
+        bool anyFailed                = false;
+        const QList<NotifyCount> counts = pollCountsGrouped(targets, anyFailed, error);
         if (!self) return;
         QMetaObject::invokeMethod(self, [self, counts, anyFailed, error, mode]() {
             if (!self) return;
@@ -319,6 +298,72 @@ void NotificationCoordinator::pollNotifications(PollMode mode)
             self->applyNotifyCounts(mode, counts, anyFailed, error);
         });
     });
+}
+
+QList<NotificationCoordinator::NotifyCount>
+NotificationCoordinator::pollCountsGrouped(const QList<PollTarget> &targets, bool &anyFailed, QString &error)
+{
+    QList<NotifyCount> counts;
+    anyFailed = false;
+
+    // Группируем по сессии: один identity-ключ сессии = один multi-notify-запрос.
+    QList<std::shared_ptr<ServerSession>> order;
+    QMap<ServerSession *, QList<PollTarget>> bySession;
+    for (const auto &t : targets) {
+        if (!t.session) continue;
+        if (!bySession.contains(t.session.get())) order.append(t.session);
+        bySession[t.session.get()].append(t);
+    }
+
+    for (const auto &session : order) {
+        const QList<PollTarget> &group = bySession[session.get()];
+        // peerServerId -> исходный target (для маппинга ответа обратно в key/peer).
+        QMap<QString, PollTarget> byServerId;
+        QJsonArray items;
+        for (const auto &t : group) {
+            QJsonObject o;
+            o["peer"] = t.peerServerId;
+            // keyringJson — JSON-массив строкой; вкладываем как массив, чтобы Rust
+            // распарсил его как keyring сразу (без двойного экранирования).
+            const QJsonDocument kr = QJsonDocument::fromJson(t.keyringJson.toUtf8());
+            o["keyring"]           = kr.isArray() ? QJsonValue(kr.array()) : QJsonValue(QJsonArray());
+            items.append(o);
+            byServerId.insert(t.peerServerId, t);
+        }
+
+        // Копируем handle+serverId под МГНОВЕННЫМ локом, сам сетевой запрос — БЕЗ
+        // ffiMutex (как ActiveChatNotifier): иначе при потере сети connect_timeout
+        // висел бы под общим локом и морозил весь UI (см. фикс «намертво»).
+        std::shared_ptr<ParanoiaFFI> ffi;
+        QString serverId;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            ffi      = session->ffi;
+            serverId = session->serverId;
+        }
+        if (!ffi) continue;
+
+        const QString itemsJson = QString::fromUtf8(QJsonDocument(items).toJson(QJsonDocument::Compact));
+        int rc                  = 0;
+        const QString resJson   = ffi->notify_unread_multi_keyring(serverId, itemsJson, 0, rc);
+        if (rc != 0) {
+            anyFailed = true;
+            if (error.isEmpty()) error = ParanoiaFFI::last_error();
+            continue;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(resJson.toUtf8());
+        for (const auto &v : doc.array()) {
+            const QJsonObject o = v.toObject();
+            const QString sid   = o["peer"].toString();
+            const quint64 n     = static_cast<quint64>(o["n"].toDouble());
+            auto it             = byServerId.find(sid);
+            if (it == byServerId.end() || n == 0) continue;
+            const PollTarget &t = it.value();
+            counts.append({t.profileId + QLatin1Char(':') + t.peer, t.profileId, t.peer, n});
+        }
+    }
+    return counts;
 }
 
 QList<NotificationCoordinator::PollTarget> NotificationCoordinator::buildPollTargets(PollMode mode) const
@@ -569,43 +614,32 @@ void NotificationCoordinator::runBackgroundPollFromService()
 #endif
 
     quint64 total = 0;
-    int failures  = 0;
     QString firstError;
     QString hintProfileId;
     QString hintPeer;
     int pendingPeers = 0;
-    for (const auto &target : targets) {
-        uint64_t count = 0;
-        int rc;
-        {
-            QMutexLocker locker(&target.session->ffiMutex);
-            if (!target.session->ffi) continue;
-            rc = target.session->ffi->notify_unread_count_keyring(target.session->serverId, target.peerServerId,
-                                                           target.keyringJson, count);
-        }
-        if (rc != 0) {
-            ++failures;
-            if (firstError.isEmpty()) firstError = ParanoiaFFI::last_error();
-            continue;
-        }
-        if (count > 0) {
-            total += static_cast<quint64>(count);
-            ++pendingPeers;
-            if (pendingPeers == 1) {
-                hintProfileId = target.profileId;
-                hintPeer      = target.peer;
-            } else {
-                hintProfileId.clear();
-                hintPeer.clear();
-            }
+    // Один multi-notify на сессию вместо N одиночных (батарея фон-сервиса).
+    bool anyFailed                  = false;
+    const QList<NotifyCount> counts = pollCountsGrouped(QList<PollTarget>(targets.begin(), targets.end()),
+                                                        anyFailed, firstError);
+    for (const auto &c : counts) {
+        if (c.count == 0) continue;
+        total += c.count;
+        ++pendingPeers;
+        if (pendingPeers == 1) {
+            hintProfileId = c.profileId;
+            hintPeer      = c.peer;
+        } else {
+            hintProfileId.clear();
+            hintPeer.clear();
         }
     }
 #if defined(Q_OS_ANDROID)
     __android_log_print(ANDROID_LOG_INFO, "ParanoiaService",
-                        "background notify poll finished: total=%llu pendingPeers=%d failures=%d",
-                        static_cast<unsigned long long>(total), pendingPeers, failures);
+                        "background notify poll finished: total=%llu pendingPeers=%d failed=%d",
+                        static_cast<unsigned long long>(total), pendingPeers, anyFailed ? 1 : 0);
 #endif
-    if (failures > 0 && total == 0) {
+    if (anyFailed && total == 0) {
 #if defined(Q_OS_ANDROID)
         __android_log_print(ANDROID_LOG_WARN, "ParanoiaService", "background notify polling had failures: %s",
                             firstError.toUtf8().constData());

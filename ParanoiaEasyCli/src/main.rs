@@ -4,8 +4,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use paranoia_lib::{
-    AdminKeyPair, ClientConfig, Dialogue, DialogueConfig, DialogueKey, DialogueKeyEntry,
-    MessageContent, ParanoiaClient, crypto,
+    AdminKeyPair, ClientConfig, Dialogue, DialogueConfig, DialogueKey, DialogueKeyEntry, Message,
+    MessageContent, ParanoiaClient, crypto, derive_topic_id,
     export::{
         EXPORT_PAYLOAD_VERSION, ExportAdminServer, ExportDialogue, ExportKeyEntry, ExportPayload,
         ExportProfileType, ExportServer, ecies_decrypt, ecies_encrypt, generate_device_keypair,
@@ -342,11 +342,20 @@ async fn cmd_send(
     db_path: &str,
     peer: &str,
     text: &str,
+    topic: Option<String>,
 ) -> Result<()> {
     let client = build_client(server_url, reserve_server_urls, username, db_path)?;
-    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?.with_topic(topic);
     let msg = dialogue.send_text(text).await?;
-    println!("Sent: id={} seq={:?}", msg.id, msg.server_seq);
+    println!(
+        "Sent: id={} seq={:?}{}",
+        msg.id,
+        msg.server_seq,
+        msg.topic_name
+            .as_deref()
+            .map(|t| format!(" topic={t}"))
+            .unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -367,6 +376,45 @@ async fn cmd_react(
     Ok(())
 }
 
+/// TOPIC LIST — темы диалога (имя, число сообщений). Перед выводом тянем новые
+/// сообщения, чтобы свежесозданные собеседником темы появились.
+async fn cmd_topic_list(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let _ = dialogue.receive().await;
+    let topics = dialogue.list_topics()?;
+    if topics.is_empty() {
+        println!("(тем нет — все сообщения в «Главной»)");
+    } else {
+        for (_, name, count) in topics {
+            println!("{name}\t{count} сообщ.");
+        }
+    }
+    Ok(())
+}
+
+/// TOPIC DELETE — удалить тему целиком (у обеих сторон).
+async fn cmd_topic_delete(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+    topic: &str,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let n = dialogue.delete_topic(topic).await?;
+    println!("Удалена тема «{topic}»: {n} сообщ.");
+    Ok(())
+}
+
 /// RECEIVE
 async fn cmd_receive(
     server_url: &str,
@@ -375,6 +423,7 @@ async fn cmd_receive(
     db_path: &str,
     peer: &str,
     long_poll_ms: u32,
+    topic: Option<String>,
 ) -> Result<()> {
     let client = build_client(server_url, reserve_server_urls, username, db_path)?;
     let dialogue = build_dialogue(&client, server_url, username, peer)?;
@@ -391,19 +440,40 @@ async fn cmd_receive(
             "Warning: {decrypt_errors} message(s) could not be decrypted (wrong session key?)"
         );
     }
-    // Формат строки СТРОГО `[ts] id=<id> <sender>: <text>` — его парсит MCP-сервер
-    // (paranoia_mcp.py MSG_RE). НЕ менять без синхронной правки regex.
+    let filter_id = topic
+        .as_deref()
+        .map(|t| derive_topic_id(&dialogue.key, t));
+    print_messages(&msgs, filter_id.as_deref());
+    Ok(())
+}
+
+/// Префикс темы для строки сообщения (`[#имя] `), пусто для «Главной».
+fn topic_prefix(m: &Message) -> String {
+    m.topic_name
+        .as_deref()
+        .map(|t| format!("[#{t}] "))
+        .unwrap_or_default()
+}
+
+/// Напечатать сообщения в формате `[ts] {tprefix}id=<id> <sender>: <text>`.
+/// `filter_topic_id` — если задан, показываем только сообщения этой темы.
+fn print_messages(msgs: &[Message], filter_topic_id: Option<&str>) {
     for m in msgs {
+        if let Some(want) = filter_topic_id {
+            if m.topic_id.as_deref() != Some(want) {
+                continue;
+            }
+        }
+        let tp = topic_prefix(m);
         match &m.content {
             MessageContent::Text(t) => {
-                println!("[{}] id={} {}: {}", m.timestamp, m.id, m.sender, t);
+                println!("[{}] {tp}id={} {}: {}", m.timestamp, m.id, m.sender, t);
             }
             other => {
-                println!("[{}] id={} {}: {:?}", m.timestamp, m.id, m.sender, other);
+                println!("[{}] {tp}id={} {}: {:?}", m.timestamp, m.id, m.sender, other);
             }
         }
     }
-    Ok(())
 }
 
 fn guess_mime(path: &str) -> String {
@@ -431,9 +501,13 @@ async fn cmd_watch(
     peer: &str,
     interval: u64,
     long_poll_ms: u32,
+    topic: Option<String>,
 ) -> Result<()> {
     let client = build_client(server_url, reserve_server_urls, username, db_path)?;
     let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let filter_id = topic
+        .as_deref()
+        .map(|t| derive_topic_id(&dialogue.key, t));
     loop {
         if long_poll_ms > 0 {
             // best-effort: при ошибке (обрыв/CDN режет) идём на обычный pull.
@@ -443,16 +517,7 @@ async fn cmd_watch(
         if decrypt_errors > 0 {
             eprintln!("Warning: {decrypt_errors} message(s) could not be decrypted");
         }
-        for m in msgs {
-            match &m.content {
-                MessageContent::Text(t) => {
-                    println!("[{}] id={} {}: {}", m.timestamp, m.id, m.sender, t);
-                }
-                other => {
-                    println!("[{}] id={} {}: {:?}", m.timestamp, m.id, m.sender, other);
-                }
-            }
-        }
+        print_messages(&msgs, filter_id.as_deref());
         if long_poll_ms == 0 {
             tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))).await;
         }
@@ -466,9 +531,10 @@ async fn cmd_send_file(
     db_path: &str,
     peer: &str,
     path: &std::path::Path,
+    topic: Option<String>,
 ) -> Result<()> {
     let client = build_client(server_url, reserve_server_urls, username, db_path)?;
-    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?.with_topic(topic);
     let filename = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -1264,6 +1330,8 @@ async fn cmd_mcp(
     let channel = env("PARANOIA_MCP_CHANNEL")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
+    // Скоуп темы: несколько channel-сессий на одном аккаунте, каждая в своей ветке.
+    let channel_topic = env("PARANOIA_MCP_CHANNEL_TOPIC").filter(|s| !s.trim().is_empty());
 
     let cfg = mcp_server::McpConfig {
         server_url: server_url.to_string(),
@@ -1276,6 +1344,7 @@ async fn cmd_mcp(
         ui_app_data_root,
         ui_pin,
         channel,
+        channel_topic,
     };
     mcp_server::serve(cfg).await
 }
@@ -1394,6 +1463,15 @@ enum Commands {
         peer: String,
         #[arg(long)]
         text: String,
+        /// Тема (ветка диалога) по имени; пусто → «Главная». Тема создаётся
+        /// неявно и появляется у собеседника автоматически.
+        #[arg(long)]
+        topic: Option<String>,
+    },
+    /// Темы (ветки) диалога: список / удаление
+    Topic {
+        #[command(subcommand)]
+        cmd: TopicCmd,
     },
     /// Отправить эмодзи-реакцию на сообщение по message_id
     React {
@@ -1433,6 +1511,9 @@ enum Commands {
         /// Сервер капает величину своим notify_long_poll_max_ms.
         #[arg(long, default_value_t = 0)]
         long_poll_ms: u32,
+        /// Показывать только сообщения этой темы (по имени). Пусто — все.
+        #[arg(long)]
+        topic: Option<String>,
     },
     /// Непрерывное получение: цикл receive. С --long-poll-ms сервер держит запрос
     /// (near-real-time); иначе пауза --interval между опросами (короткий поллинг).
@@ -1447,6 +1528,9 @@ enum Commands {
         /// Удержание long-poll, мс (0 = короткий поллинг с паузой --interval).
         #[arg(long, default_value_t = 25000)]
         long_poll_ms: u32,
+        /// Показывать только сообщения этой темы (по имени). Пусто — все.
+        #[arg(long)]
+        topic: Option<String>,
     },
     /// Отправить файл/картинку (канал авто-выбирается по размеру).
     SendFile {
@@ -1456,6 +1540,9 @@ enum Commands {
         peer: String,
         #[arg(long)]
         path: PathBuf,
+        /// Тема (ветка диалога) по имени; пусто → «Главная».
+        #[arg(long)]
+        topic: Option<String>,
     },
     /// Скачать вложение полученного сообщения по message-id в файл.
     Download {
@@ -1582,6 +1669,27 @@ enum DialogueCmd {
     SetKey {
         #[arg(long)]
         peer: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TopicCmd {
+    /// Список тем диалога: имя, число сообщений.
+    List {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+    },
+    /// Удалить тему целиком (все её сообщения, у обеих сторон).
+    Delete {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+        /// Имя темы.
+        #[arg(long)]
+        topic: String,
     },
 }
 
@@ -1759,6 +1867,7 @@ async fn main() -> Result<()> {
             username,
             peer,
             text,
+            topic,
         } => {
             cmd_send(
                 &cli.server_url,
@@ -1767,9 +1876,33 @@ async fn main() -> Result<()> {
                 &cli.db_path,
                 &peer,
                 &text,
+                topic,
             )
             .await?;
         }
+        Commands::Topic { cmd } => match cmd {
+            TopicCmd::List { username, peer } => {
+                cmd_topic_list(
+                    &cli.server_url,
+                    &cli.reserve_server_urls,
+                    &username,
+                    &cli.db_path,
+                    &peer,
+                )
+                .await?;
+            }
+            TopicCmd::Delete { username, peer, topic } => {
+                cmd_topic_delete(
+                    &cli.server_url,
+                    &cli.reserve_server_urls,
+                    &username,
+                    &cli.db_path,
+                    &peer,
+                    &topic,
+                )
+                .await?;
+            }
+        },
         Commands::Tui { username } => {
             tui::run(
                 cli.server_url.clone(),
@@ -1825,6 +1958,7 @@ async fn main() -> Result<()> {
             username,
             peer,
             long_poll_ms,
+            topic,
         } => {
             cmd_receive(
                 &cli.server_url,
@@ -1833,6 +1967,7 @@ async fn main() -> Result<()> {
                 &cli.db_path,
                 &peer,
                 long_poll_ms,
+                topic,
             )
             .await?;
         }
@@ -1841,6 +1976,7 @@ async fn main() -> Result<()> {
             peer,
             interval,
             long_poll_ms,
+            topic,
         } => {
             cmd_watch(
                 &cli.server_url,
@@ -1850,6 +1986,7 @@ async fn main() -> Result<()> {
                 &peer,
                 interval,
                 long_poll_ms,
+                topic,
             )
             .await?;
         }
@@ -1857,6 +1994,7 @@ async fn main() -> Result<()> {
             username,
             peer,
             path,
+            topic,
         } => {
             cmd_send_file(
                 &cli.server_url,
@@ -1865,6 +2003,7 @@ async fn main() -> Result<()> {
                 &cli.db_path,
                 &peer,
                 &path,
+                topic,
             )
             .await?;
         }

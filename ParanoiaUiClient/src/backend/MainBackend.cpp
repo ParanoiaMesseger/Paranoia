@@ -171,10 +171,11 @@ MainBackend::MainBackend(NotificationCoordinator &notifications, QObject *parent
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::loginStateChanged);
     connect(SessionStore::instance(), &SessionStore::sessionsChanged, this, &MainBackend::sessionsChanged);
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::sessionsChanged);
-    // Авто-синхронизация корпоративной связки при активации сессии (вход/старт).
-    // Тихо no-op, если профиль не корпоративный (нет corp-конфига).
+    // Ленивая раздача: при активации сессии тянем ТОЛЬКО ростер (своё ФИО +
+    // список доступных диалогов), без ключей. Тихо no-op, если профиль не
+    // корпоративный. Ключи диалогов качаются по «Добавить диалог».
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this,
-            &MainBackend::syncCorporateKeyring);
+            &MainBackend::fetchCorporateRoster);
 
     // Любое изменение списка диалогов / keyring'а / сессий — повод пересобрать
     // snapshot для notifications-сервиса. Подцепляем оба сигнала: dialogsChanged
@@ -631,9 +632,10 @@ void MainBackend::loginClientInternal(const QString &server, const QString &user
                 // Маскировка commercial/corporate раздаётся нодой — сверяем и
                 // применяем при входе (no-op, если профиль её не задаёт).
                 self->syncMaskingFromNode();
-                // Корпоративная связка: подтянуть ключи диалогов с коллегами
-                // (no-op, если профиль не корпоративный — нет corp-конфига).
-                self->syncCorporateKeyring();
+                // Ленивая раздача: на входе тянем ТОЛЬКО ростер (своё ФИО +
+                // список доступных диалогов), ключи НЕ качаем — они скачиваются
+                // по «Добавить диалог». No-op, если профиль не корпоративный.
+                self->fetchCorporateRoster();
             }
             self->m_notifications->schedulePoll(0);
         });
@@ -1242,11 +1244,10 @@ QVariantList MainBackend::getAdminServers() const
 // Конфиг (url+psk) задаётся только импортом корпоративного бандла при регистрации
 // (см. importProfile → corp.json) — ручной настройки в UI нет.
 
-void MainBackend::applyCorporateKeyring(const QString &keyringJson)
+void MainBackend::applyCorporateSelfName(const QJsonObject &root)
 {
     const auto session = SessionStore::instance()->activeSession();
     if (!session) return;
-    const QJsonObject root = QJsonDocument::fromJson(keyringJson.toUtf8()).object();
     // Своё ФИО приходит с корп-сервера — для корпоративных профилей оно и есть
     // отображаемое имя пользователя (ник пользователь не задаёт сам).
     const QString selfFullName = root.value("full_name").toString().trimmed();
@@ -1258,6 +1259,52 @@ void MainBackend::applyCorporateKeyring(const QString &keyringJson)
         Utils::upsertProfileManifest(session->profileId, session->server, selfFullName, true);
         emit loginStateChanged();
     }
+}
+
+void MainBackend::applyCorporateRosterNames(const QJsonObject &root)
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    // server_id → ФИО из ростера.
+    QHash<QString, QString> names;
+    for (const auto &v : root.value("roster").toArray()) {
+        const QJsonObject o = v.toObject();
+        const QString u = o.value("username").toString();
+        const QString fn = o.value("full_name").toString().trimmed();
+        if (!u.isEmpty() && !fn.isEmpty()) names.insert(u, fn);
+    }
+    if (names.isEmpty()) return;
+
+    bool changed = false;
+    for (auto &d : session->dialogs) {
+        if (d.peerServerId.isEmpty()) continue;
+        const QString fn = names.value(d.peerServerId);
+        if (fn.isEmpty() || d.peer == fn) continue;
+        // Локальное переименование пользователя приоритетнее серверного ФИО —
+        // его метку не трогаем (display всё равно берёт localName).
+        if (!d.localName.isEmpty()) continue;
+        // Метка `peer` — сквозной ключ маршрутизации, обязан быть уникальным:
+        // при коллизии с другим диалогом серверное ФИО не применяем.
+        bool taken = false;
+        for (const auto &o : session->dialogs)
+            if (&o != &d && o.peer == fn) { taken = true; break; }
+        if (taken) continue;
+        d.peer = fn;
+        changed = true;
+    }
+    if (changed) {
+        session->saveDialogs();
+        emit dialogsChanged();
+    }
+}
+
+void MainBackend::applyCorporateKeyring(const QString &keyringJson)
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const QJsonObject root = QJsonDocument::fromJson(keyringJson.toUtf8()).object();
+    applyCorporateSelfName(root);
+    applyCorporateRosterNames(root);
     // roster: username(server_id) → ФИО (имя диалога)
     QHash<QString, QString> names;
     for (const auto &v : root.value("roster").toArray()) {
@@ -1285,19 +1332,139 @@ void MainBackend::applyCorporateKeyring(const QString &keyringJson)
                                updated > 0 ? MainBackend::tr("Связка обновлена") : MainBackend::tr("Связка пуста"));
 }
 
-void MainBackend::syncCorporateKeyring()
+bool MainBackend::readCorpConfig(QString &distUrl, QString &psk, QString &serverId,
+                                 QString &signingKey) const
 {
     const auto session = SessionStore::instance()->activeSession();
-    if (!session) return; // тихо: вызывается и автоматически при смене сессии
+    if (!session) return false;
     const QJsonObject cfg = Utils::readJsonObjectFile(Paths::profileCorp(session->profileId));
-    QString distUrl   = cfg.value("url").toString().trimmed(); // url = нода дистрибуции
-    const QString psk = cfg.value("psk").toString().trimmed();
-    if (distUrl.isEmpty() || psk.isEmpty()) return; // профиль не корпоративный — тихо
+    distUrl = cfg.value("url").toString().trimmed(); // url = нода дистрибуции
+    psk     = cfg.value("psk").toString().trimmed();
+    if (distUrl.isEmpty() || psk.isEmpty()) return false; // профиль не корпоративный
     while (distUrl.endsWith('/')) distUrl.chop(1);
+    serverId   = session->serverId;
+    signingKey = session->private_key;
+    return !serverId.isEmpty() && !signingKey.isEmpty();
+}
 
-    const QString serverId   = session->serverId;
-    const QString signingKey = session->private_key;
-    if (serverId.isEmpty() || signingKey.isEmpty()) return;
+bool MainBackend::isCorporateProfile() const
+{
+    QString distUrl, psk, serverId, signingKey;
+    return readCorpConfig(distUrl, psk, serverId, signingKey);
+}
+
+void MainBackend::fetchCorporateRoster()
+{
+    QString distUrl, psk, serverId, signingKey;
+    if (!readCorpConfig(distUrl, psk, serverId, signingKey)) {
+        emit corporateRosterFetched(false, {}, tr("Профиль не корпоративный"));
+        return;
+    }
+    QPointer self(this);
+    // corp_fetch_roster: блокирующий HTTP + расшифровка — на worker-потоке.
+    QThreadPool::globalInstance()->start([self, distUrl, serverId, signingKey, psk]() {
+        const QString rosterJson = ParanoiaFFI::corp_fetch_roster(distUrl, serverId, signingKey, psk);
+        const QString err = rosterJson.isEmpty() ? ParanoiaFFI::last_error() : QString();
+        QMetaObject::invokeMethod(qApp, [self, rosterJson, err]() {
+            if (!self) return;
+            if (rosterJson.isEmpty()) {
+                if (err.isEmpty())
+                    emit self->corporateRosterFetched(true, {}, MainBackend::tr("Ростер пуст"));
+                else
+                    emit self->corporateRosterFetched(false, {}, MainBackend::tr("Ростер: ") + err);
+                return;
+            }
+            // Какие server_id уже заведены локально — пометить «added».
+            QSet<QString> existing;
+            if (const auto session = SessionStore::instance()->activeSession())
+                for (const auto &d : session->dialogs)
+                    if (!d.peerServerId.isEmpty()) existing.insert(d.peerServerId);
+
+            const QJsonObject root = QJsonDocument::fromJson(rosterJson.toUtf8()).object();
+            // Ленивый логин: ростер несёт своё ФИО + ФИО контактов — применяем
+            // как имя профиля и подтягиваем переименования диалогов с сервера
+            // (раньше это делала жадная связка). Ключи НЕ качаются.
+            self->applyCorporateSelfName(root);
+            self->applyCorporateRosterNames(root);
+            QVariantList entries;
+            QString autoAddCompany, autoAddCompanyName;
+            for (const auto &v : root.value("roster").toArray()) {
+                const QJsonObject o = v.toObject();
+                const QString username = o.value("username").toString();
+                if (username.isEmpty()) continue;
+                const bool isCompany = o.value("is_company").toBool();
+                QVariantMap m;
+                m["username"]  = username; // server_id партнёра
+                m["fullName"]  = o.value("full_name").toString();
+                m["added"]     = existing.contains(username);
+                m["isCompany"] = isCompany;
+                entries.push_back(m);
+                // Аккаунт компании (канал служебных анонсов) — авто-добавляем,
+                // чтобы анонсы join/leave были видны без ручного «Добавить».
+                if (isCompany && !existing.contains(username)) {
+                    autoAddCompany = username;
+                    autoAddCompanyName = o.value("full_name").toString();
+                }
+            }
+            emit self->corporateRosterFetched(true, entries,
+                entries.isEmpty() ? MainBackend::tr("Ростер пуст") : QString());
+            if (!autoAddCompany.isEmpty())
+                self->addCorporateDialogue(autoAddCompany, autoAddCompanyName);
+        });
+    });
+}
+
+void MainBackend::addCorporateDialogue(const QString &partnerServerId, const QString &displayName)
+{
+    QString distUrl, psk, serverId, signingKey;
+    if (!readCorpConfig(distUrl, psk, serverId, signingKey)) {
+        emit corporateDialogueAdded(false, partnerServerId, tr("Профиль не корпоративный"));
+        return;
+    }
+    if (partnerServerId.trimmed().isEmpty()) {
+        emit corporateDialogueAdded(false, partnerServerId, tr("Пустой идентификатор диалога"));
+        return;
+    }
+    const QString partner = partnerServerId.trimmed();
+    const QString label = displayName.trimmed();
+    QPointer self(this);
+    // corp_fetch_dialogue: блокирующий HTTP + расшифровка — на worker-потоке.
+    QThreadPool::globalInstance()->start([self, distUrl, serverId, signingKey, psk, partner, label]() {
+        const QString keyJson = ParanoiaFFI::corp_fetch_dialogue(distUrl, serverId, partner, signingKey, psk);
+        const QString err = keyJson.isEmpty() ? ParanoiaFFI::last_error() : QString();
+        QMetaObject::invokeMethod(qApp, [self, keyJson, err, partner, label]() {
+            if (!self) return;
+            if (keyJson.isEmpty()) {
+                emit self->corporateDialogueAdded(false, partner,
+                    err.isEmpty() ? MainBackend::tr("Ключ диалога недоступен")
+                                  : MainBackend::tr("Диалог: ") + err);
+                return;
+            }
+            const QJsonObject e = QJsonDocument::fromJson(keyJson.toUtf8()).object();
+            const QByteArray key = QByteArray::fromBase64(e.value("key").toString().toLatin1());
+            const quint64 startSeq = static_cast<quint64>(e.value("start_seq").toDouble(1));
+            if (key.size() != 32 || startSeq == 0) {
+                emit self->corporateDialogueAdded(false, partner, MainBackend::tr("Повреждённый ключ диалога"));
+                return;
+            }
+            // Имя: локальная метка → ФИО из блоба → server_id. Существующий
+            // локальный алиас приоритетнее (не перезатираем).
+            QString peer = label;
+            if (const auto session = SessionStore::instance()->activeSession())
+                for (const auto &d : session->dialogs)
+                    if (d.peerServerId == partner) { peer = d.peer; break; }
+            if (peer.isEmpty()) peer = e.value("full_name").toString().trimmed();
+            if (peer.isEmpty()) peer = partner;
+            self->upsertDialogKeyringEntry(peer, partner, key, startSeq, false);
+            emit self->corporateDialogueAdded(true, partner, MainBackend::tr("Диалог добавлен"));
+        });
+    });
+}
+
+void MainBackend::syncCorporateKeyring()
+{
+    QString distUrl, psk, serverId, signingKey;
+    if (!readCorpConfig(distUrl, psk, serverId, signingKey)) return; // не корпоративный — тихо
 
     QPointer self(this);
     // corp_sync делает блокирующий HTTP + расшифровку — на worker-потоке.

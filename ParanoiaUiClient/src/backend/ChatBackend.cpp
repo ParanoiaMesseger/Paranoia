@@ -387,6 +387,7 @@ bool ChatBackend::readReceiptsEnabled() const
 void ChatBackend::openChat(const QString &peer)
 {
     m_activePeer = peer;
+    m_activeTopic.clear();   // новый чат — фильтр темы сбрасывается на «Главную»
     // Новый сеанс диалога — даём провалившимся ранее превью ещё один шанс
     // (вдруг тело вложения уже долетело/докачалось).
     m_failedPreviewIds.clear();
@@ -451,6 +452,67 @@ void ChatBackend::sendTextReply(const QString &text, const QString &replyToId, c
     sendTextMessage(text, replyToId, replySender, replyText);
 }
 
+void ChatBackend::setActiveTopic(const QString &topicName)
+{
+    m_activeTopic = topicName.trimmed();
+}
+
+void ChatBackend::deleteTopic(const QString &topicName)
+{
+    const QString topic = topicName.trimmed();
+    if (m_activePeer.isEmpty() || topic.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const auto *dlg = session->findDialog(m_activePeer);
+    if (!dlg) return;
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, topic]() {
+        if (!self) return;
+        int rc = -1;
+        QString err;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            if (!session->ffi) {
+                err = "client_not_ready";
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                rc                   = session->ffi->delete_topic_keyring(serverId, peerId, keyringJson, topic);
+                if (rc < 0) err = ParanoiaFFI::last_error();
+            }
+        }
+        QMetaObject::invokeMethod(self, [self, peer, topic, rc, err]() {
+            if (!self) return;
+            if (rc >= 0) {
+                // Удалили активную тему — сбрасываем фильтр на «Главную».
+                if (self->m_activeTopic == topic) self->m_activeTopic.clear();
+                // Хирургически убираем сообщения темы из кэша (как deleteMessagesUntil).
+                auto &cache = self->m_messageCache[peer];
+                QVariantList kept;
+                QSet<QString> keptIds;
+                for (const auto &msg : cache) {
+                    const QVariantMap map = msg.toMap();
+                    if (map.value("topic_name").toString() == topic) continue;
+                    kept.append(msg);
+                    const QString id = map.value("id").toString();
+                    if (!id.isEmpty()) keptIds.insert(id);
+                }
+                cache                 = kept;
+                self->m_seenIds[peer] = keptIds;
+                emit self->messagesReceived(peer, cache);
+                emit self->messagesDeleted(peer);
+                emit self->dialogsChanged();
+            } else {
+                emit self->serverHistoryError(ChatBackend::tr("Не удалось удалить тему: ") + err);
+            }
+        });
+    });
+}
+
 void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId, const QString &replySender,
                                   const QString &replyText)
 {
@@ -495,6 +557,7 @@ void ChatBackend::sendTextMessage(const QString &text, const QString &replyToId,
     item.replySender = replySender;
     item.replyText   = replyText;
     item.ts          = nowMs;
+    item.topic       = m_activeTopic;   // капчурим тему в момент нажатия «отправить»
     m_outbox.insert(clientToken, item);
     insertOptimisticText(item, clientToken);
     dispatchOutbox(clientToken);
@@ -516,6 +579,9 @@ void ChatBackend::insertOptimisticText(const OutboxItem &item, const QString &cl
     msg["seq"]               = 0;
     msg["isMe"]              = true;
     msg["reactions_json"]    = QStringLiteral("[]");
+    // Тема (ветка): оптимистичное сразу видно под нужным чипом. topic_id появится
+    // после коммита из FFI; для фильтра чип-бара достаточно topic_name.
+    msg["topic_name"]        = item.topic;
     if (!item.replyToId.trimmed().isEmpty()) {
         msg["reply_to_id"]   = item.replyToId;
         msg["reply_sender"]  = item.replySender;
@@ -595,6 +661,7 @@ void ChatBackend::dispatchOutbox(const QString &clientToken)
     const QString replyToId    = item.replyToId;
     const QString replySender  = item.replySender;
     const QString replySummary = item.replyText.simplified().left(180);
+    const QString topic        = item.topic;   // тема, захваченная при нажатии «отправить»
 
     // Гард от двойной сетевой отправки одного и того же токена (повторный retry-тап).
     if (m_sendInFlightKeys.contains(clientToken)) return;
@@ -602,7 +669,7 @@ void ChatBackend::dispatchOutbox(const QString &clientToken)
 
     QPointer self(this);
     QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, text, keyringJson, clientToken,
-                                          hasReply, replyToId, replySender, replySummary]() {
+                                          hasReply, replyToId, replySender, replySummary, topic]() {
         if (!self) return;
         QString json;
         QString err;
@@ -612,6 +679,9 @@ void ChatBackend::dispatchOutbox(const QString &clientToken)
                 err = "client_not_ready";
             } else {
                 const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                // Активная тема на хендле — под тем же ffiMutex, что и отправка
+                // (атомарно): with_keyring_dialogue применит её к диалогу.
+                session->ffi->set_active_topic(topic);
                 if (hasReply)
                     json = session->ffi->send_text_reply_json_keyring(serverId, peerId, keyringJson, text, replyToId,
                                                                       replySender, replySummary);
@@ -717,6 +787,10 @@ void ChatBackend::sendReaction(const QString &targetId, const QString &emoji)
                     err = "client_not_ready";
                 } else {
                     const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                    // Реакции — вне тем (резолвятся по target_id). Сбрасываем
+                    // активную тему хендла, чтобы не унаследовать чужую от
+                    // предыдущей отправки.
+                    session->ffi->set_active_topic(QString());
                     json = session->ffi->send_reaction_json_keyring(serverId, peerId, keyringJson, trimmedTarget,
                                                                     trimmedEmoji);
                     if (json.isEmpty()) err = ParanoiaFFI::last_error();
@@ -785,6 +859,7 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
     const QString serverId     = session->serverId;
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
+    const QString topic        = m_activeTopic;   // вложение уходит в активную тему
     const QString sendKey =
         peer + QChar('\n') + (sourceIsContent ? source : originalPath) + QChar('\n') + QString::number(originalSize);
     if (m_sendInFlightKeys.contains(sendKey)) return;
@@ -793,7 +868,7 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
 
     QPointer self(this);
     QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, source,
-                                          sourceIsContent, originalPath, originalMimeType, sendKey]() {
+                                          sourceIsContent, originalPath, originalMimeType, sendKey, topic]() {
         if (!self) return;
         QString json;
         QString err;
@@ -859,6 +934,7 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
                 err = "client_not_ready";
             } else {
                 const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                session->ffi->set_active_topic(topic);   // вложение в активную тему
                 // Авто-выбор канала по размеру (история / эфемерно / отказ) —
                 // порог и лимиты резолвит lib (см. send_file_auto).
                 json = session->ffi->send_file_auto_json_keyring_with_progress(
@@ -972,16 +1048,18 @@ void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QStri
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
     const QString peerId       = peerServerId.isEmpty() ? peer : peerServerId;
+    const QString topic        = m_activeTopic;   // мозаика уходит в активную тему
 
     incrementFilesInFlight();
     QPointer self(this);
     QThreadPool::globalInstance()->start(
-        [self, session, peer, serverId, peerId, keyringJson, groupId, caption, photos]() {
+        [self, session, peer, serverId, peerId, keyringJson, groupId, caption, photos, topic]() {
             if (!self) return;
             // 1. Заголовок группы (подпись + group_id) — отдельным сообщением.
             {
                 QMutexLocker locker(&session->ffiMutex);
                 if (session->ffi) {
+                    session->ffi->set_active_topic(topic);
                     const QString hj = session->ffi->send_photo_group_json_keyring(serverId, peerId, keyringJson,
                                                                                    groupId, caption);
                     if (!hj.isEmpty()) {
@@ -1023,6 +1101,7 @@ void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QStri
                     } else if (!session->ffi) {
                         err = QStringLiteral("client_not_ready");
                     } else {
+                        session->ffi->set_active_topic(topic);
                         json = session->ffi->send_photo_grouped_file_json_keyring_with_progress(
                             serverId, peerId, keyringJson, path, gp.mime, groupId,
                             &paranoia_chat_progress_trampoline, ctx.get());
@@ -2051,6 +2130,27 @@ void ChatBackend::clearDraft(const QString &peer)
     setDraft(peer, QString());
 }
 
+QString ChatBackend::getLastTopic(const QString &peer) const
+{
+    if (peer.isEmpty()) return {};
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const Dialog *dlg = session->findDialog(peer);
+    return dlg ? dlg->lastTopic : QString();
+}
+
+void ChatBackend::setLastTopic(const QString &peer, const QString &topic)
+{
+    if (peer.isEmpty()) return;
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    Dialog *dlg = session->findDialog(peer);
+    if (!dlg) return;
+    if (dlg->lastTopic == topic) return;
+    dlg->lastTopic = topic;
+    session->saveDialogs();
+}
+
 void ChatBackend::pickPhotoFromGallery()
 {
 #if defined(Q_OS_ANDROID)
@@ -2759,6 +2859,10 @@ QVariantList ChatBackend::parseMessages(const QString &json) const
                                    : QString();
         // Тег фото-группы (мозаики): есть и на image-вложениях, и на заголовке.
         msg["group_id"]             = obj.value(QStringLiteral("group_id")).toString();
+        // Тема (ветка диалога): id (детерминированная производная) + имя. Пусто —
+        // «Главная». Чип-бар тем строится из этих полей загруженной истории.
+        msg["topic_id"]             = obj.value(QStringLiteral("topic_id")).toString();
+        msg["topic_name"]           = obj.value(QStringLiteral("topic_name")).toString();
         // Эфемерный большой файл (тело в blob, скачивание по TTL).
         msg["ephemeral_file_id"]    = obj.value(QStringLiteral("ephemeral_file_id")).toString();
         msg["ephemeral_expires_at"] = obj.value(QStringLiteral("ephemeral_expires_at")).toVariant().toLongLong();

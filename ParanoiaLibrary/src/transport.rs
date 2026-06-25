@@ -44,6 +44,16 @@ pub struct CoreNotify {
     pub long_poll_ms: u32,
 }
 
+/// Внутренний запрос multi-notify: один запрос следит за N диалогами сразу.
+/// `items` — пары (partner, курсор seq). Подпись одна: `sender` ‖ (partner‖seq)*
+/// по порядку как в `items`. `long_poll_ms` в подпись не входит (как в [`CoreNotify`]).
+pub struct CoreNotifyMulti {
+    pub sender: String,
+    pub items: Vec<(String, u64)>,
+    pub sig: Vec<u8>,
+    pub long_poll_ms: u32,
+}
+
 /// Внутренний запрос /map: получить карту живых seq в диалоге.
 pub struct CoreMap {
     pub sender: String,
@@ -273,6 +283,17 @@ impl Transport {
         let body = cover.wrap_notify(core)?;
         let resp = self.cover_send(&cover, "notify", "/notify", &body).await?;
         cover.unwrap_notify_response(&resp)
+    }
+
+    /// Multi-notify: один long-poll-запрос на N диалогов. Возвращает только
+    /// зажжённые диалоги — `(partner, count_new)` с `count_new > 0`. Тот же
+    /// эндпоинт `/notify` (маскировка не меняется) — сервер различает режим по
+    /// форме (непустой `items`).
+    pub async fn notify_multi(&self, core: &CoreNotifyMulti) -> Result<Vec<(String, u64)>> {
+        let cover = self.current_cover();
+        let body = cover.wrap_notify_multi(core)?;
+        let resp = self.cover_send(&cover, "notify", "/notify", &body).await?;
+        cover.unwrap_notify_response_multi(&resp)
     }
 
     /// Зондировать notify: считаем endpoint доступным, если сервер ответил
@@ -676,6 +697,10 @@ mod tests {
             unreachable!()
         }
 
+        fn wrap_notify_multi(&self, _core: &CoreNotifyMulti) -> Result<Value> {
+            unreachable!()
+        }
+
         fn wrap_determinate(&self, _core: &CoreDeterminate) -> Result<Value> {
             unreachable!()
         }
@@ -689,6 +714,10 @@ mod tests {
         }
 
         fn unwrap_notify_response(&self, _body: &Value) -> Result<u64> {
+            unreachable!()
+        }
+
+        fn unwrap_notify_response_multi(&self, _body: &Value) -> Result<Vec<(String, u64)>> {
             unreachable!()
         }
 

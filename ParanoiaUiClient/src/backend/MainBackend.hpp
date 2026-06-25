@@ -115,6 +115,21 @@ public:
     /// автоматически при входе/смене сессии (no-op без corp.json).
     Q_INVOKABLE void syncCorporateKeyring();
 
+    // ── Корп-API: ленивая раздача ключей (ростер + пер-диалоговые ключи) ────
+    /// Корпоративный ли активный профиль (есть corp.json с url+psk). UI решает,
+    /// показывать ли в «Добавить диалог» список доступных диалогов (ростер)
+    /// вместо обмена QR/JSON.
+    Q_INVOKABLE bool isCorporateProfile() const;
+    /// Стянуть РОСТЕР — список доступных диалогов сотрудника БЕЗ ключей. Асинхронно;
+    /// результат — через corporateRosterFetched. Ключи НЕ качаются: только список,
+    /// чтобы показать «какие диалоги можно добавить». No-op без corp.json.
+    Q_INVOKABLE void fetchCorporateRoster();
+    /// Скачать ключ ОДНОГО диалога с partnerServerId и завести/обновить диалог
+    /// локально (ленивая раздача — по выбору сотрудника в «Добавить диалог»).
+    /// displayName — локальная метка (пусто → ФИО из ростера/server_id). Асинхронно;
+    /// результат — через corporateDialogueAdded.
+    Q_INVOKABLE void addCorporateDialogue(const QString &partnerServerId, const QString &displayName);
+
     // ── Маскировка трафика ──────────────────────────────────────────────────
     /// Статус маскировки активного профиля для экрана управления:
     /// {tariff, profileName, state, hasUrl, hasTrusted}.
@@ -276,6 +291,13 @@ signals:
     /// Результат синхронизации связки по Корп-API. ok, число обновлённых
     /// диалогов, сообщение.
     void corporateSyncFinished(bool ok, int updated, const QString &message);
+    /// Результат загрузки ростера. ok, список записей
+    /// [{username, fullName, added}] (added — уже заведён ли диалог локально),
+    /// сообщение об ошибке.
+    void corporateRosterFetched(bool ok, const QVariantList &entries, const QString &message);
+    /// Результат добавления одного диалога по ростеру. ok, server_id партнёра,
+    /// сообщение.
+    void corporateDialogueAdded(bool ok, const QString &partnerServerId, const QString &message);
     void maskingStateChanged();
     void connectionStateChanged();
     /// Результат применения/сверки маскировки. ok, сообщение для UI.
@@ -308,6 +330,18 @@ private:
     /// Применить расшифрованный JSON связки (roster+keyring) к активной сессии.
     /// Вызывать на главном потоке.
     void applyCorporateKeyring(const QString &keyringJson);
+    /// Применить своё ФИО из корп-блоба (full_name) как отображаемое имя
+    /// корпоративного профиля. Общая часть для жадной связки и ленивого ростера.
+    /// Вызывать на главном потоке.
+    void applyCorporateSelfName(const QJsonObject &root);
+    /// Подтянуть переименования корп-контактов с сервера: обновить метку `peer`
+    /// существующих диалогов из ФИО ростера (server-authoritative для корпа).
+    /// Уважает локальное переименование пользователя (localName) — его не трогает,
+    /// и не создаёт коллизию меток. Вызывать на главном потоке.
+    void applyCorporateRosterNames(const QJsonObject &root);
+    /// Прочитать corp-конфиг активного профиля (url дистрибуции + psk + serverId +
+    /// signing key). false → профиль не корпоративный/нет активной сессии.
+    bool readCorpConfig(QString &distUrl, QString &psk, QString &serverId, QString &signingKey) const;
 
     // ── Local Vault lifecycle ────────────────────────────────────────────
     void initVault();
