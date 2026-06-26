@@ -42,6 +42,7 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
         QString localName     = obj["localName"].toString();
         QString avatar        = obj["avatar"].toString();
         qint64 lastActivityMs = static_cast<qint64>(obj["lastActivityMs"].toDouble(0));
+        QString lastTopic     = obj["lastTopic"].toString();
         QList<DialogKeyEntry> keyring;
 
         const QJsonArray keyringJson = obj["keyring"].toArray();
@@ -57,7 +58,7 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
                   [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
         if (!peer.isEmpty())
             dialogs.append({peer, peerServerId, keyring, lastMsg, draft, receiptsEnabled, localName, avatar,
-                            lastActivityMs});
+                            lastActivityMs, lastTopic});
     }
     return dialogs;
 }
@@ -86,6 +87,7 @@ void Dialog::saveToPath(const QString &path, const QList<Dialog> &dialogs)
         if (!d.localName.isEmpty()) o["localName"] = d.localName;
         if (!d.avatar.isEmpty()) o["avatar"] = d.avatar;
         if (d.lastActivityMs > 0) o["lastActivityMs"] = static_cast<double>(d.lastActivityMs);
+        if (!d.lastTopic.isEmpty()) o["lastTopic"] = d.lastTopic;
         arr.append(QJsonValue(o));
     }
     // Через Utils::writeFile — для путей внутри profiles/ это уйдёт в

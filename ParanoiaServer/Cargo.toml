@@ -1,6 +1,6 @@
 [package]
 name = "paranoia"
-version = "0.2.18"
+version = "0.2.20"
 edition = "2024"
 
 [[bin]]
@@ -15,6 +15,8 @@ codegen-units = 1
 
 [dependencies]
 tokio = { version = "1.52.3", features = ["full"] }
+# select_all для multi-/notify: один таск опрашивает N wakers (легче, чем N тасков).
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 axum = { version = "0.8.9", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

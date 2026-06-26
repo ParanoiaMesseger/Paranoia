@@ -39,16 +39,33 @@ pub struct MapCore {
     pub sig: String,
 }
 
+/// Один элемент multi-notify: пара (partner, курсор seq). Внутри AEAD-конверта.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct NotifyItemCore {
+    pub partner: String,
+    #[serde(default)]
+    pub seq: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NotifyCore {
     pub sender: String,
+    /// Одиночный режим: один диалог. В multi-режиме пусто (см. `items`).
+    #[serde(default)]
     pub partner: String,
+    #[serde(default)]
     pub seq: u64,
     pub sig: String,
     /// Желаемое удержание long-poll (мс); `0`/отсутствует — короткий поллинг.
     /// Внутри AEAD-конверта cover'а; в подпись `/notify` НЕ входит (см. notify.rs).
     #[serde(default)]
     pub long_poll_ms: u32,
+    /// Multi-notify: список диалогов в одном запросе. Пусто → одиночный режим
+    /// (старая логика, `partner`/`seq`). Непусто → сервер следит за всеми и
+    /// возвращает зажжённые. Длина переменная → может слегка течь число диалогов
+    /// по размеру шифртекста; при необходимости — паддинг до бакетов (TODO).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<NotifyItemCore>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -124,6 +141,13 @@ pub struct MapRespCore {
     pub message: String,
 }
 
+/// Один зажжённый диалог в ответе multi-notify.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct NotifyRespItemCore {
+    pub partner: String,
+    pub n: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NotifyRespCore {
     pub ok: bool,
@@ -131,6 +155,9 @@ pub struct NotifyRespCore {
     pub n: u64,
     #[serde(default)]
     pub message: String,
+    /// Multi-notify: диалоги с новыми сообщениями (`n>0`). Пусто в одиночном режиме.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<NotifyRespItemCore>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

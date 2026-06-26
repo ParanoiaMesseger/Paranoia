@@ -222,6 +222,12 @@ pub extern "C" fn paranoia_android_init(
 pub struct ParanoiaHandle {
     pub(crate) client: ParanoiaClient,
     pub(crate) rt: Runtime,
+    /// Активная тема (ветка диалога), в которую уходят НОВЫЕ исходящие
+    /// сообщения. Применяется ко всем диалогам, строящимся в
+    /// [`with_keyring_dialogue`]. GUI показывает один чат за раз и выставляет
+    /// её при открытии чата/выборе чипа темы (`paranoia_set_active_topic`).
+    /// `None` — «Главная».
+    pub(crate) active_topic: std::sync::Mutex<Option<String>>,
 }
 
 impl ParanoiaHandle {
@@ -231,6 +237,11 @@ impl ParanoiaHandle {
 
     pub(crate) fn runtime(&self) -> &Runtime {
         &self.rt
+    }
+
+    /// Снимок активной темы (клон под коротким локом).
+    pub(crate) fn active_topic_snapshot(&self) -> Option<String> {
+        self.active_topic.lock().ok().and_then(|g| g.clone())
     }
 }
 
@@ -715,7 +726,7 @@ pub extern "C" fn paranoia_corp_publish(
         let result = (|| -> anyhow::Result<String> {
             let psk = crate::crypto::decode_b64(&psk_b64)
                 .map_err(|_| anyhow::anyhow!("invalid_psk"))?;
-            let blob = crate::corp::seal(&psk, &sid, version, plaintext.as_bytes())?;
+            let blob = crate::corp::seal(&psk, &sid, version, crate::corp::CTX_KEYRING, plaintext.as_bytes())?;
             let blob_b64 = crate::crypto::encode_b64(&blob);
             crate::corp_api::corp_push(&dist, &secret, &sid, version, &blob_b64)
         })();
@@ -791,6 +802,133 @@ pub extern "C" fn paranoia_corp_sync(
         let sk = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_ptr());
         let psk = ffi_try!(cstr_arg(psk_b64), invalid_argument_ptr());
         admin_result_to_c(crate::corp_api::corp_sync(&dist, &sid, &sk, &psk))
+    })
+}
+
+// ── Ленивая раздача корп-ключей (ростер + пер-диалоговые ключи) ──────────────
+
+/// Забрать и расшифровать РОСТЕР сотрудника — список доступных диалогов БЕЗ
+/// ключей. Возвращает plaintext roster JSON, пустую строку если ростера ещё нет,
+/// или NULL при ошибке. Клиент показывает его в «Добавить диалог». Free: paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_fetch_roster(
+    dist_url: *const c_char,
+    server_id: *const c_char,
+    signing_key_b64: *const c_char,
+    psk_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        let sk = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_ptr());
+        let psk = ffi_try!(cstr_arg(psk_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::corp_api::corp_fetch_roster(&dist, &sid, &sk, &psk))
+    })
+}
+
+/// Забрать и расшифровать ключ ОДНОГО диалога с partner_server_id (ленивая
+/// раздача — качается, когда сотрудник добавляет именно этот диалог). Возвращает
+/// plaintext dialogue-key JSON, пустую строку если ключа нет, или NULL при ошибке.
+/// Free: paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_fetch_dialogue(
+    dist_url: *const c_char,
+    server_id: *const c_char,
+    partner_server_id: *const c_char,
+    signing_key_b64: *const c_char,
+    psk_b64: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        let partner = ffi_try!(cstr_arg(partner_server_id), invalid_argument_ptr());
+        let sk = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_ptr());
+        let psk = ffi_try!(cstr_arg(psk_b64), invalid_argument_ptr());
+        admin_result_to_c(crate::corp_api::corp_fetch_dialogue(&dist, &sid, &partner, &sk, &psk))
+    })
+}
+
+/// Зашифровать РОСТЕР сотрудника его PSK (CTX_ROSTER) и запушить на ноду (подпись
+/// админ-ключом). plaintext — roster JSON. version монотонно растёт. JSON-ответ
+/// ноды или NULL. Free: paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_publish_roster(
+    dist_url: *const c_char,
+    admin_secret_b64: *const c_char,
+    server_id: *const c_char,
+    psk_b64: *const c_char,
+    version: u64,
+    plaintext: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        let psk_b64 = ffi_try!(cstr_arg(psk_b64), invalid_argument_ptr());
+        let plaintext = ffi_try!(cstr_arg(plaintext), invalid_argument_ptr());
+        let result = (|| -> anyhow::Result<String> {
+            let psk = crate::crypto::decode_b64(&psk_b64)
+                .map_err(|_| anyhow::anyhow!("invalid_psk"))?;
+            let blob = crate::corp::seal(&psk, &sid, version, crate::corp::CTX_ROSTER, plaintext.as_bytes())?;
+            let blob_b64 = crate::crypto::encode_b64(&blob);
+            crate::corp_api::corp_push_roster(&dist, &secret, &sid, version, &blob_b64)
+        })();
+        admin_result_to_c(result)
+    })
+}
+
+/// Зашифровать ключ ОДНОГО диалога сотрудника его PSK (ctx_dialogue(partner)) и
+/// запушить на ноду (подпись админ-ключом). plaintext — dialogue-key JSON.
+/// version монотонно растёт. JSON-ответ ноды или NULL. Free: paranoia_free_string.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_publish_dialogue(
+    dist_url: *const c_char,
+    admin_secret_b64: *const c_char,
+    server_id: *const c_char,
+    partner_server_id: *const c_char,
+    psk_b64: *const c_char,
+    version: u64,
+    plaintext: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        let partner = ffi_try!(cstr_arg(partner_server_id), invalid_argument_ptr());
+        let psk_b64 = ffi_try!(cstr_arg(psk_b64), invalid_argument_ptr());
+        let plaintext = ffi_try!(cstr_arg(plaintext), invalid_argument_ptr());
+        let result = (|| -> anyhow::Result<String> {
+            let psk = crate::crypto::decode_b64(&psk_b64)
+                .map_err(|_| anyhow::anyhow!("invalid_psk"))?;
+            let ctx = crate::corp::ctx_dialogue(&partner);
+            let blob = crate::corp::seal(&psk, &sid, version, &ctx, plaintext.as_bytes())?;
+            let blob_b64 = crate::crypto::encode_b64(&blob);
+            crate::corp_api::corp_push_dialogue(&dist, &secret, &sid, &partner, version, &blob_b64)
+        })();
+        admin_result_to_c(result)
+    })
+}
+
+/// Удалить ключ ОДНОГО диалога сотрудника с ноды (отзыв доступа к диалогу без
+/// снятия всей связки; подпись админ-ключом). JSON-ответ ноды или NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_corp_delete_dialogue(
+    dist_url: *const c_char,
+    admin_secret_b64: *const c_char,
+    server_id: *const c_char,
+    partner_server_id: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("corp_error", || {
+        clear_last_error();
+        let dist = ffi_try!(cstr_arg(dist_url), invalid_argument_ptr());
+        let secret = ffi_try!(cstr_arg(admin_secret_b64), invalid_argument_ptr());
+        let sid = ffi_try!(cstr_arg(server_id), invalid_argument_ptr());
+        let partner = ffi_try!(cstr_arg(partner_server_id), invalid_argument_ptr());
+        admin_result_to_c(crate::corp_api::corp_delete_dialogue(&dist, &secret, &sid, &partner))
     })
 }
 
@@ -894,6 +1032,32 @@ pub extern "C" fn paranoia_send_reaction_json_keyring(
                 }
             },
         )
+    })
+}
+
+/// Задать активную тему (ветку диалога) для последующих отправок этого
+/// клиента. `topic_name` == NULL или пустая строка → «Главная» (без темы).
+/// Применяется ко ВСЕМ диалогам, строящимся далее (GUI показывает один чат за
+/// раз; выставлять при открытии чата / выборе чипа темы). 0 — ок, -1 — ошибка.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_set_active_topic(
+    handle: *mut ParanoiaHandle,
+    topic_name: *const c_char,
+) -> i32 {
+    ffi_catch_i32("set_topic_error", || {
+        clear_last_error();
+        let h = ffi_try!(handle_ref(handle), -1);
+        let name = optional_cstr_arg(topic_name).filter(|s| !s.trim().is_empty());
+        match h.active_topic.lock() {
+            Ok(mut guard) => {
+                *guard = name;
+                0
+            }
+            Err(_) => {
+                set_last_error("set_topic_error");
+                -1
+            }
+        }
     })
 }
 
@@ -1267,6 +1431,41 @@ pub extern "C" fn paranoia_receive_keyring(
     })
 }
 
+/// Возобновить незавершённые исходящие файловые передачи диалога: до-слать
+/// недостающие чанки тех, что оборвались (выход из диалога, потеря сети,
+/// рестарт). Возвращает JSON-массив сообщений, достигших терминального статуса
+/// (Sent — долито; Failed — исходный файл пропал/исчерпаны попытки), или NULL
+/// при ошибке. Освободить через paranoia_free_string. Идемпотентно — безопасно
+/// звать периодически/при реконнекте/открытии диалога.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_resume_pending_transfers_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+) -> *mut c_char {
+    ffi_catch_ptr("resume_error", || {
+        clear_last_error();
+        with_keyring_dialogue(
+            handle,
+            user_a,
+            user_b,
+            keyring_json,
+            std::ptr::null_mut(),
+            |h, dialogue| match h.rt.block_on(dialogue.resume_pending_transfers()) {
+                Ok(msgs) => messages_to_c_string(&msgs),
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "resume_error",
+                    ));
+                    std::ptr::null_mut()
+                }
+            },
+        )
+    })
+}
+
 /// Проверить количество новых серверных сообщений без загрузки payload.
 /// Возвращает 0 при успехе и пишет результат в out_count.
 #[unsafe(no_mangle)]
@@ -1389,6 +1588,93 @@ pub extern "C" fn paranoia_notify_unread_count_keyring(
                 }
             },
         )
+    })
+}
+
+/// MULTI-notify (in-process, по сессионному handle): ОДИН long-poll-запрос на N
+/// диалогов вместо N отдельных `paranoia_notify_unread_count_keyring`. Снимает
+/// «N диалогов = N запросов» (батарея фон-сервиса / поллинг ленты). Курсор seq
+/// берётся локально из стора; сервер сам отсекает прочитанное (receipt-floor) —
+/// корректная непрочитанность без per-диалог `/arrived`.
+///
+/// `items_json` — массив `[{"peer":"<server_id>","keyring":[…keyring entries…]}, …]`.
+/// `user_a` — собственный server-id (sender). Результат в `*out_json` — массив
+/// `[{"peer":"…","n":<u64>}, …]` ТОЛЬКО зажжённых (n>0); освобождать
+/// `paranoia_free_string`. 0=ok, иначе см. `paranoia_last_error`.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_notify_unread_multi_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    items_json: *const c_char,
+    long_poll_ms: u32,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    ffi_catch_i32("notify_error", || {
+        clear_last_error();
+        if out_json.is_null() {
+            return invalid_argument_i32();
+        }
+        let h = ffi_try!(handle_ref(handle), invalid_argument_i32());
+        let a = ffi_try!(cstr_arg(user_a), invalid_argument_i32());
+        let items_raw = ffi_try!(cstr_arg(items_json), invalid_argument_i32());
+
+        let parsed: serde_json::Value = match serde_json::from_str(&items_raw) {
+            Ok(v) => v,
+            Err(_) => {
+                set_last_error("invalid_items_json");
+                return -1;
+            }
+        };
+        let arr = match parsed.as_array() {
+            Some(a) => a,
+            None => {
+                set_last_error("items_json: expected array");
+                return -1;
+            }
+        };
+
+        // (partner_server_id, dialogue_key) для каждого диалога. Битые элементы
+        // пропускаем — один кривой keyring не должен валить весь батч.
+        let mut targets: Vec<(String, DialogueKey)> = Vec::with_capacity(arr.len());
+        for it in arr {
+            let peer = match it.get("peer").and_then(|p| p.as_str()) {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => continue,
+            };
+            let keyring = match it.get("keyring") {
+                Some(k) => k.to_string(),
+                None => continue,
+            };
+            match dialogue_config_from_keyring_str(&a, &peer, &keyring) {
+                Ok(cfg) => targets.push((peer, cfg.key.clone())),
+                Err(_) => continue,
+            }
+        }
+
+        match h
+            .rt
+            .block_on(race_shutdown(h.client.notify_unread_multi(&targets, long_poll_ms)))
+        {
+            Some(Ok(lit)) => {
+                let out: Vec<serde_json::Value> = lit
+                    .into_iter()
+                    .map(|(peer, n)| serde_json::json!({ "peer": peer, "n": n }))
+                    .collect();
+                unsafe { *out_json = json_value_to_c_string(serde_json::Value::Array(out)) };
+                0
+            }
+            Some(Err(e)) => {
+                set_last_error(&classify_network_error(
+                    &anyhow_error_chain(&e),
+                    "notify_error",
+                ));
+                -1
+            }
+            None => {
+                set_last_error("shutdown");
+                -1
+            }
+        }
     })
 }
 
@@ -1696,6 +1982,36 @@ pub extern "C" fn paranoia_delete_dialogue_range_keyring(
                 0
             },
         )
+    })
+}
+
+/// Удалить тему (ветку диалога) целиком: все её сообщения и тела вложений —
+/// локально и на сервере (обычное удаление сообщений пакетом по имени темы;
+/// честный партнёр сотрёт у себя через tombstone-sweep). Возвращает число
+/// удалённых локальных сообщений (>=0) или -1 при ошибке.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_delete_topic_keyring(
+    handle: *mut ParanoiaHandle,
+    user_a: *const c_char,
+    user_b: *const c_char,
+    keyring_json: *const c_char,
+    topic_name: *const c_char,
+) -> i32 {
+    ffi_catch_i32("determinate_error", || {
+        clear_last_error();
+        let topic = ffi_try!(cstr_arg(topic_name), -1);
+        with_keyring_dialogue(handle, user_a, user_b, keyring_json, -1, |h, dialogue| {
+            match h.rt.block_on(dialogue.delete_topic(&topic)) {
+                Ok(n) => n as i32,
+                Err(e) => {
+                    set_last_error(&classify_network_error(
+                        &anyhow_error_chain(&e),
+                        "determinate_error",
+                    ));
+                    -1
+                }
+            }
+        })
     })
 }
 
@@ -2142,6 +2458,15 @@ fn cstr_arg(ptr: *const c_char) -> anyhow::Result<String> {
         .to_string())
 }
 
+/// Опциональный C-строковый аргумент: NULL/пустая → `None`, иначе строка.
+fn optional_cstr_arg(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or("").to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
 fn reserve_server_urls_json_arg(ptr: *const c_char) -> anyhow::Result<Vec<String>> {
     if ptr.is_null() {
         return Ok(Vec::new());
@@ -2184,7 +2509,11 @@ fn client_handle_from_parts(
     };
 
     match ParanoiaClient::new(cfg) {
-        Ok(client) => Box::into_raw(Box::new(ParanoiaHandle { client, rt })),
+        Ok(client) => Box::into_raw(Box::new(ParanoiaHandle {
+            client,
+            rt,
+            active_topic: std::sync::Mutex::new(None),
+        })),
         Err(_) => {
             set_last_error("client_init_error");
             std::ptr::null_mut()
@@ -2269,7 +2598,7 @@ fn with_keyring_dialogue<R: Copy>(
     let a = ffi_try!(cstr_arg(user_a), invalid_argument_value(invalid));
     let b = ffi_try!(cstr_arg(user_b), invalid_argument_value(invalid));
     match dialogue_config_from_keyring_json(&a, &b, keyring_json) {
-        Ok(cfg) => f(h, h.client.open_dialogue(cfg)),
+        Ok(cfg) => f(h, h.client.open_dialogue(cfg).with_topic(h.active_topic_snapshot())),
         Err(e) => {
             set_last_error(&classify_keyring_error(&e.to_string()));
             invalid
@@ -2338,7 +2667,15 @@ fn dialogue_config_from_keyring_json(
     keyring_json: *const c_char,
 ) -> anyhow::Result<DialogueConfig> {
     let keyring_json = cstr_arg(keyring_json)?;
-    let raw_entries: Vec<FfiKeyringEntry> = serde_json::from_str(&keyring_json)?;
+    dialogue_config_from_keyring_str(user_a, user_b, &keyring_json)
+}
+
+fn dialogue_config_from_keyring_str(
+    user_a: &str,
+    user_b: &str,
+    keyring_json: &str,
+) -> anyhow::Result<DialogueConfig> {
+    let raw_entries: Vec<FfiKeyringEntry> = serde_json::from_str(keyring_json)?;
     let mut entries = Vec::with_capacity(raw_entries.len());
     for entry in raw_entries {
         if entry.start_seq == 0 {
@@ -2389,6 +2726,10 @@ fn message_to_json(m: &Message) -> serde_json::Value {
         serde_json::json!(m.timestamp.timestamp_millis()),
     );
     obj.insert("seq".into(), serde_json::json!(m.server_seq));
+    // Тема (ветка диалога): id (детерминированная производная от имени) + имя
+    // для отображения. null — «Главная» (без темы).
+    obj.insert("topic_id".into(), serde_json::json!(m.topic_id));
+    obj.insert("topic_name".into(), serde_json::json!(m.topic_name));
 
     match &m.content {
         MessageContent::Text(text) => {
@@ -3051,6 +3392,132 @@ pub extern "C" fn paranoia_service_notify_count_wait(
                     &anyhow_error_chain(&e),
                     "service_notify_error",
                 ));
+                -1
+            }
+        }
+    })
+}
+
+/// Multi-notify: ОДИН long-poll-запрос следит за N диалогами сразу, заменяя N
+/// отдельных `paranoia_service_notify_count_wait`. Снимает «N диалогов = N
+/// запросов» (батарея/сеть фон-сервиса). Сервер просыпается на ПЕРВОМ зажёгшемся
+/// диалоге и возвращает все зажжённые. Тот же эндпоинт `/notify` (маскировка не
+/// меняется) — сервер различает режим по форме запроса.
+///
+/// `items_json` — массив `[{"partner":"<server_id>","seq":<u64>}, …]`. Подпись
+/// одна (identity-ключ над `sender` ‖ (partner‖seq)*). Полностью stateless:
+/// ключи/сервер передаются явно, без SQLCipher/vault (как в одиночном service-notify).
+///
+/// Результат пишется в `out_json` как массив `[{"partner":"…","n":<u64>}, …]`
+/// ТОЛЬКО для зажжённых диалогов (n>0). Память освобождать `paranoia_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn paranoia_service_notify_multi_wait(
+    server_url: *const c_char,
+    reserve_server_urls_json: *const c_char,
+    signing_key_b64: *const c_char,
+    sender_server_id: *const c_char,
+    items_json: *const c_char,
+    long_poll_ms: u32,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    ffi_catch_i32("service_notify_error", || {
+        clear_last_error();
+        if out_json.is_null() {
+            return invalid_argument_i32();
+        }
+        let server = ffi_try!(cstr_arg(server_url), invalid_argument_i32());
+        let reserves = ffi_try!(
+            reserve_server_urls_json_arg(reserve_server_urls_json),
+            invalid_argument_i32()
+        );
+        let sk_b64 = ffi_try!(cstr_arg(signing_key_b64), invalid_argument_i32());
+        let sender = ffi_try!(cstr_arg(sender_server_id), invalid_argument_i32());
+        let items_raw = ffi_try!(cstr_arg(items_json), invalid_argument_i32());
+
+        let sk_bytes = match decode_b64_32(&sk_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                set_last_error("invalid_signing_key: expected 32 bytes base64");
+                return -1;
+            }
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+
+        // Парсим [{partner, seq}, …].
+        let parsed: serde_json::Value = match serde_json::from_str(&items_raw) {
+            Ok(v) => v,
+            Err(_) => {
+                set_last_error("invalid_items_json");
+                return -1;
+            }
+        };
+        let items: Vec<(String, u64)> = match parsed.as_array() {
+            Some(arr) => arr
+                .iter()
+                .filter_map(|it| {
+                    Some((it.get("partner")?.as_str()?.to_string(), it.get("seq").and_then(|s| s.as_u64()).unwrap_or(0)))
+                })
+                .collect(),
+            None => {
+                set_last_error("items_json: expected array");
+                return -1;
+            }
+        };
+        if items.is_empty() {
+            // Нечего опрашивать — пустой результат, без сетевого запроса.
+            match std::ffi::CString::new("[]") {
+                Ok(s) => unsafe { *out_json = s.into_raw() },
+                Err(_) => return -1,
+            }
+            return 0;
+        }
+
+        // Подпись: sender ‖ (partner ‖ seq)* — тот же канон, что в server/notify.rs.
+        let mut signed = sender.clone();
+        for (partner, seq) in &items {
+            signed.push_str(partner);
+            signed.push_str(&seq.to_string());
+        }
+        let sig = crate::crypto::sign(&signing_key, signed.as_bytes());
+
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(_) => {
+                set_last_error("runtime_error");
+                return -1;
+            }
+        };
+        let cover = Arc::new(crate::client_cover_food::FoodDeliveryClientCover::new());
+        let transport = crate::transport::Transport::new(&server, reserves.iter(), cover);
+        let core = crate::transport::CoreNotifyMulti {
+            sender,
+            items,
+            sig,
+            long_poll_ms,
+        };
+
+        match rt.block_on(race_shutdown(transport.notify_multi(&core))) {
+            Some(Ok(lit)) => {
+                let out: Vec<serde_json::Value> = lit
+                    .into_iter()
+                    .map(|(partner, n)| serde_json::json!({ "partner": partner, "n": n }))
+                    .collect();
+                let json = serde_json::Value::Array(out).to_string();
+                match std::ffi::CString::new(json) {
+                    Ok(s) => unsafe { *out_json = s.into_raw() },
+                    Err(_) => return -1,
+                }
+                0
+            }
+            Some(Err(e)) => {
+                set_last_error(&classify_network_error(
+                    &anyhow_error_chain(&e),
+                    "service_notify_error",
+                ));
+                -1
+            }
+            None => {
+                set_last_error("shutdown");
                 -1
             }
         }

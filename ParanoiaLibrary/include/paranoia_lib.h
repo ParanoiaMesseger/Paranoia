@@ -91,6 +91,25 @@ char *paranoia_commercial_publish(CSTR dist_url, CSTR admin_secret_b64, CSTR dat
 // keyring JSON, "" если блоба нет, NULL при ошибке.
 char *paranoia_corp_sync(CSTR dist_url, CSTR server_id, CSTR signing_key_b64, CSTR psk_b64);
 
+// ── Ленивая раздача корп-ключей (ростер + пер-диалоговые ключи)
+// Забрать+расшифровать РОСТЕР (список доступных диалогов БЕЗ ключей). roster
+// JSON, "" если ростера нет, NULL при ошибке.
+char *paranoia_corp_fetch_roster(CSTR dist_url, CSTR server_id, CSTR signing_key_b64, CSTR psk_b64);
+// Забрать+расшифровать ключ ОДНОГО диалога с partner_server_id. dialogue-key
+// JSON, "" если ключа нет, NULL при ошибке.
+char *paranoia_corp_fetch_dialogue(CSTR dist_url, CSTR server_id, CSTR partner_server_id,
+                                   CSTR signing_key_b64, CSTR psk_b64);
+// Зашифровать РОСТЕР PSK (CTX_ROSTER) и запушить (подпись админ-ключом).
+char *paranoia_corp_publish_roster(CSTR dist_url, CSTR admin_secret_b64, CSTR server_id, CSTR psk_b64,
+                                   unsigned long long version, CSTR plaintext);
+// Зашифровать ключ ОДНОГО диалога PSK (ctx_dialogue) и запушить (подпись админ-ключом).
+char *paranoia_corp_publish_dialogue(CSTR dist_url, CSTR admin_secret_b64, CSTR server_id,
+                                     CSTR partner_server_id, CSTR psk_b64,
+                                     unsigned long long version, CSTR plaintext);
+// Удалить ключ ОДНОГО диалога сотрудника (отзыв доступа к диалогу; подпись админ-ключом).
+char *paranoia_corp_delete_dialogue(CSTR dist_url, CSTR admin_secret_b64, CSTR server_id,
+                                    CSTR partner_server_id);
+
 // ── Сообщения
 // Keyring API
 // использует JSON: [{"start_seq":1,"key":"base64-32-bytes"}, ...]
@@ -152,6 +171,11 @@ char *paranoia_send_file_auto_json_keyring_with_progress(ParanoiaHandle *h, CSTR
 // paranoia_last_error() в "decryption_failed:<N>".
 char *paranoia_receive_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json);
 
+// Возобновить незавершённые исходящие файловые передачи диалога (resumable
+// transfers): до-слать недостающие чанки после обрыва. Возвращает JSON-массив
+// сообщений в терминальном статусе (Sent/Failed) или NULL при ошибке.
+char *paranoia_resume_pending_transfers_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json);
+
 // Проверить количество новых сообщений без загрузки payload.
 // Возвращает 0 при успехе и пишет результат в out_count.
 int paranoia_notify_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, uint64_t *out_count);
@@ -189,6 +213,20 @@ int paranoia_service_notify_count_wait(CSTR server_url, CSTR reserve_server_urls
                                        CSTR partner_server_id, uint64_t seq,
                                        uint32_t long_poll_ms, uint64_t *out_count);
 
+// MULTI-notify: ОДИН long-poll-запрос на N диалогов вместо N отдельных
+// paranoia_service_notify_count_wait. Снимает «N диалогов = N запросов» (батарея
+// фон-сервиса). Тот же эндпоинт /notify (маскировку не трогаем); сервер
+// просыпается на ПЕРВОМ зажёгшемся диалоге и возвращает все зажжённые.
+//   items_json — массив [{"partner":"<server_id>","seq":<u64>}, …].
+//   long_poll_ms — желаемое удержание (капается сервером).
+// Подпись одна: identity-ключ над sender ‖ (partner‖seq)*. Stateless (без vault).
+// В *out_json пишет массив [{"partner":"…","n":<u64>}, …] ТОЛЬКО зажжённых (n>0);
+// освобождать через paranoia_free_string. 0=ok, иначе см. paranoia_last_error.
+int paranoia_service_notify_multi_wait(CSTR server_url, CSTR reserve_server_urls_json,
+                                       CSTR signing_key_b64, CSTR sender_server_id,
+                                       CSTR items_json, uint32_t long_poll_ms,
+                                       char **out_json);
+
 // STATELESS опрос входящих звонков для notifications-сервиса (фон, без сессии).
 // Аналог paranoia_call_poll, но без ParanoiaHandle (см. voip_ffi.rs::paranoia_service_call_poll).
 //   signing_key_b64 — Ed25519 seed (32 байта, base64); user — свой server-id;
@@ -198,6 +236,18 @@ int paranoia_service_notify_count_wait(CSTR server_url, CSTR reserve_server_urls
 char *paranoia_service_call_poll(CSTR server_url, CSTR reserve_server_urls_json,
                                  CSTR signing_key_b64, CSTR user,
                                  CSTR peers_keys_json, unsigned int long_poll_ms);
+
+// MULTI-notify по сессионному handle: ОДИН long-poll-запрос на N диалогов вместо
+// N отдельных paranoia_notify_unread_count_keyring (батарея/поллинг). Курсор seq
+// берётся из локального стора; сервер сам отсекает прочитанное (receipt-floor) —
+// корректная непрочитанность без per-диалог /arrived.
+//   user_a     — собственный server-id (sender).
+//   items_json — [{"peer":"<server_id>","keyring":[…keyring entries…]}, …].
+//   long_poll_ms — желаемое удержание (капается сервером).
+// В *out_json — [{"peer":"…","n":<u64>}, …] ТОЛЬКО зажжённых (n>0); освобождать
+// paranoia_free_string. 0=ok, иначе см. paranoia_last_error.
+int paranoia_notify_unread_multi_keyring(ParanoiaHandle *h, CSTR user_a, CSTR items_json,
+                                         uint32_t long_poll_ms, char **out_json);
 
 // Обновить локальные статусы прочтения через GET /arrived.
 // Возвращает 0 при успехе и пишет количество изменённых сообщений в out_changed.
@@ -243,6 +293,15 @@ int paranoia_remove_server_range_keyring(ParanoiaHandle *h, CSTR user_a, CSTR us
 // в локальной БД (single call для UI ranged-delete). Возвращает 0/-1.
 int paranoia_delete_dialogue_range_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
                                            uint64_t from_seq, uint64_t to_seq);
+
+// Задать активную тему (ветку диалога) для последующих отправок. topic_name ==
+// NULL/"" → «Главная» (без темы). 0 — ок, -1 — ошибка.
+int paranoia_set_active_topic(ParanoiaHandle *h, CSTR topic_name);
+
+// Удалить тему целиком (все её сообщения и тела вложений) локально и на сервере.
+// Возвращает число удалённых локальных сообщений (>=0) или -1 при ошибке.
+int paranoia_delete_topic_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
+                                  CSTR topic_name);
 
 // Удалить локальные сообщения диалога до cut_seq включительно.
 int paranoia_delete_local_until_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,

@@ -189,6 +189,99 @@ async fn notify_counts_messages_without_pulling_payloads() {
     server.wait().ok();
 }
 
+// Multi-notify: ОДИН запрос на N диалогов. Боб следит за alice и carol сразу;
+// сервер возвращает только зажжённые с их счётчиками. Проверяет shape-detection
+// (items[] вместо одиночного partner), подпись над списком и обнуление после
+// receive — без per-диалог /arrived (сервер сам отсекает прочитанное).
+#[tokio::test]
+async fn multi_notify_counts_across_dialogues_in_one_request() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    // Регистрируем alice, bob, carol.
+    let mut clients = Vec::new();
+    for name in ["alice", "bob", "carol"] {
+        let key = signing_key();
+        let pubk = B64.encode(key.verifying_key().to_bytes());
+        let client = build_client(temp.path(), &server_url, name, key.clone());
+        client
+            .transport()
+            .reg(name, &pubk, &admin.sign_user_registration(name, &pubk))
+            .await
+            .unwrap_or_else(|_| panic!("register {name}"));
+        clients.push(client);
+    }
+    let (alice, bob, carol) = (&clients[0], &clients[1], &clients[2]);
+
+    let key_ab = [11u8; 32]; // alice<->bob
+    let key_cb = [22u8; 32]; // carol<->bob
+    let alice_to_bob = alice.open_dialogue(dialogue_config("alice", "bob", key_ab));
+    let carol_to_bob = carol.open_dialogue(dialogue_config("carol", "bob", key_cb));
+    // Боб открывает локально оба диалога (для стора/seq).
+    let bob_with_alice = bob.open_dialogue(dialogue_config("bob", "alice", key_ab));
+    let bob_with_carol = bob.open_dialogue(dialogue_config("bob", "carol", key_cb));
+
+    alice_to_bob.send_text("hi-1").await.expect("alice send 1");
+    alice_to_bob.send_text("hi-2").await.expect("alice send 2");
+    carol_to_bob.send_text("yo").await.expect("carol send");
+
+    let targets = vec![
+        ("alice".to_string(), DialogueKey::new("bob", "alice")),
+        ("carol".to_string(), DialogueKey::new("bob", "carol")),
+    ];
+    let mut lit = bob
+        .notify_unread_multi(&targets, 0)
+        .await
+        .expect("bob multi-notify");
+    lit.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        lit,
+        vec![("alice".to_string(), 2u64), ("carol".to_string(), 1u64)],
+        "multi-notify must report both partners with per-dialogue counts"
+    );
+
+    // Боб читает только alice → её счётчик гаснет, carol остаётся.
+    let (received, errs) = bob_with_alice.receive().await.expect("bob receives alice");
+    assert_eq!(errs, 0);
+    assert_eq!(received.len(), 2);
+
+    let lit_after = bob
+        .notify_unread_multi(&targets, 0)
+        .await
+        .expect("bob multi-notify after receive");
+    assert_eq!(
+        lit_after,
+        vec![("carol".to_string(), 1u64)],
+        "after reading alice only carol stays lit"
+    );
+
+    // Регрессия: когда ВСЕ диалоги прочитаны, сервер (food cover) отдаёт
+    // `{ok:true,n:0}` БЕЗ поля `lines` — это пустой результат, НЕ ошибка. Раньше
+    // unwrap_notify_response_multi падал на отсутствии `lines` → форграунд-поллинг
+    // получал anyFailed=true → «Подключение» крутилось вечно при отсутствии непрочитанного.
+    let (rec2, errs2) = bob_with_carol.receive().await.expect("bob receives carol");
+    assert_eq!(errs2, 0);
+    assert_eq!(rec2.len(), 1);
+    let lit_empty = bob
+        .notify_unread_multi(&targets, 0)
+        .await
+        .expect("multi-notify with all read must be Ok(empty), not Err");
+    assert!(
+        lit_empty.is_empty(),
+        "all dialogues read → multi-notify returns empty, no lit"
+    );
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
 #[tokio::test]
 async fn file_header_skips_body_until_explicit_download() {
     let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {

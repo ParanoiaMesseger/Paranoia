@@ -9,15 +9,15 @@
 use crate::client_cover::{ClientCover, CoverRoute};
 use crate::crypto::{decode_b64, encode_b64};
 use crate::transport::{
-    CallEnvelopeIn, CoreCallPoll, CoreCallSignal, CoreDeterminate, CoreMap, CoreNotify, CorePull,
-    CorePush, MapResponse, RawPacket,
+    CallEnvelopeIn, CoreCallPoll, CoreCallSignal, CoreDeterminate, CoreMap, CoreNotify,
+    CoreNotifyMulti, CorePull, CorePush, MapResponse, RawPacket,
 };
 use anyhow::{Result, anyhow, bail};
 use paranoia_cover::MaskingProfile;
 use paranoia_cover::core::{
     CallPollCore, CallPollRespCore, CallSignalCore, DeterminateCore, MapCore, MapRespCore,
-    NotifyCore, NotifyRespCore, PullCore, PullRespCore, PushCore, PushRespCore, SimpleRespCore,
-    kind,
+    NotifyCore, NotifyItemCore, NotifyRespCore, PullCore, PullRespCore, PushCore, PushRespCore,
+    SimpleRespCore, kind,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -118,6 +118,28 @@ impl ClientCover for SchemaClientCover {
                 seq: core.seq,
                 sig: encode_b64(&core.sig),
                 long_poll_ms: core.long_poll_ms,
+                items: Vec::new(),
+            },
+        )
+    }
+
+    fn wrap_notify_multi(&self, core: &CoreNotifyMulti) -> Result<Value> {
+        self.wrap_core(
+            kind::NOTIFY,
+            &NotifyCore {
+                sender: core.sender.clone(),
+                partner: String::new(),
+                seq: 0,
+                sig: encode_b64(&core.sig),
+                long_poll_ms: core.long_poll_ms,
+                items: core
+                    .items
+                    .iter()
+                    .map(|(partner, seq)| NotifyItemCore {
+                        partner: partner.clone(),
+                        seq: *seq,
+                    })
+                    .collect(),
             },
         )
     }
@@ -195,6 +217,14 @@ impl ClientCover for SchemaClientCover {
             bail!("Notify failed: {}", resp.message);
         }
         Ok(resp.n)
+    }
+
+    fn unwrap_notify_response_multi(&self, body: &Value) -> Result<Vec<(String, u64)>> {
+        let resp: NotifyRespCore = self.unwrap_core(kind::NOTIFY_RESP, body)?;
+        if !resp.ok {
+            bail!("Notify failed: {}", resp.message);
+        }
+        Ok(resp.items.into_iter().map(|i| (i.partner, i.n)).collect())
     }
 
     fn unwrap_push_response(&self, body: &Value) -> Result<()> {

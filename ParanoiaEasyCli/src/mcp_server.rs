@@ -25,7 +25,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use paranoia_lib::{Message, MessageContent};
 
 const SERVER_NAME: &str = "paranoia-cli";
-const SERVER_VERSION: &str = "0.4.0";
+const SERVER_VERSION: &str = "0.5.1";
 const DEFAULT_PROTOCOL: &str = "2025-06-18";
 
 pub struct McpConfig {
@@ -43,6 +43,10 @@ pub struct McpConfig {
     /// плагин). Включается env `PARANOIA_MCP_CHANNEL=1`. В этом режиме агент НЕ
     /// должен звать wait/receive (иначе двойной дренаж сообщений).
     pub channel: bool,
+    /// Скоуп темы для channel-режима (env `PARANOIA_MCP_CHANNEL_TOPIC`). Если
+    /// задан — сессия инжектит ТОЛЬКО сообщения этой ветки (несколько сессий на
+    /// одном аккаунте, каждая глухо в своей теме). Пусто/None → все темы.
+    pub channel_topic: Option<String>,
 }
 
 // ─────────────────────────── durable message log ────────────────────────────
@@ -164,6 +168,11 @@ struct Ctx {
     /// Сериализует открытие клиента (read) против переключения vault в
     /// provision (write). См. VAULT-SAFETY в шапке модуля.
     vault: Arc<RwLock<()>>,
+    /// Активная тема сессии — РАНТАЙМ-настройка (init из env `PARANOIA_MCP_CHANNEL_TOPIC`).
+    /// Тулза `set_channel_topic` меняет её на лету: channel-луп читает её каждую
+    /// итерацию (фильтр приёма), `send` без явного `topic` дефолтит в неё. None/«» =
+    /// все темы / «Главная». Memory-driven: агент выставляет тему воркспейса на старте.
+    channel_topic: Arc<Mutex<Option<String>>>,
 }
 
 pub async fn serve(cfg: McpConfig) -> Result<()> {
@@ -175,11 +184,13 @@ pub async fn serve(cfg: McpConfig) -> Result<()> {
         if cfg.peer.is_empty() { "?" } else { &cfg.peer },
         cfg.log_path.display()
     );
+    let initial_topic = cfg.channel_topic.clone();
     let ctx = Ctx {
         cfg: Arc::new(cfg),
         log,
         out: Arc::new(AsyncMutex::new(tokio::io::stdout())),
         vault: Arc::new(RwLock::new(())),
+        channel_topic: Arc::new(Mutex::new(initial_topic)),
     };
 
     // tools/call исполняем через spawn_local на ЭТОМ же потоке (LocalSet): тогда
@@ -346,13 +357,80 @@ const CHANNEL_INSTRUCTIONS: &str = concat!(
     "заголовки `#`/подчёркивание НЕ рендерятся — секции делай жирным.\n",
     "Прогресс-реакции на сообщение пользователя ставь инструментом `react` по схеме: ",
     "🤔 начал думать → ✍️ пишу ответ → ✔️ ответил. «👀 получил» сервер канала ставит сам при приёме.\n",
+    "🧵 ТЕМЫ (ветки диалога). Каждый воркспейс ведёт ОДНУ тему. В начале сессии вызови ",
+    "`set_channel_topic` с темой этого воркспейса: она и фильтрует приём (будешь слышать ",
+    "только свою ветку), и становится дефолтом для `send`. Тему бери из памяти воркспейса; ",
+    "если не сохранена — спроси пользователя, в какую тему писать, ВЫЗОВИ `set_channel_topic` ",
+    "и сохрани имя в память воркспейса (в следующий раз не переспрашивай). Входящее несёт своё ",
+    "поле `topic` — отвечай в ту же тему (передай `topic` явно в `send`). Несколько воркспейсов = ",
+    "несколько параллельных веток в одном аккаунте, не мешая друг другу.\n",
     "Доступ/паринг менять из канала НЕЛЬЗЯ — только из терминала пользователем."
 );
 
-/// Фоновый луп канала: лонг-полл диалога, и КАЖДОЕ входящее от собеседника
-/// инжектится агенту как `notifications/claude/channel` + ставится ack-реакция 👀.
-/// receive() двигает курсор (как `wait`), поэтому повторов нет. В режиме канала
-/// агент НЕ должен звать wait/receive (иначе двойной дренаж).
+/// Держатель advisory-лока пулера. flock(2) снимается ЯДРОМ при закрытии fd —
+/// то есть и при exit, и при crash процесса. Поэтому stale-локов и гонок
+/// переиспользования PID нет: умер пулер → лок свободен на следующем тике.
+struct PullGuard {
+    _file: std::fs::File,
+}
+
+/// Путь lock-файла пулера: рядом с .db, привязан к (username, peer) — у разных
+/// диалогов свой пулер. pid внутри пишем только для human-debug; взаимоисключение
+/// держит flock, не содержимое.
+fn pull_lock_path(db_path: &str, user: &str, peer: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(user.as_bytes());
+    h.update(b"\n");
+    h.update(peer.as_bytes());
+    let tag = hex::encode(&h.finalize()[..8]);
+    let dir = std::path::Path::new(db_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    dir.join(format!(".paranoia-pull-{tag}.lock"))
+}
+
+/// Неблокирующая попытка стать пулером: flock(LOCK_EX|LOCK_NB). Успех → возвращаем
+/// guard (fd жив, лок держится до drop/смерти процесса). Занято → None (мы монитор).
+fn try_acquire_pull(path: &std::path::Path) -> Option<PullGuard> {
+    use std::io::Write as _;
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return None; // EWOULDBLOCK — лок держит другой процесс
+    }
+    let _ = file.set_len(0);
+    let _ = write!(&file, "{}", std::process::id()); // best-effort, для debug
+    Some(PullGuard { _file: file })
+}
+
+/// Текущая активная тема сессии (рантайм, из `ctx.channel_topic`), нормализованная:
+/// trim + пусто→None. None = все темы / «Главная».
+fn current_topic(ctx: &Ctx) -> Option<String> {
+    ctx.channel_topic
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Фоновый луп канала с выбором ЕДИНОГО пулера через flock.
+///
+/// Несколько MCP-сессий на одном аккаунте (каждая со своим `PARANOIA_MCP_CHANNEL_TOPIC`)
+/// открывают один .db. Ровно ОДИН процесс держит flock и реально тянет с сервера
+/// (`receive` → пишет расшифрованные строки в общий стор, ставит 👀). ВСЕ процессы
+/// (пулер и мониторы) инкрементально читают стор по своему in-memory курсору и
+/// инжектят агенту только сообщения СВОЕЙ темы. Тема — внутри E2E-payload, поэтому
+/// фильтровать можно лишь после расшифровки (её делает пулер); сервер слеп, ставит
+/// только один полл-отпечаток вместо N. Курсор вытягивания (server→стор) персистится
+/// в `last_pulled_seq`, так что смерть пулера → промоушн монитора без потери.
 async fn channel_push_loop(ctx: Ctx) {
     let peer = ctx.cfg.peer.clone();
     let user = ctx.cfg.username.clone();
@@ -360,7 +438,19 @@ async fn channel_push_loop(ctx: Ctx) {
         eprintln!("[paranoia-mcp] channel: peer/username не заданы — push отключён");
         return;
     }
-    eprintln!("[paranoia-mcp] channel push loop started (peer={peer})");
+    // Скоуп темы — РАНТАЙМ: читаем `ctx.channel_topic` на каждом тике (тулза
+    // `set_channel_topic` меняет на лету). unset/пусто → все темы; имя → только ветка.
+    let lock_path = pull_lock_path(&ctx.cfg.db_path, &user, &peer);
+    eprintln!(
+        "[paranoia-mcp] channel loop started (peer={peer}, topic={}, lock={})",
+        current_topic(&ctx).as_deref().unwrap_or("<все>"),
+        lock_path.display()
+    );
+
+    let mut puller: Option<PullGuard> = None;
+    let mut cursor: Option<u64> = None; // курсор ДОСТАВКИ (in-memory), init лениво
+    let mut last_dv: i64 = i64::MIN; // последняя замеченная data_version (монитор)
+
     loop {
         // Клиент/диалог строим под read-lock (защита от смены vault в provision),
         // затем lock отпускаем — открытое соединение к БД иммунно к смене vault.
@@ -392,42 +482,109 @@ async fn channel_push_loop(ctx: Ctx) {
                 }
             };
         }
+        // Курсор доставки = «только новое с момента старта сессии» (как раньше).
+        if cursor.is_none() {
+            cursor = Some(dialogue.max_server_seq().unwrap_or(0));
+        }
+
         loop {
-            // Сервер держит /notify до нового сообщения или своего потолка.
-            let _ = dialogue.notify_count_wait(25000).await;
-            let msgs = match dialogue.receive().await {
-                Ok((msgs, _errs)) => msgs,
-                Err(e) => {
-                    eprintln!("[paranoia-mcp] channel receive error: {e}");
-                    break; // пересоберём клиента
+            // (Пере)захват роли пулера, если лок не держим. На старте побеждает
+            // ровно один процесс; при смерти пулера лок освобождается ядром и
+            // следующий монитор подхватывает на ближайшем тике.
+            if puller.is_none() {
+                puller = try_acquire_pull(&lock_path);
+                if puller.is_some() {
+                    eprintln!("[paranoia-mcp] channel: стал ПУЛЕРОМ (тяну с сервера)");
                 }
-            };
-            let batch: Vec<Value> = msgs
-                .iter()
-                .map(|m| message_to_json(m, &ctx.cfg.self_hash))
-                .collect();
-            ctx.log.persist(&batch); // durable-страховка
-            for m in &msgs {
-                // Только входящие от собеседника (свои эхо/реакции пропускаем).
-                if !ctx.cfg.self_hash.is_empty() && m.sender == ctx.cfg.self_hash {
-                    continue;
-                }
-                // ack-реакция «получил» 👀 — best-effort (не блокируем инжект).
-                let _ = dialogue.send_reaction(&m.id, "👀").await;
-                let params = json!({
-                    "content": content_text(&m.content),
-                    "meta": {
-                        "chat_id": peer,
-                        "message_id": m.id,
-                        "user": m.sender,
-                        "kind": classify(&m.content),
-                        "ts": m.timestamp.to_string(),
-                    }
-                });
-                write_notification(&ctx, "notifications/claude/channel", params).await;
             }
-            // Лёгкая пауза, чтобы не молотить сервер при быстром возврате.
-            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            if puller.is_some() {
+                // ПУЛЕР: серверный лонг-полл + вытягивание в общий стор.
+                let _ = dialogue.notify_count_wait(25000).await;
+                match dialogue.receive().await {
+                    Ok((msgs, _errs)) => {
+                        let batch: Vec<Value> = msgs
+                            .iter()
+                            .map(|m| message_to_json(m, &ctx.cfg.self_hash))
+                            .collect();
+                        ctx.log.persist(&batch); // durable-страховка (для history)
+                        for m in &msgs {
+                            // 👀 «получил» ставит ТОЛЬКО пулер (он реально принял с
+                            // сервера); свои эхо/реакции пропускаем.
+                            if !ctx.cfg.self_hash.is_empty() && m.sender == ctx.cfg.self_hash {
+                                continue;
+                            }
+                            let _ = dialogue.send_reaction(&m.id, "👀").await;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[paranoia-mcp] channel receive error: {e}");
+                        break; // пересоберём клиента (лок пулера сохраняем)
+                    }
+                }
+            } else {
+                // МОНИТОР: дёшево ждём записей пулера через data_version (меняется
+                // при модификации БД ДРУГИМ соединением). Нет изменений — не делаем
+                // даже SELECT.
+                match dialogue.data_version() {
+                    Ok(v) if v != last_dv => last_dv = v,
+                    Ok(_) => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                }
+            }
+
+            // ОБЕ роли: доставка новых сообщений СВОЕЙ темы из стора по курсору.
+            // Курсор двигаем по ВСЕМ прочитанным (включая пропущенные), чтобы не
+            // перечитывать их вечно. Скоуп читаем СЕЙЧАС (тулза могла сменить тему).
+            let scope_id: Option<String> = current_topic(&ctx)
+                .as_deref()
+                .and_then(|n| dialogue.topic_id_for_name(Some(n)));
+            let from = cursor.unwrap_or(0);
+            match dialogue.messages_after_seq(from, 256) {
+                Ok(new_msgs) => {
+                    let mut newcur = from;
+                    for m in &new_msgs {
+                        if let Some(seq) = m.server_seq {
+                            newcur = newcur.max(seq);
+                        }
+                        // свои эхо/реакции не инжектим
+                        if !ctx.cfg.self_hash.is_empty() && m.sender == ctx.cfg.self_hash {
+                            continue;
+                        }
+                        // фильтр темы: если скоуп задан — только совпадающий topic_id
+                        if let Some(scope) = &scope_id {
+                            if m.topic_id.as_deref() != Some(scope.as_str()) {
+                                continue;
+                            }
+                        }
+                        let params = json!({
+                            "content": content_text(&m.content),
+                            "meta": {
+                                "chat_id": peer,
+                                "message_id": m.id,
+                                "user": m.sender,
+                                "kind": classify(&m.content),
+                                "ts": m.timestamp.to_string(),
+                                "topic": m.topic_name,
+                            }
+                        });
+                        write_notification(&ctx, "notifications/claude/channel", params).await;
+                    }
+                    cursor = Some(newcur);
+                }
+                Err(e) => eprintln!("[paranoia-mcp] channel store read error: {e}"),
+            }
+
+            // Пейсинг: пулер уже «поспал» в notify_count_wait, монитор — короткий тик.
+            tokio::time::sleep(Duration::from_millis(if puller.is_some() {
+                300
+            } else {
+                700
+            }))
+            .await;
         }
         tokio::time::sleep(Duration::from_secs(3)).await; // перед пересборкой
     }
@@ -444,6 +601,8 @@ async fn dispatch_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<Value> {
         "send_file" => tool_send_file(ctx, args).await,
         "download" => tool_download(ctx, args).await,
         "history" => Ok(tool_history(ctx, args)),
+        "topics" => tool_topics(ctx, args).await,
+        "set_channel_topic" | "set_topic" => tool_set_channel_topic(ctx, args).await,
         "whoami" | "list_peers" => tool_whoami(),
         "provision_from_ui" => tool_provision(ctx, args).await,
         _ => Err(anyhow!("unknown tool: {name}")),
@@ -502,6 +661,10 @@ fn message_to_json(m: &Message, self_hash: &str) -> Value {
         "from": from,
         "kind": classify(&m.content),
         "text": content_text(&m.content),
+        // Тема (ветка диалога): id (детерминированная производная) + имя. null —
+        // «Главная». Позволяет агенту вести несколько сессий в одном диалоге.
+        "topic_id": m.topic_id.clone(),
+        "topic": m.topic_name.clone(),
     })
 }
 
@@ -512,6 +675,33 @@ fn is_from(m: &Value, who: &str) -> bool {
 async fn tool_send(ctx: &Ctx, args: &Value) -> Result<Value> {
     let (peer, user) = peer_user(ctx, args);
     let text = arg_str(args, "text").context("text обязателен")?;
+    // Тема: явный `topic` (включая "" → «Главная») перебивает; отсутствует →
+    // дефолт сессии из `set_channel_topic`/env (тема воркспейса).
+    let topic = match args.get("topic").and_then(|v| v.as_str()) {
+        Some(t) => {
+            let t = t.trim();
+            if t.is_empty() { None } else { Some(t.to_string()) }
+        }
+        None => current_topic(ctx),
+    };
+    let _g = ctx.vault.read().await;
+    let client = crate::build_client(
+        &ctx.cfg.server_url,
+        &ctx.cfg.reserve_server_urls,
+        &user,
+        &ctx.cfg.db_path,
+    )?;
+    let dialogue =
+        crate::build_dialogue(&client, &ctx.cfg.server_url, &user, &peer)?.with_topic(topic);
+    let msg = dialogue.send_text(text).await?;
+    Ok(json!({
+        "ok": true, "peer": peer, "id": msg.id, "seq": msg.server_seq,
+        "topic": msg.topic_name,
+    }))
+}
+
+async fn tool_topics(ctx: &Ctx, args: &Value) -> Result<Value> {
+    let (peer, user) = peer_user(ctx, args);
     let _g = ctx.vault.read().await;
     let client = crate::build_client(
         &ctx.cfg.server_url,
@@ -520,8 +710,34 @@ async fn tool_send(ctx: &Ctx, args: &Value) -> Result<Value> {
         &ctx.cfg.db_path,
     )?;
     let dialogue = crate::build_dialogue(&client, &ctx.cfg.server_url, &user, &peer)?;
-    let msg = dialogue.send_text(text).await?;
-    Ok(json!({"ok": true, "peer": peer, "id": msg.id, "seq": msg.server_seq}))
+    // Подтянуть новое, чтобы темы, заведённые собеседником, были видны.
+    let _ = dialogue.receive().await;
+    let topics: Vec<Value> = dialogue
+        .list_topics()?
+        .into_iter()
+        .map(|(id, name, count)| json!({"topic_id": id, "topic": name, "count": count}))
+        .collect();
+    Ok(json!({"peer": peer, "count": topics.len(), "topics": topics}))
+}
+
+/// Задать активную тему сессии (рантайм). Меняет на лету: фильтр приёма канала
+/// (сессия инжектит только эту ветку) И дефолт темы для `send` без явного `topic`.
+/// Пусто/без аргумента → сброс: все темы на приём, «Главная» на отправку. Состояние
+/// в RAM (не персистится) — агент выставляет тему воркспейса на старте каждой сессии.
+async fn tool_set_channel_topic(ctx: &Ctx, args: &Value) -> Result<Value> {
+    let topic = arg_str(args, "topic").map(str::to_string); // arg_str: trim + пусто→None
+    if let Ok(mut g) = ctx.channel_topic.lock() {
+        *g = topic.clone();
+    }
+    eprintln!(
+        "[paranoia-mcp] set_channel_topic → {}",
+        topic.as_deref().unwrap_or("<все/Главная>")
+    );
+    Ok(json!({
+        "ok": true,
+        "topic": topic,
+        "scope": if topic.is_some() { "single" } else { "all" },
+    }))
 }
 
 async fn tool_react(ctx: &Ctx, args: &Value) -> Result<Value> {
@@ -757,7 +973,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "receive",
-            "description": "Получить НОВЫЕ сообщения диалога (курсор двигается в БД). По умолчанию — только от собеседника (без своих эхо).",
+            "description": "Получить НОВЫЕ сообщения диалога (курсор двигается в БД). По умолчанию — только от собеседника (без своих эхо). В каждом сообщении поле topic — имя темы (ветки), null = «Главная».",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -769,15 +985,37 @@ fn tools_list() -> Value {
         },
         {
             "name": "send",
-            "description": "Отправить текстовое сообщение собеседнику (peer) от профиля username. По умолчанию — настроенному в env. Клиент рендерит Markdown.",
+            "description": "Отправить текстовое сообщение собеседнику (peer) от профиля username. По умолчанию — настроенному в env. Клиент рендерит Markdown. topic — имя темы (ветки диалога): сообщение уйдёт в неё и тема появится у собеседника автоматически. Если topic НЕ задан — используется активная тема сессии (см. set_channel_topic); явная пустая строка topic=\"\" — принудительно «Главная».",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "Текст сообщения"},
                     "peer": {"type": "string", "description": "Получатель (по умолч. из env)"},
-                    "username": {"type": "string", "description": "Профиль-отправитель (по умолч. из env)"}
+                    "username": {"type": "string", "description": "Профиль-отправитель (по умолч. из env)"},
+                    "topic": {"type": "string", "description": "Имя темы (ветки). Не задан → активная тема сессии. \"\" → «Главная». Создаётся неявно."}
                 },
                 "required": ["text"]
+            }
+        },
+        {
+            "name": "topics",
+            "description": "Список тем (веток) диалога: имя темы и число сообщений. Темы — способ вести несколько параллельных линий разговора в одном диалоге.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "peer": {"type": "string"},
+                    "username": {"type": "string"}
+                }
+            }
+        },
+        {
+            "name": "set_channel_topic",
+            "description": "Привязать сессию к ОДНОЙ теме (ветке диалога). Меняет на лету ДВА: (1) фильтр приёма — в channel-режиме сессия будет слышать только сообщения этой темы; (2) дефолт темы для send без явного topic. Так несколько сессий в одном аккаунте ведут параллельные ветки, не мешая друг другу. Вызывай в начале сессии с темой воркспейса (сохранённой в памяти; нет — спроси пользователя и сохрани). Без аргумента/пусто — сброс: слышать все темы, слать в «Главную». Состояние в RAM, не персистится.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Имя темы. Пусто/не задан — сброс (все темы / «Главная»)."}
+                }
             }
         },
         {

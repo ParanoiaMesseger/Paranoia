@@ -453,26 +453,22 @@ Rectangle {
                                 }
                             }
 
-                            Text {
+                            // URL сервера (ноды) в шапке НЕ показываем — это утечка
+                            // метаданных связи на виду; оставлен скрытый якорь с
+                            // нулевой шириной, чтобы расчёт ширины имени не ломался.
+                            Item {
                                 id: srvUrlText
+                                width: 0
                                 anchors.verticalCenter: parent.verticalCenter
-                                visible: !parent._connecting
-                                text:  Backend.server
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSm
-                                font.family:    Theme.fontFamily
-                                font.weight:    Font.Medium
-                                elide: Text.ElideRight
-                                // URL не должен занимать всю строку — оставляем место имени.
-                                width: visible ? Math.min(implicitWidth, parent.width * 0.55) : 0
                             }
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 visible: !parent._connecting
-                                text:  "(" + root.activeDisplayName + ")"
-                                color: Theme.textSecondary
-                                font.pixelSize: Theme.fontXs
+                                text:  root.activeDisplayName
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSm
                                 font.family:    Theme.fontFamily
+                                font.weight:    Font.Medium
                                 // Длинное имя обрезаем по остатку строки (учитывая
                                 // индикатор маски), чтобы не наезжало на бейдж.
                                 elide: Text.ElideRight

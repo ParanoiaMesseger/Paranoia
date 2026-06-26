@@ -29,6 +29,11 @@ struct UiClientConfig {
     /// Ed25519 signing key, base64(32) — поле так и называется `private_key`.
     #[serde(default)]
     private_key: String,
+    /// Резервные серверы (HTTP-fallback): UI пишет их в client.json как
+    /// `reserve_server_urls`. Без них клиент ходит ТОЛЬКО на primary — и если
+    /// тот недоступен, приём/отправка молча падают (см. TUI).
+    #[serde(default)]
+    reserve_server_urls: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -66,6 +71,9 @@ pub struct UiProfile {
     pub username: String,
     pub server_id: String,
     pub private_key: String,
+    /// Резервные серверы из client.json (HTTP-fallback). Нужны клиенту, иначе
+    /// при недоступном primary приём по сети молча не работает.
+    pub reserve: Vec<String>,
     pub dialogues: Vec<UiDialog>,
 }
 
@@ -193,6 +201,7 @@ pub fn list_ui_profiles(app_data_root: &Path, selector: Option<&str>) -> Result<
             username: client.username,
             server_id: client.server_id,
             private_key: client.private_key,
+            reserve: client.reserve_server_urls,
             dialogues,
         });
     }

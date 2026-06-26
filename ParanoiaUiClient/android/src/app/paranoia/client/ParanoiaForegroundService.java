@@ -166,6 +166,12 @@ public final class ParanoiaForegroundService extends Service {
     private static native long paranoiaServiceNotifyCountWait(String serverUrl, String reserveUrlsJson,
                                                               String signingKeyB64, String senderServerId,
                                                               String partnerServerId, long seq, int longPollMs);
+    // MULTI-notify long-poll: ОДИН запрос на N диалогов вместо N. itemsJson —
+    // [{"partner","seq"}, …]; возвращает JSON [{"partner","n"}, …] зажжённых (n>0)
+    // или null при ошибке. Снимает «N диалогов = N запросов» в фон-сервисе.
+    private static native String paranoiaServiceNotifyMultiWait(String serverUrl, String reserveUrlsJson,
+                                                                String signingKeyB64, String senderServerId,
+                                                                String itemsJson, int longPollMs);
     // Stateless опрос входящих звонков → JSON-массив [{sender,kind,payload_json,ts_ms}] или null.
     private static native String paranoiaServiceCallPoll(String serverUrl, String reserveUrlsJson,
                                                          String signingKeyB64, String user,
@@ -722,72 +728,127 @@ public final class ParanoiaForegroundService extends Service {
         }
     }
 
-    // МГНОВЕННЫЕ СООБЩЕНИЯ в фоне: на КАЖДЫЙ диалог — свой long-poll /notify (сервер
-    // держит до нового сообщения). Параллельно с call-poll'ом → сообщения приходят
-    // так же быстро, как звонки, БЕЗ combined-эндпоинта (тот потребовал бы правок
-    // маскировки на сервере). Один диалог — один самоперезапускающийся поток, пока
-    // приложение в фоне. (Combined «один запрос на все диалоги» = будущая оптимизация,
-    // требует масок-схемы; здесь переиспользуем уже маскированный /notify.)
+    // МГНОВЕННЫЕ СООБЩЕНИЯ в фоне: ОДИН multi-notify long-poll на ВЕСЬ профиль
+    // (сервер держит до нового сообщения в ЛЮБОМ из диалогов и возвращает все
+    // зажжённые). Раньше был поток-на-диалог → N потоков/N запросов/N wakelock'ов;
+    // теперь 1 поток на профиль. Снимает «N диалогов = N запросов» (батарея).
+    // Самоперезапускающийся чейн, пока приложение в фоне.
     private static void startMessageLongPolls(final Context appContext) {
         if (isApplicationForeground(appContext) || uiOwnsCallPolling(appContext)) return;
         Snapshot snap = SNAPSHOT.get();
         if (snap == null || snap.isEmpty()) return;
         for (ProfileHint profile : snap.profiles) {
-            for (DialogHint dialog : profile.dialogs) {
-                spawnMessageLongPoll(appContext, profile, dialog);
-            }
+            if (profile.dialogs.isEmpty()) continue;
+            spawnProfileLongPoll(appContext, profile);
         }
     }
 
-    private static void spawnMessageLongPoll(final Context appContext, final ProfileHint profile,
-                                             final DialogHint dialog) {
-        final String key = profile.senderServerId + "|" + dialog.partnerServerId;
-        if (!MSG_INFLIGHT.add(key)) return; // по этому диалогу уже висит long-poll
+    // Сформировать items JSON [{"partner","seq"}] для multi-notify. useSeenSeq=true —
+    // курсор = max(snapshot.seq, MSG_SEEN_SEQ) (мгновенный long-poll, чтобы не
+    // тайт-лупить на бэклоге непрочитанного); false — ровно snapshot.seq (периодика).
+    private static String buildItemsJson(ProfileHint profile, boolean useSeenSeq) {
+        JSONArray arr = new JSONArray();
+        for (DialogHint d : profile.dialogs) {
+            long seq = d.seq;
+            if (useSeenSeq) {
+                Long seen = MSG_SEEN_SEQ.get(profile.senderServerId + "|" + d.partnerServerId);
+                if (seen != null && seen > seq) seq = seen;
+            }
+            try {
+                JSONObject o = new JSONObject();
+                o.put("partner", d.partnerServerId);
+                o.put("seq", seq);
+                arr.put(o);
+            } catch (JSONException ignore) {}
+        }
+        return arr.toString();
+    }
+
+    private static ProfileHint findProfile(Snapshot s, String senderServerId) {
+        if (s == null || senderServerId == null) return null;
+        for (ProfileHint p : s.profiles) {
+            if (senderServerId.equals(p.senderServerId)) return p;
+        }
+        return null;
+    }
+
+    private static void spawnProfileLongPoll(final Context appContext, final ProfileHint profile) {
+        final String key = profile.senderServerId; // один in-flight long-poll на профиль
+        if (!MSG_INFLIGHT.add(key)) return;
         MSG_EXECUTOR.execute(new Runnable() {
             @Override
             public void run() {
                 final long startedAt = android.os.SystemClock.elapsedRealtime();
-                // Опрашиваем с ВЫСШЕЙ увиденной seq (не ниже snapshot.seq — если юзер
-                // прочитал на другом устройстве, snapshot принесёт бОльшую).
-                Long seen = MSG_SEEN_SEQ.get(key);
-                final long polledSeq = (seen != null && seen > dialog.seq) ? seen : dialog.seq;
+                // Курсоры, с которыми реально опрашиваем (для сдвига seen по зажжённым).
+                final java.util.HashMap<String, Long> polled = new java.util.HashMap<>();
+                JSONArray items = new JSONArray();
+                for (DialogHint d : profile.dialogs) {
+                    long seq = d.seq;
+                    Long seen = MSG_SEEN_SEQ.get(profile.senderServerId + "|" + d.partnerServerId);
+                    if (seen != null && seen > seq) seq = seen;
+                    polled.put(d.partnerServerId, seq);
+                    try {
+                        JSONObject o = new JSONObject();
+                        o.put("partner", d.partnerServerId);
+                        o.put("seq", seq);
+                        items.put(o);
+                    } catch (JSONException ignore) {}
+                }
                 PowerManager pm = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
                 PowerManager.WakeLock wl = pm == null ? null
                         : pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "paranoia:msgpoll");
                 if (wl != null) { wl.setReferenceCounted(false); wl.acquire(30_000L); }
-                long count = -1;
+                String litJson = null;
                 try {
-                    count = paranoiaServiceNotifyCountWait(
+                    litJson = paranoiaServiceNotifyMultiWait(
                             profile.serverUrl, profile.reserveUrlsJson, profile.signingKeyB64,
-                            profile.senderServerId, dialog.partnerServerId, polledSeq,
-                            (int) MSG_LONG_POLL_MS);
+                            profile.senderServerId, items.toString(), (int) MSG_LONG_POLL_MS);
                 } catch (Throwable t) {
                     // stale-процесс после апдейта без нового нативного символа — пропускаем.
-                    Log.w(TAG, "notify_count_wait native unavailable — skipping message poll", t);
+                    Log.w(TAG, "notify_multi_wait native unavailable — skipping message poll", t);
                 } finally {
                     if (wl != null && wl.isHeld()) wl.release();
                     MSG_INFLIGHT.remove(key);
                 }
-                if (count > 0) {
-                    // Сдвигаем высшую seq за посчитанные → следующий long-poll ждёт
-                    // ГЕНУИННО новые (без tight-loop при непрочитанных). Итог-уведомление
-                    // считает pollNotifications от реальной snapshot.seq (total unread).
-                    MSG_SEEN_SEQ.put(key, polledSeq + count);
+                boolean anyLit = false;
+                if (litJson != null) {
+                    try {
+                        JSONArray arr = new JSONArray(litJson);
+                        for (int i = 0; i < arr.length(); i++) {
+                            JSONObject o = arr.getJSONObject(i);
+                            String partner = o.optString("partner", "");
+                            long n = o.optLong("n", 0L);
+                            if (partner.isEmpty() || n <= 0) continue;
+                            anyLit = true;
+                            // Сдвигаем высшую seq за посчитанные → следующий long-poll ждёт
+                            // ГЕНУИННО новые (без tight-loop при непрочитанных).
+                            Long base = polled.get(partner);
+                            MSG_SEEN_SEQ.put(profile.senderServerId + "|" + partner,
+                                    (base != null ? base : 0L) + n);
+                        }
+                    } catch (JSONException e) {
+                        Log.w(TAG, "bad notify_multi_wait json", e);
+                    }
+                }
+                if (anyLit) {
+                    // Итог-уведомление считает pollNotifications от реальной snapshot.seq.
                     PollResult r = pollNotifications(appContext);
                     processPollResult(appContext, r);
                 }
-                // Перезапуск, пока в фоне (чейн как у звонков). Без бэкоффа — seq сдвинут,
-                // tight-loop'а нет. Лёгкая пауза ТОЛЬКО если опрос вернулся подозрительно
-                // быстро (ошибка/сеть/сервер не держал long-poll), чтобы не молотить.
+                // Перезапуск, пока в фоне. Лёгкая пауза ТОЛЬКО если опрос вернулся
+                // подозрительно быстро (ошибка/сеть/сервер не держал long-poll).
                 if (isApplicationForeground(appContext) || uiOwnsCallPolling(appContext)) return;
                 Snapshot s = SNAPSHOT.get();
                 if (s == null || s.isEmpty()) return;
                 long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
-                if (count < 0 || elapsed < 3_000L) {
+                if (litJson == null || elapsed < 3_000L) {
                     try { Thread.sleep(5_000L); } catch (InterruptedException ignore) { return; }
                     if (isApplicationForeground(appContext) || uiOwnsCallPolling(appContext)) return;
                 }
-                spawnMessageLongPoll(appContext, profile, dialog);
+                // Перечитываем профиль из свежего snapshot (диалоги могли измениться,
+                // напр. лениво добавился корп-диалог) → новые диалоги попадают в poll ≤ цикл.
+                ProfileHint fresh = findProfile(SNAPSHOT.get(), profile.senderServerId);
+                if (fresh != null && !fresh.dialogs.isEmpty()) spawnProfileLongPoll(appContext, fresh);
             }
         });
     }
@@ -841,26 +902,40 @@ public final class ParanoiaForegroundService extends Service {
 
         PollResult result = new PollResult();
         result.hasTargets = true;
-        int dialogIndex = 0;
+        int dialogCount = 0;
+        // ОДИН multi-notify на профиль вместо N одиночных (батарея). Сервер по форме
+        // запроса различает режим; зажжённые (n>0) возвращаются списком.
         for (ProfileHint profile : snapshot.profiles) {
-            for (DialogHint dialog : profile.dialogs) {
-                long count = paranoiaServiceNotifyCount(
-                    profile.serverUrl, profile.reserveUrlsJson, profile.signingKeyB64,
-                    profile.senderServerId, dialog.partnerServerId, dialog.seq);
-                if (count < 0) {
-                    Log.w(TAG, "service notify_count failed [dialog #" + dialogIndex + "]: "
-                            + paranoiaLastError());
-                    dialogIndex++;
-                    continue;
+            if (profile.dialogs.isEmpty()) continue;
+            dialogCount += profile.dialogs.size();
+            String itemsJson = buildItemsJson(profile, false); // периодика: курсор = snapshot.seq
+            String litJson = null;
+            try {
+                litJson = paranoiaServiceNotifyMultiWait(
+                        profile.serverUrl, profile.reserveUrlsJson, profile.signingKeyB64,
+                        profile.senderServerId, itemsJson, 0);
+            } catch (Throwable t) {
+                // stale-процесс после апдейта без нового нативного символа — пропускаем.
+                Log.w(TAG, "notify_multi native unavailable — skipping snapshot poll", t);
+            }
+            if (litJson == null) {
+                Log.w(TAG, "service notify_multi failed: " + paranoiaLastError());
+                continue;
+            }
+            result.anySuccess = true;
+            try {
+                JSONArray arr = new JSONArray(litJson);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    long n = o.optLong("n", 0L);
+                    if (n > 0) { result.total += n; result.pendingPeers++; }
                 }
-                result.anySuccess = true;
-                result.total += count;
-                if (count > 0) result.pendingPeers++;
-                dialogIndex++;
+            } catch (JSONException e) {
+                Log.w(TAG, "bad notify_multi json", e);
             }
         }
         Log.i(TAG, "snapshot poll finished: total=" + result.total
-                + " pendingPeers=" + result.pendingPeers + " dialogs=" + dialogIndex);
+                + " pendingPeers=" + result.pendingPeers + " dialogs=" + dialogCount);
         return result;
     }
 

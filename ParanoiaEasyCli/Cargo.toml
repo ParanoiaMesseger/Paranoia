@@ -1,6 +1,6 @@
 [package]
 name = "paranoia-easy-cli"
-version = "0.2.18"
+version = "0.2.20"
 edition = "2024"
 
 [dependencies]
@@ -14,6 +14,9 @@ sha2 = "0.10"
 base64 = "0.22"
 ed25519-dalek = "2.2.0"
 hex = "0.4"
+# flock(2) для выбора единого процесса-пулера в channel-режиме (несколько MCP-
+# сессий на одном .db). Уже в дереве через paranoia-lib — без новой загрузки.
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6.0.0"

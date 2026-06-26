@@ -5,7 +5,7 @@ use crate::routes::{
     call_signal::{ApiResponse as CallSignalResp, CallSignalRequest},
     determinate::{ApiResponse as DetResp, DeterminateRequest},
     map::{ApiResponse as MapResp, MapRequest},
-    notify::{ApiResponse as NotifyResp, NotifyRequest},
+    notify::{ApiResponse as NotifyResp, NotifyItem, NotifyRequest},
     pull::{ApiResponse as PullResp, PullRequest},
     push::{ApiResponse as PushResp, PushRequest},
 };
@@ -270,13 +270,6 @@ impl Cover for FoodDeliveryCover {
             .as_str()
             .ok_or_else(|| anyhow!("no clientId"))?
             .to_string();
-        let partner = body["partnerId"]
-            .as_str()
-            .ok_or_else(|| anyhow!("no partnerId"))?
-            .to_string();
-        let seq = body["cursor"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("no cursor"))?;
         let sig = body["auth"]
             .as_str()
             .ok_or_else(|| anyhow!("no auth"))?
@@ -284,12 +277,42 @@ impl Cover for FoodDeliveryCover {
         // Опционально (старые клиенты не шлют) — желаемое удержание long-poll.
         let long_poll_ms = body["waitMs"].as_u64().unwrap_or(0) as u32;
 
+        // Multi-режим: массив "lines" заказов вместо одиночного partnerId/cursor.
+        if let Some(lines) = body["lines"].as_array() {
+            let items = lines
+                .iter()
+                .filter_map(|l| {
+                    Some(NotifyItem {
+                        partner: l["partnerId"].as_str()?.to_string(),
+                        seq: l["cursor"].as_u64().unwrap_or(0),
+                    })
+                })
+                .collect();
+            return Ok(NotifyRequest {
+                sender,
+                partner: String::new(),
+                seq: 0,
+                sig,
+                long_poll_ms,
+                items,
+            });
+        }
+
+        let partner = body["partnerId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no partnerId"))?
+            .to_string();
+        let seq = body["cursor"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("no cursor"))?;
+
         Ok(NotifyRequest {
             sender,
             partner,
             seq,
             sig,
             long_poll_ms,
+            items: Vec::new(),
         })
     }
 
@@ -304,6 +327,16 @@ impl Cover for FoodDeliveryCover {
                 "ok": false,
                 "status": "error",
                 "message": resp.message,
+            });
+        }
+
+        if !resp.items.is_empty() {
+            return json!({
+                "ok": true,
+                "lines": resp.items.iter().map(|i| json!({
+                    "partnerId": i.partner,
+                    "n": i.n,
+                })).collect::<Vec<_>>(),
             });
         }
 

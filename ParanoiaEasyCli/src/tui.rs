@@ -36,9 +36,11 @@ use ratatui::{DefaultTerminal, Frame};
 
 enum Cmd {
     Open(String),
-    Send(String, String),
+    /// peer, text, topic (None — «Главная»).
+    Send(String, String, Option<String>),
     React(String, String, String),
-    SendFile(String, String),
+    /// peer, path, topic (None — «Главная»).
+    SendFile(String, String, Option<String>),
     Download(String, String, String),
     Quit,
 }
@@ -66,6 +68,8 @@ struct Msg {
     /// Для сообщений-реакций: id целевого сообщения (тогда это не строка ленты,
     /// а реакция, которую надо прилепить к таргету). У обычных — None.
     target_id: Option<String>,
+    /// Имя темы (ветки диалога), к которой относится сообщение. None — «Главная».
+    topic: Option<String>,
 }
 
 #[derive(Clone)]
@@ -131,6 +135,7 @@ fn to_msg(m: &Message, self_id: &str, names: &HashMap<String, String>) -> Option
             att: None,
             reactions: Vec::new(),
             target_id: Some(target_id.clone()),
+            topic: m.topic_name.clone(),
         });
     }
     let (body, att) = match &m.content {
@@ -143,7 +148,7 @@ fn to_msg(m: &Message, self_id: &str, names: &HashMap<String, String>) -> Option
         MessageContent::PhotoGroup { caption, .. } => (format!("🖼 альбом {caption}"), None),
         _ => return None,
     };
-    Some(Msg { id: m.id.clone(), me, who, ts, date, sort_ts, body, att, reactions: Vec::new(), target_id: None })
+    Some(Msg { id: m.id.clone(), me, who, ts, date, sort_ts, body, att, reactions: Vec::new(), target_id: None, topic: m.topic_name.clone() })
 }
 
 // ───────────────────────────── рабочий поток ────────────────────────────────
@@ -236,10 +241,18 @@ async fn worker_loop(
                         let _ = evt_tx.send(Evt::Status(format!("История: {e}")));
                     }
                 }
-                if let Ok((m, _)) = dlg.receive().await {
-                    let v: Vec<Msg> = m.iter().filter_map(|x| to_msg(x, &self_id, &names)).collect();
-                    if !v.is_empty() {
-                        let _ = evt_tx.send(Evt::New(peer.clone(), v));
+                match dlg.receive().await {
+                    Ok((m, _)) => {
+                        let v: Vec<Msg> =
+                            m.iter().filter_map(|x| to_msg(x, &self_id, &names)).collect();
+                        if !v.is_empty() {
+                            let _ = evt_tx.send(Evt::New(peer.clone(), v));
+                        }
+                    }
+                    // Раньше ошибка тут глоталась молча → «свежая история не
+                    // подгружается» без всякого следа. Показываем причину.
+                    Err(e) => {
+                        let _ = evt_tx.send(Evt::Status(format!("Приём по сети: {e}")));
                     }
                 }
                 let d = dlg.clone();
@@ -259,13 +272,17 @@ async fn worker_loop(
                                 }
                             }
                             Ok(_) => {}
-                            Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
+                            Err(e) => {
+                                let _ = tx.send(Evt::Status(format!("Приём по сети: {e}")));
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
                         }
                     }
                 }));
             }
-            Cmd::Send(peer, text) => {
+            Cmd::Send(peer, text, topic) => {
                 if let Some(d) = map.get(&peer).cloned() {
+                    d.set_active_topic(topic);
                     match d.send_text(text).await {
                         Ok(m) => {
                             if let Some(v) = to_msg(&m, &self_id, &names) {
@@ -290,8 +307,9 @@ async fn worker_loop(
                     }
                 }
             }
-            Cmd::SendFile(peer, path) => {
+            Cmd::SendFile(peer, path, topic) => {
                 if let Some(d) = map.get(&peer).cloned() {
+                    d.set_active_topic(topic);
                     let pb = std::path::PathBuf::from(&path);
                     if !pb.is_file() {
                         let _ = evt_tx.send(Evt::Status(format!("Файл не найден: {path}")));
@@ -401,9 +419,20 @@ fn build_ctx(
     }
     ui_list.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 
+    // Резервные серверы: сперва из профиля UI (client.json), затем доп. из CLI.
+    // Без них клиент ходит ТОЛЬКО на primary; если тот лежит — приём молча
+    // не работает (а UI-клиент с резервом тем временем подтягивает историю).
+    let mut reserve_all: Vec<String> = Vec::new();
+    for r in up.reserve.iter().chain(reserve.iter()) {
+        let r = r.trim();
+        if !r.is_empty() && r != server_url && !reserve_all.iter().any(|x| x == r) {
+            reserve_all.push(r.to_string());
+        }
+    }
+
     let ctx = UiCtx {
         server_url,
-        reserve: reserve.to_vec(),
+        reserve: reserve_all,
         server_id,
         private_key: up.private_key.clone(),
         db_path,
@@ -703,6 +732,14 @@ fn border_style(focused: bool) -> Style {
     }
 }
 
+/// Фильтр ленты по теме (ветке диалога): все / только «Главная» / конкретная.
+#[derive(Clone, PartialEq)]
+enum TopicFilter {
+    All,
+    Main,
+    Named(String),
+}
+
 struct App {
     dialogues: Vec<(String, String)>,
     sel: usize,
@@ -713,6 +750,8 @@ struct App {
     msg_sel: usize,
     status: String,
     popup: Popup,
+    /// Активный фильтр темы для открытого диалога (сбрасывается при смене чата).
+    topic_filter: TopicFilter,
 }
 
 impl App {
@@ -725,17 +764,72 @@ impl App {
             focus: Focus::List,
             input: String::new(),
             msg_sel: 0,
-            status: "Tab — панели · Enter — открыть/отправить · r — реакция · d — скачать · a — файл · ? — помощь · q — выход".to_string(),
+            status: "Tab — панели · Enter — открыть/отправить · t — тема · r — реакция · d — скачать · a — файл · ? — помощь · q — выход".to_string(),
             popup: Popup::None,
+            topic_filter: TopicFilter::All,
         }
     }
 
-    fn active_msgs(&self) -> &[Msg] {
+    /// Все сообщения открытого диалога (без фильтра темы).
+    fn all_active_msgs(&self) -> &[Msg] {
         self.active
             .as_ref()
             .and_then(|p| self.msgs.get(p))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Лента открытого диалога с учётом фильтра темы.
+    fn active_msgs(&self) -> Vec<&Msg> {
+        self.all_active_msgs()
+            .iter()
+            .filter(|m| match &self.topic_filter {
+                TopicFilter::All => true,
+                TopicFilter::Main => m.topic.is_none(),
+                TopicFilter::Named(n) => m.topic.as_deref() == Some(n.as_str()),
+            })
+            .collect()
+    }
+
+    /// Имена тем открытого диалога (в порядке появления). Пусто → чипов нет.
+    fn topic_names(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for m in self.all_active_msgs() {
+            if let Some(t) = &m.topic {
+                if !seen.contains(t) {
+                    seen.push(t.clone());
+                }
+            }
+        }
+        seen
+    }
+
+    /// Все чипы в порядке листания: Все, Главная, затем темы.
+    fn topic_chips(&self) -> Vec<TopicFilter> {
+        let mut chips = vec![TopicFilter::All, TopicFilter::Main];
+        chips.extend(self.topic_names().into_iter().map(TopicFilter::Named));
+        chips
+    }
+
+    /// Переключить фильтр на следующую тему (циклически). Если тем нет — All.
+    fn cycle_topic(&mut self) {
+        if self.topic_names().is_empty() {
+            self.topic_filter = TopicFilter::All;
+            return;
+        }
+        let chips = self.topic_chips();
+        let idx = chips.iter().position(|c| *c == self.topic_filter).unwrap_or(0);
+        self.topic_filter = chips[(idx + 1) % chips.len()].clone();
+        self.msg_sel = self.active_msgs().len().saturating_sub(1);
+    }
+
+    /// Тема, в которую уходит НОВОЕ сообщение из ввода: для конкретной темы —
+    /// она; для «Все»/«Главная» — None (Главная).
+    fn send_topic(&self) -> Option<String> {
+        match &self.topic_filter {
+            TopicFilter::Named(n) => Some(n.clone()),
+            _ => None,
+        }
     }
 
     fn apply(&mut self, evt: Evt) {
@@ -909,9 +1003,10 @@ fn handle_key(
                 KeyCode::Esc => app.popup = Popup::None,
                 KeyCode::Char(c) if c.is_ascii_digit() => {
                     let idx = if c == '0' { 9 } else { (c as u8 - b'1') as usize };
-                    if let (Some(peer), Some(m)) =
-                        (app.active.clone(), app.active_msgs().get(app.msg_sel).cloned())
-                    {
+                    if let (Some(peer), Some(m)) = (
+                        app.active.clone(),
+                        app.active_msgs().get(app.msg_sel).map(|m| (*m).clone()),
+                    ) {
                         if idx < EMOJIS.len() {
                             let _ = cmd_tx.send(Cmd::React(peer, m.id, EMOJIS[idx].to_string()));
                         }
@@ -927,9 +1022,10 @@ fn handle_key(
                 KeyCode::Esc => app.popup = Popup::None,
                 KeyCode::Enter => {
                     let path = buf.trim().to_string();
+                    let topic = app.send_topic();
                     if let Some(peer) = app.active.clone() {
                         if !path.is_empty() {
-                            let _ = cmd_tx.send(Cmd::SendFile(peer, path));
+                            let _ = cmd_tx.send(Cmd::SendFile(peer, path, topic));
                         }
                     }
                     app.popup = Popup::None;
@@ -952,11 +1048,12 @@ fn handle_key(
             KeyCode::Enter => {
                 let text = app.input.trim().to_string();
                 app.input.clear();
+                let topic = app.send_topic();
                 if let Some(peer) = app.active.clone() {
                     if let Some(rest) = text.strip_prefix("/file ") {
-                        let _ = cmd_tx.send(Cmd::SendFile(peer, rest.trim().to_string()));
+                        let _ = cmd_tx.send(Cmd::SendFile(peer, rest.trim().to_string(), topic));
                     } else if !text.is_empty() {
-                        let _ = cmd_tx.send(Cmd::Send(peer, text));
+                        let _ = cmd_tx.send(Cmd::Send(peer, text, topic));
                     }
                 }
             }
@@ -1014,10 +1111,12 @@ fn handle_key(
                     app.active = Some(id.clone());
                     app.msg_sel = 0;
                     app.focus = Focus::Messages;
+                    app.topic_filter = TopicFilter::All; // новый чат — сброс фильтра темы
                     let _ = cmd_tx.send(Cmd::Open(id));
                 }
             }
         }
+        KeyCode::Char('t') => app.cycle_topic(),
         KeyCode::Left => app.focus = Focus::List,
         KeyCode::Char('r') => {
             if app.focus == Focus::Messages && !app.active_msgs().is_empty() {
@@ -1026,9 +1125,10 @@ fn handle_key(
         }
         KeyCode::Char('d') => {
             if app.focus == Focus::Messages {
-                if let (Some(peer), Some(m)) =
-                    (app.active.clone(), app.active_msgs().get(app.msg_sel).cloned())
-                {
+                if let (Some(peer), Some(m)) = (
+                    app.active.clone(),
+                    app.active_msgs().get(app.msg_sel).map(|m| (*m).clone()),
+                ) {
                     if let Some(att) = m.att {
                         let dir = dirs::download_dir()
                             .or_else(dirs::home_dir)
@@ -1099,7 +1199,28 @@ fn draw(f: &mut Frame, app: &App) {
         .map(|(_, n)| n.clone())
         .unwrap_or_else(|| "—".to_string());
     let focus_msgs = app.focus == Focus::Messages;
-    let msgs_title = format!(" {title_name} ");
+    // Заголовок ленты = имя диалога + чип-бар тем (появляется только если темы
+    // есть). Активный чип подсвечен; «t» листает темы.
+    let mut title_spans: Vec<Span> = vec![Span::raw(format!(" {title_name} "))];
+    let chips = app.topic_chips();
+    if chips.len() > 2 {
+        title_spans.push(Span::styled("· ", Style::new().fg(Color::DarkGray)));
+        for c in &chips {
+            let label = match c {
+                TopicFilter::All => "Все".to_string(),
+                TopicFilter::Main => "Главная".to_string(),
+                TopicFilter::Named(n) => format!("#{n}"),
+            };
+            let st = if *c == app.topic_filter {
+                Style::new().bg(ACCENT).fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(Color::DarkGray)
+            };
+            title_spans.push(Span::styled(format!(" {label} "), st));
+        }
+        title_spans.push(Span::styled(" (t) ", Style::new().fg(Color::DarkGray)));
+    }
+    let msgs_title = Line::from(title_spans);
 
     // Доступная ширина для текста внутри ленты (минус рамки и небольшой отступ).
     let text_width = (right[0].width as usize).saturating_sub(4).max(8);
@@ -1152,14 +1273,24 @@ fn draw(f: &mut Frame, app: &App) {
         let indent = " ".repeat(prefix.chars().count().min(text_width.saturating_sub(1)));
         let wrap_w = text_width.saturating_sub(prefix.chars().count()).max(8);
         let wrapped = wrap_text(&m.body, wrap_w);
+        // В режиме «Все» помечаем пузырь темой, иначе тема и так в чипе/фильтре.
+        let topic_tag = if matches!(app.topic_filter, TopicFilter::All) {
+            m.topic.as_deref().map(|t| format!("[#{t}] "))
+        } else {
+            None
+        };
         let mut lines: Vec<Line> = Vec::new();
         for (i, seg) in wrapped.iter().enumerate() {
             if i == 0 {
-                lines.push(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("{} ", m.ts), Style::new().fg(Color::DarkGray)),
                     Span::styled(format!("{}: ", m.who), who_style),
-                    Span::raw(seg.clone()),
-                ]));
+                ];
+                if let Some(tag) = &topic_tag {
+                    spans.push(Span::styled(tag.clone(), Style::new().fg(ACCENT_HI)));
+                }
+                spans.push(Span::raw(seg.clone()));
+                lines.push(Line::from(spans));
             } else {
                 lines.push(Line::from(vec![
                     Span::raw(indent.clone()),

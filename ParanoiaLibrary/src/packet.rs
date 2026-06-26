@@ -14,6 +14,12 @@ pub struct PacketInner {
     pub sender: String,
     /// Содержимое сообщения
     pub content: MessageContent,
+    /// Имя темы (ветки диалога), в которую отправлено сообщение. `None` —
+    /// «Главная» (без темы). Скрыто от сервера (внутри шифртекста); получатель
+    /// пересчитывает `topic_id` локально через [`crate::types::derive_topic_id`].
+    /// `skip_serializing_if` — не раздувать payload/cover, когда темы нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_name: Option<String>,
 }
 
 impl PacketInner {

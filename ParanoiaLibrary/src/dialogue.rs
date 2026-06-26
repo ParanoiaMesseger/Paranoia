@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     crypto,
     packet::PacketInner,
-    store::LocalStore,
+    store::{LocalStore, OutboundTransfer},
     transport::{
         CoreArrivedGet, CoreArrivedSet, CoreDeterminate, CoreMap, CoreNotify, CorePull, CorePush,
         MapResponse, RawPacket, Transport,
@@ -25,6 +25,11 @@ use crate::{
 };
 
 const FILE_PULL_CHUNKS_PER_REQUEST: u32 = 4;
+
+/// Сколько заходов resume делаем по передаче до пометки Failed (тело так и не
+/// долилось — например, сервер недоступен очень долго). Защита от бесконечного
+/// журнала; на практике долив происходит за 1-2 захода после возврата сети.
+const RESUME_MAX_ATTEMPTS: u32 = 10;
 
 /// Размер чанка при загрузке эфемерного большого файла в blob-хранилище (один
 /// HTTP-запрос на чанк). Крупнее history-чанков — файлы большие, минимизируем
@@ -59,6 +64,12 @@ pub struct Dialogue {
     client_cfg: Arc<ClientConfig>,
     transport: Arc<Transport>,
     store: Arc<LocalStore>,
+    /// Активная тема (ветка диалога), в которую уходят НОВЫЕ исходящие
+    /// сообщения. `None` — «Главная» (без темы). Interior-mutable, чтобы тему
+    /// можно было выставить на общем (`Rc`/`Arc`) диалоге без `&mut`
+    /// (TUI кеширует `Rc<Dialogue>`); реально это короткоживущий per-operation
+    /// тег, а не глобальный стейт.
+    active_topic: std::sync::Mutex<Option<String>>,
 }
 
 impl Dialogue {
@@ -79,6 +90,55 @@ impl Dialogue {
             client_cfg,
             transport,
             store,
+            active_topic: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Задать активную тему для последующих отправок. Пустое/пробельное имя
+    /// трактуется как «Главная» (`None`). Interior-mutable — работает на общем
+    /// `Rc<Dialogue>`. Fluent-вариант — [`Self::with_topic`].
+    pub fn set_active_topic(&self, name: Option<String>) {
+        let normalized = name.and_then(|n| {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        if let Ok(mut guard) = self.active_topic.lock() {
+            *guard = normalized;
+        }
+    }
+
+    /// Builder-форма [`Self::set_active_topic`] для цепочечного создания.
+    pub fn with_topic(self, name: Option<String>) -> Self {
+        self.set_active_topic(name);
+        self
+    }
+
+    /// Текущее имя активной темы (клон под локом; для UI/диагностики и отправки).
+    pub fn active_topic(&self) -> Option<String> {
+        self.active_topic.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// `(topic_id, topic_name)` для активной темы — id производится из имени,
+    /// привязан к диалогу. `(None, None)` для «Главной».
+    fn active_topic_fields(&self) -> (Option<String>, Option<String>) {
+        self.topic_fields_from_name(self.active_topic().as_deref())
+    }
+
+    /// `(topic_id, topic_name)` из имени темы: id производится из имени и
+    /// привязан к диалогу. Пустое/пробельное/`None` → «Главная» `(None, None)`.
+    /// Едина для исходящих (active_topic) и входящих (`inner.topic_name`) —
+    /// гарантирует тот же id у отправителя и получателя.
+    fn topic_fields_from_name(&self, name: Option<&str>) -> (Option<String>, Option<String>) {
+        match name {
+            Some(n) if !n.trim().is_empty() => (
+                Some(crate::types::derive_topic_id(&self.key, n)),
+                Some(n.to_string()),
+            ),
+            _ => (None, None),
         }
     }
 
@@ -776,6 +836,73 @@ impl Dialogue {
         self.remove_server_range(0, cut_seq).await
     }
 
+    /// Удалить тему целиком: все её сообщения (и тела вложений) — локально и на
+    /// сервере. Это ОБЫЧНОЕ удаление сообщений, просто пакетом по `topic_id`:
+    /// честный партнёр подтянет removal через tombstone-sweep в `receive` и
+    /// сотрёт у себя. Тема — производная от сообщений, поэтому её чип исчезает у
+    /// обеих сторон сам, когда не остаётся сообщений. Возвращает число удалённых
+    /// локальных сообщений.
+    /// Темы (ветки) диалога: `(topic_id, отображаемое имя, число сообщений)`,
+    /// из локального стора. «Главная» (без темы) не входит.
+    pub fn list_topics(&self) -> Result<Vec<(String, String, u64)>> {
+        self.store.list_topics(&self.key)
+    }
+
+    /// Новые сообщения диалога после курсора `after_seq` (по возрастанию seq).
+    /// Для монитор-сессий: читают, что записал процесс-пулер, не дублируя pull.
+    pub fn messages_after_seq(&self, after_seq: u64, limit: usize) -> Result<Vec<Message>> {
+        self.store.messages_after_seq(&self.key, after_seq, limit)
+    }
+
+    /// Наибольший локальный `server_seq` диалога — стартовый курсор доставки.
+    pub fn max_server_seq(&self) -> Result<u64> {
+        self.store.max_server_seq(&self.key)
+    }
+
+    /// `PRAGMA data_version` стора — дёшево детектит записи из другого процесса.
+    pub fn data_version(&self) -> Result<i64> {
+        self.store.data_version()
+    }
+
+    /// `topic_id` для имени темы в этом диалоге (детерминированный, привязан к
+    /// `DialogueKey`). Пустое/`None` имя → `None` («Главная»). Для фильтра скоупа.
+    pub fn topic_id_for_name(&self, name: Option<&str>) -> Option<String> {
+        self.topic_fields_from_name(name).0
+    }
+
+    pub async fn delete_topic(&self, topic_name: &str) -> Result<usize> {
+        let topic_id = crate::types::derive_topic_id(&self.key, topic_name);
+        let msgs = self.store.list_topic_messages(&self.key, &topic_id)?;
+        if msgs.is_empty() {
+            return Ok(0);
+        }
+        // Серверные seq к удалению = seq самого сообщения + тело файла (его чанки
+        // лежат на seq после header'а и НЕ тегированы темой, но принадлежат ей).
+        let mut server_seqs: Vec<u64> = Vec::new();
+        let mut local_seqs: Vec<u64> = Vec::new();
+        for m in &msgs {
+            let Some(seq) = m.server_seq else { continue };
+            local_seqs.push(seq);
+            server_seqs.push(seq);
+            if let Some(file) = attachment_ref(&m.content) {
+                if file.body_to_seq >= seq {
+                    for s in (seq + 1)..=file.body_to_seq {
+                        server_seqs.push(s);
+                    }
+                }
+            }
+        }
+        server_seqs.sort_unstable();
+        server_seqs.dedup();
+        // Сервер удаляет диапазонами [from,to]; шлём по смежным «ранам», чтобы не
+        // задеть сообщения других тем/«Главной» между ними.
+        for (from, to) in contiguous_runs(&server_seqs) {
+            self.remove_server_range(from, to).await?;
+        }
+        self.store.delete_messages_by_seqs(&self.key, &local_seqs)?;
+        Ok(local_seqs.len())
+    }
+
     pub async fn download_attachment(&self, message_id: &str, path: &str) -> Result<()> {
         self.write_attachment_to_path(message_id, Path::new(path), None)
             .await
@@ -928,25 +1055,54 @@ impl Dialogue {
         }
 
         let username = &self.client_cfg.username;
-        let id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let active_topic = self.active_topic();
 
-        // Атомарный seq из локального счётчика
-        let seq = self.store.next_send_seq(&self.key)?;
-        self.push_packet(seq, &id, now, content.clone()).await?;
-
-        let msg = Message {
-            id: id.clone(),
-            dialogue: self.key.clone(),
-            sender: username.clone(),
-            content,
-            timestamp: now,
-            status: MessageStatus::Sent,
-            server_seq: Some(seq),
-        };
-        self.store.save_message(&msg)?;
-        debug!("Sent seq={seq} id={id}");
-        Ok(msg)
+        // До 3 попыток: при конфликте seq синхронизируемся с сервером и
+        // перевыбираем seq. Это закрывает случаи, когда локальный счётчик отстал,
+        // а /notify их НЕ показал: сервер авто-прочитывает СОБСТВЕННЫЕ сообщения
+        // отправителя, поэтому свежее устройство (сброс БД / новый девайс) видит
+        // notify_count == 0 и без ретрая выбрало бы уже занятый seq. receive()
+        // делает полную карту seq и подтягивает собственные пакеты → next_send_seq
+        // сдвигается на корректное значение.
+        let mut last_err: Option<anyhow::Error> = None;
+        for _ in 0..3 {
+            let id = Uuid::new_v4().to_string();
+            let seq = self.store.next_send_seq(&self.key)?;
+            match self
+                .push_packet(seq, &id, now, content.clone(), active_topic.as_deref())
+                .await
+            {
+                Ok(()) => {
+                    let (topic_id, topic_name) = self.active_topic_fields();
+                    let msg = Message {
+                        id: id.clone(),
+                        dialogue: self.key.clone(),
+                        sender: username.clone(),
+                        content,
+                        timestamp: now,
+                        status: MessageStatus::Sent,
+                        server_seq: Some(seq),
+                        topic_id,
+                        topic_name,
+                    };
+                    self.store.save_message(&msg)?;
+                    debug!("Sent seq={seq} id={id}");
+                    return Ok(msg);
+                }
+                Err(e) => {
+                    let cls = crate::error_classify::classify_send_error(&e.to_string());
+                    if cls == "duplicate_seq" || cls == "invalid_seq" {
+                        debug!("send seq={seq} конфликт ({cls}) — ресинк и ретрай");
+                        self.receive().await?; // выровнять next_send_seq по серверу
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("send failed after retries")))
     }
 
     async fn push_packet(
@@ -955,6 +1111,7 @@ impl Dialogue {
         id: &str,
         timestamp: chrono::DateTime<Utc>,
         content: MessageContent,
+        topic_name: Option<&str>,
     ) -> Result<()> {
         let username = &self.client_cfg.username;
         let partner = self.partner();
@@ -963,6 +1120,7 @@ impl Dialogue {
             timestamp: timestamp.timestamp_millis(),
             sender: username.clone(),
             content,
+            topic_name: topic_name.map(str::to_string),
         };
         let session_key = self.config.key_for_seq(seq)?;
         let ciphertext = crypto::encrypt(session_key, &inner.serialize()?)?;
@@ -1022,7 +1180,8 @@ impl Dialogue {
             chunks: total,
             group_id: group_id.clone(),
         };
-        self.push_packet(header_seq, &transfer_id, now, header)
+        let active_topic = self.active_topic();
+        self.push_packet(header_seq, &transfer_id, now, header, active_topic.as_deref())
             .await?;
 
         for (i, chunk_data) in chunks.iter().enumerate() {
@@ -1037,7 +1196,8 @@ impl Dialogue {
                 data: chunk_data.to_vec(),
             };
             let chunk_id = format!("{transfer_id}:{i}");
-            self.push_packet(seq, &chunk_id, now, content).await?;
+            // Тег темы несёт только header — чанки тела не отображаются, не раздуваем.
+            self.push_packet(seq, &chunk_id, now, content, None).await?;
             debug!(
                 "Sent chunk {}/{} ({} bytes) for transfer {}",
                 i + 1,
@@ -1072,6 +1232,8 @@ impl Dialogue {
             timestamp: now,
             status: MessageStatus::Sent,
             server_seq: Some(header_seq),
+            topic_id: self.active_topic_fields().0,
+            topic_name: self.active_topic_fields().1,
         };
         self.store.save_message(&display_msg)?;
 
@@ -1085,7 +1247,7 @@ impl Dialogue {
         mime_type: String,
         path: &Path,
         group_id: Option<String>,
-        mut on_progress: F,
+        on_progress: F,
     ) -> Result<Vec<Message>>
     where
         F: FnMut(u32, u32),
@@ -1116,18 +1278,130 @@ impl Dialogue {
 
         let transfer_id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let header = MessageContent::FileHeader {
+        let cache_path_str = path.to_string_lossy().into_owned();
+
+        // ── Persist ДО заливки (resumable): сообщение со статусом Sending +
+        // запись в журнале outbound_transfers. Если заливка тела оборвётся
+        // (выход из диалога, потеря сети, kill процесса), фоновый resume
+        // (`resume_pending_transfers`) до-шлёт недостающие seq по сохранённым
+        // chunk_sizes. Раньше display_msg сохранялся только ПОСЛЕ всех чанков
+        // (Sent), а при обрыве передача висела на сервере недокачанной навсегда.
+        let mut display_msg = Message {
+            id: transfer_id.clone(),
+            dialogue: self.key.clone(),
+            sender: self.client_cfg.username.clone(),
+            content: attachment_content(
+                kind,
+                FileAttachment {
+                    filename: filename.clone(),
+                    mime_type: mime_type.clone(),
+                    size: total_size,
+                    data: Vec::new(),
+                    transfer_id: Some(transfer_id.clone()),
+                    cache_path: Some(cache_path_str.clone()),
+                    chunk_count: total,
+                    body_from_seq,
+                    body_to_seq,
+                    downloaded: true,
+                    group_id: group_id.clone(),
+                    ephemeral_file_id: None,
+                    ephemeral_expires_at: None,
+                },
+            ),
+            timestamp: now,
+            status: MessageStatus::Sending,
+            server_seq: Some(header_seq),
+            topic_id: self.active_topic_fields().0,
+            topic_name: self.active_topic_fields().1,
+        };
+        self.store.save_message(&display_msg)?;
+        self.store.insert_outbound(&OutboundTransfer {
             transfer_id: transfer_id.clone(),
-            kind,
+            dialogue: self.key.clone(),
+            header_seq,
+            chunk_count: total,
+            chunk_sizes: chunk_sizes.clone(),
+            cache_path: cache_path_str,
             filename: filename.clone(),
             mime_type: mime_type.clone(),
+            kind,
             total_size,
-            chunks: total,
             group_id: group_id.clone(),
-        };
-        self.push_packet(header_seq, &transfer_id, now, header)
-            .await?;
+            // Тема передачи переживает обрыв: resume до-шлёт header с этим тегом.
+            topic_name: self.active_topic(),
+            timestamp: now,
+            attempts: 0,
+        })?;
 
+        // Заливка тела (header + чанки). При успехе — журнал удаляем, статус Sent.
+        // При обрыве — оставляем Sending + журнал; resume добьёт позже (UI всё это
+        // время показывает «отправляется», а не вечную ошибку).
+        let present = std::collections::HashSet::new();
+        let topic_for_transfer = self.active_topic();
+        match self
+            .push_transfer_packets(
+                &transfer_id, kind, &filename, &mime_type, total_size, &chunk_sizes, header_seq,
+                &group_id, topic_for_transfer.as_deref(), path, now, &present, on_progress,
+            )
+            .await
+        {
+            Ok(()) => {
+                self.store.delete_outbound(&transfer_id)?;
+                self.store
+                    .update_status(&transfer_id, MessageStatus::Sent)?;
+                display_msg.status = MessageStatus::Sent;
+            }
+            Err(e) => {
+                warn!("send: transfer {transfer_id} body incomplete, will resume: {e}");
+            }
+        }
+
+        Ok(vec![display_msg])
+    }
+
+    /// Залить недостающие пакеты файловой передачи: header (если его seq нет в
+    /// `present`) + чанки тела (нарезка по `chunk_sizes`, пропуск seq из
+    /// `present`). `on_progress(index, total)` — после каждой плитки. Возвращает
+    /// `Ok(())` когда все пакеты тела на сервере; `Err` — если push оборвался
+    /// (резюмируемо). Общий путь для первой отправки (`present` пуст) и для
+    /// resume (`present` = уже залитые seq). Чанк читается всегда (двигает
+    /// reader), пушится только отсутствующий — границы воспроизводимы по
+    /// сохранённым `chunk_sizes`.
+    #[allow(clippy::too_many_arguments)]
+    async fn push_transfer_packets<F>(
+        &self,
+        transfer_id: &str,
+        kind: AttachmentKind,
+        filename: &str,
+        mime_type: &str,
+        total_size: usize,
+        chunk_sizes: &[usize],
+        header_seq: u64,
+        group_id: &Option<String>,
+        topic_name: Option<&str>,
+        path: &Path,
+        now: chrono::DateTime<Utc>,
+        present: &std::collections::HashSet<u64>,
+        mut on_progress: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u32, u32),
+    {
+        let total = chunk_sizes.len() as u32;
+        let body_from_seq = header_seq + 1;
+        if !present.contains(&header_seq) {
+            let header = MessageContent::FileHeader {
+                transfer_id: transfer_id.to_string(),
+                kind,
+                filename: filename.to_string(),
+                mime_type: mime_type.to_string(),
+                total_size,
+                chunks: total,
+                group_id: group_id.clone(),
+            };
+            self.push_packet(header_seq, transfer_id, now, header, topic_name)
+                .await?;
+        }
         let mut reader =
             BufReader::new(File::open(path).map_err(|_| anyhow::anyhow!("file_read_error"))?);
         for (i, chunk_size) in chunk_sizes.iter().copied().enumerate() {
@@ -1136,57 +1410,120 @@ impl Dialogue {
                 .read_exact(&mut data)
                 .map_err(|_| anyhow::anyhow!("file_read_error"))?;
             let seq = body_from_seq + i as u64;
-            let content = MessageContent::FileChunk {
-                transfer_id: transfer_id.clone(),
-                index: i as u32,
-                total,
-                filename: filename.clone(),
-                mime_type: mime_type.clone(),
-                total_size,
-                data,
-            };
-            let chunk_id = format!("{transfer_id}:{i}");
-            self.push_packet(seq, &chunk_id, now, content).await?;
-            debug!(
-                "Sent chunk {}/{} for transfer {}",
-                i + 1,
-                total,
-                transfer_id
-            );
-            // Сообщаем подписчику о прогрессе ПОСЛЕ успешного push'а — callback
-            // получает уже отосланные индексы.
+            if !present.contains(&seq) {
+                let content = MessageContent::FileChunk {
+                    transfer_id: transfer_id.to_string(),
+                    index: i as u32,
+                    total,
+                    filename: filename.to_string(),
+                    mime_type: mime_type.to_string(),
+                    total_size,
+                    data,
+                };
+                let chunk_id = format!("{transfer_id}:{i}");
+                self.push_packet(seq, &chunk_id, now, content, None).await?;
+            }
             on_progress(i as u32 + 1, total);
         }
+        Ok(())
+    }
 
-        let display_msg = Message {
-            id: transfer_id.clone(),
-            dialogue: self.key.clone(),
-            sender: self.client_cfg.username.clone(),
-            content: attachment_content(
-                kind,
-                FileAttachment {
-                    filename,
-                    mime_type,
-                    size: total_size,
-                    data: Vec::new(),
-                    transfer_id: Some(transfer_id),
-                    cache_path: Some(path.to_string_lossy().into_owned()),
-                    chunk_count: total,
-                    body_from_seq,
-                    body_to_seq,
-                    downloaded: true,
-                    group_id,
-                    ephemeral_file_id: None,
-                    ephemeral_expires_at: None,
-                },
-            ),
-            timestamp: now,
-            status: MessageStatus::Sent,
-            server_seq: Some(header_seq),
-        };
-        self.store.save_message(&display_msg)?;
+    /// Множество seq из диапазона `(after_seq, to_seq]`, реально присутствующих
+    /// на сервере (по `/map`). Для resume — узнать, какие пакеты передачи уже
+    /// залиты, чтобы не слать их повторно.
+    async fn existing_seqs(
+        &self,
+        after_seq: u64,
+        to_seq: u64,
+    ) -> Result<std::collections::HashSet<u64>> {
+        let mut present = std::collections::HashSet::new();
+        let mut after = after_seq;
+        loop {
+            let m = self.fetch_map(after, to_seq).await?;
+            let last_end = m.runs.last().map(|(_, e)| *e);
+            for (b, e) in &m.runs {
+                for s in *b..=*e {
+                    present.insert(s);
+                }
+            }
+            if !m.truncated {
+                break;
+            }
+            match last_end {
+                Some(le) if le < to_seq => after = le,
+                _ => break,
+            }
+        }
+        Ok(present)
+    }
 
-        Ok(vec![display_msg])
+    /// Возобновить незавершённые исходящие файловые передачи диалога: до-слать
+    /// недостающие пакеты тех, что оборвались (выход из диалога, потеря сети,
+    /// рестарт). Возвращает сообщения, достигшие терминального статуса (`Sent` —
+    /// тело долито; `Failed` — исходный файл пропал или исчерпаны попытки) —
+    /// чтобы вызывающий обновил их в UI. Идемпотентно: дубли seq не шлются
+    /// (пропускаем по `/map`), повторный вызов на уже долитой передаче
+    /// безопасен.
+    pub async fn resume_pending_transfers(&self) -> Result<Vec<Message>> {
+        let pending = self.store.list_outbound(&self.key)?;
+        let mut updated = Vec::new();
+        for t in pending {
+            match self.resume_one(&t).await {
+                Ok(Some(msg)) => updated.push(msg),
+                Ok(None) => {}
+                Err(e) => warn!("resume transfer {}: {e}", t.transfer_id),
+            }
+        }
+        Ok(updated)
+    }
+
+    async fn resume_one(&self, t: &OutboundTransfer) -> Result<Option<Message>> {
+        // Исходный файл пропал (кэш очищен) — возобновить невозможно → Failed.
+        let path = Path::new(&t.cache_path);
+        if !fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
+            self.store
+                .update_status(&t.transfer_id, MessageStatus::Failed)?;
+            self.store.delete_outbound(&t.transfer_id)?;
+            return Ok(self.store.get_message_by_id(&self.key, &t.transfer_id)?);
+        }
+        let attempts = self.store.bump_outbound_attempts(&t.transfer_id)?;
+        let body_to_seq = t.header_seq + t.chunk_count as u64;
+        let present = self
+            .existing_seqs(t.header_seq.saturating_sub(1), body_to_seq)
+            .await?;
+        match self
+            .push_transfer_packets(
+                &t.transfer_id, t.kind, &t.filename, &t.mime_type, t.total_size, &t.chunk_sizes,
+                t.header_seq, &t.group_id, t.topic_name.as_deref(), path, t.timestamp, &present,
+                |_, _| {},
+            )
+            .await
+        {
+            Ok(()) => {
+                self.store.delete_outbound(&t.transfer_id)?;
+                self.store
+                    .update_status(&t.transfer_id, MessageStatus::Sent)?;
+                debug!("Resumed transfer {} to completion", t.transfer_id);
+                Ok(self.store.get_message_by_id(&self.key, &t.transfer_id)?)
+            }
+            Err(e) if attempts >= RESUME_MAX_ATTEMPTS => {
+                warn!(
+                    "resume transfer {} giving up after {attempts} attempts: {e}",
+                    t.transfer_id
+                );
+                self.store
+                    .update_status(&t.transfer_id, MessageStatus::Failed)?;
+                self.store.delete_outbound(&t.transfer_id)?;
+                Ok(self.store.get_message_by_id(&self.key, &t.transfer_id)?)
+            }
+            Err(e) => {
+                debug!(
+                    "resume transfer {} still incomplete (attempt {attempts}): {e}",
+                    t.transfer_id
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn write_attachment_to_path(
@@ -1462,6 +1799,8 @@ impl Dialogue {
                     .ok_or_else(|| anyhow::anyhow!("file range overflow"))?;
                 let ts = chrono::DateTime::from_timestamp_millis(inner.timestamp)
                     .unwrap_or_else(Utc::now);
+                let (topic_id, topic_name) =
+                    self.topic_fields_from_name(inner.topic_name.as_deref());
                 let msg = Message {
                     id: transfer_id.clone(),
                     dialogue: self.key.clone(),
@@ -1487,6 +1826,8 @@ impl Dialogue {
                     timestamp: ts,
                     status: MessageStatus::Delivered,
                     server_seq: Some(seq),
+                    topic_id,
+                    topic_name,
                 };
                 self.store.save_message(&msg)?;
                 debug!("Received file header for transfer {transfer_id}");
@@ -1555,6 +1896,10 @@ impl Dialogue {
                         timestamp: assembled.timestamp,
                         status: MessageStatus::Delivered,
                         server_seq: Some(seq),
+                        // Тема едет в FileHeader; этот путь — только при отсутствии
+                        // принятого заголовка, поэтому тема здесь неизвестна.
+                        topic_id: None,
+                        topic_name: None,
                     };
                     self.store.save_message(&msg)?;
                     debug!("Assembled file from transfer {transfer_id}");
@@ -1564,6 +1909,8 @@ impl Dialogue {
                 Ok(None)
             }
             _ => {
+                let (topic_id, topic_name) =
+                    self.topic_fields_from_name(inner.topic_name.as_deref());
                 let mut content = inner.content;
                 strip_remote_local_attachment_state(&mut content);
                 let msg = Message {
@@ -1575,6 +1922,8 @@ impl Dialogue {
                         .unwrap_or_else(Utc::now),
                     status: MessageStatus::Delivered,
                     server_seq: Some(seq),
+                    topic_id,
+                    topic_name,
                 };
                 self.store.save_message(&msg)?;
                 Ok(Some(msg))
@@ -1716,6 +2065,39 @@ fn attachment_content(kind: AttachmentKind, file: FileAttachment) -> MessageCont
         AttachmentKind::Voice => MessageContent::Voice(file),
         AttachmentKind::Video => MessageContent::Video(file),
     }
+}
+
+/// Вложение сообщения, если оно файловое (File/Image/Voice/Video).
+fn attachment_ref(content: &MessageContent) -> Option<&FileAttachment> {
+    match content {
+        MessageContent::File(f)
+        | MessageContent::Image(f)
+        | MessageContent::Voice(f)
+        | MessageContent::Video(f) => Some(f),
+        _ => None,
+    }
+}
+
+/// Свернуть отсортированный список seq в смежные диапазоны `[from, to]`
+/// (включительно). Для пакетного серверного удаления минимальным числом
+/// determinate-вызовов.
+fn contiguous_runs(sorted: &[u64]) -> Vec<(u64, u64)> {
+    let mut runs = Vec::new();
+    let mut iter = sorted.iter().copied();
+    if let Some(first) = iter.next() {
+        let (mut start, mut end) = (first, first);
+        for s in iter {
+            if s == end + 1 {
+                end = s;
+            } else {
+                runs.push((start, end));
+                start = s;
+                end = s;
+            }
+        }
+        runs.push((start, end));
+    }
+    runs
 }
 
 /// Классификация вложения по MIME-типу. `video/*` → Video, `image/*` → Image,

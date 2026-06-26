@@ -1,8 +1,8 @@
 use crate::client_cover::ClientCover;
 use crate::crypto::{decode_b64, encode_b64};
 use crate::transport::{
-    CallEnvelopeIn, CoreCallPoll, CoreCallSignal, CoreDeterminate, CoreMap, CoreNotify, CorePull,
-    CorePush, MapResponse, RawPacket,
+    CallEnvelopeIn, CoreCallPoll, CoreCallSignal, CoreDeterminate, CoreMap, CoreNotify,
+    CoreNotifyMulti, CorePull, CorePush, MapResponse, RawPacket,
 };
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -68,6 +68,18 @@ impl ClientCover for FoodDeliveryClientCover {
             "clientId": core.sender, "partnerId": core.partner,
             "cursor": core.seq, "auth": encode_b64(&core.sig),
             // long-poll: сервер читает опц. waitMs (0/нет → короткий поллинг).
+            "waitMs": core.long_poll_ms,
+        }))
+    }
+
+    fn wrap_notify_multi(&self, core: &CoreNotifyMulti) -> Result<Value> {
+        Ok(json!({
+            "operation": "checkOrders",
+            "clientId": core.sender,
+            "lines": core.items.iter().map(|(partner, seq)| json!({
+                "partnerId": partner, "cursor": seq,
+            })).collect::<Vec<_>>(),
+            "auth": encode_b64(&core.sig),
             "waitMs": core.long_poll_ms,
         }))
     }
@@ -144,6 +156,22 @@ impl ClientCover for FoodDeliveryClientCover {
         body["n"]
             .as_u64()
             .ok_or_else(|| anyhow!("Notify: missing n"))
+    }
+
+    fn unwrap_notify_response_multi(&self, body: &Value) -> Result<Vec<(String, u64)>> {
+        check_ok(body, "Notify")?;
+        // ВАЖНО: когда зажжённых нет (все диалоги прочитаны), сервер отдаёт
+        // `{ok:true, n:0}` БЕЗ поля `lines`. Это НЕ ошибка — просто пустой
+        // результат. Трактовать отсутствие `lines` как Err ломало форграунд-поллинг
+        // (`anyFailed=true` → «Подключение» крутилось вечно при отсутствии непрочитанного).
+        let lines = match body["lines"].as_array() {
+            Some(l) => l,
+            None => return Ok(Vec::new()),
+        };
+        Ok(lines
+            .iter()
+            .filter_map(|l| Some((l["partnerId"].as_str()?.to_string(), l["n"].as_u64()?)))
+            .collect())
     }
 
     fn unwrap_push_response(&self, body: &Value) -> Result<()> {

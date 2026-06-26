@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.18 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.20 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -910,13 +910,15 @@ if(PARANOIA_IS_WINDOWS)
     endif()
 
     if(_paranoia_vcpkg_bin AND EXISTS "${_paranoia_vcpkg_bin}")
+        # Бандлим ВЕСЬ runtime-closure vcpkg (все *.dll в bin триплета), а не
+        # пофайловый список. Перечисление по именам уже один раз пропустило
+        # avformat/avfilter (их тянет Qt FFmpeg media plugin для видео в QML и наш
+        # avfilter-pipeline звонков) → Paranoia.exe не стартовал. В manifest-mode
+        # каталог bin содержит ровно зависимости установленных пакетов (ffmpeg +
+        # opus) и их транзитивные DLL (zlib, bz2 и т.п.) — копировать всё корректно
+        # и устойчиво к добавлению новых кодеков/зависимостей.
         file(GLOB _paranoia_vcpkg_runtime_dlls CONFIGURE_DEPENDS
-            "${_paranoia_vcpkg_bin}/avcodec-*.dll"
-            "${_paranoia_vcpkg_bin}/avutil-*.dll"
-            "${_paranoia_vcpkg_bin}/swscale-*.dll"
-            "${_paranoia_vcpkg_bin}/swresample-*.dll"
-            "${_paranoia_vcpkg_bin}/opus.dll"
-            "${_paranoia_vcpkg_bin}/openh264*.dll"
+            "${_paranoia_vcpkg_bin}/*.dll"
         )
         if(_paranoia_vcpkg_runtime_dlls)
             install(FILES ${_paranoia_vcpkg_runtime_dlls}

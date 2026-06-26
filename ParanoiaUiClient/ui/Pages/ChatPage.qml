@@ -106,6 +106,7 @@ Rectangle {
     property string pendingReplyText: ""
     readonly property bool hasPendingReply: pendingReplyId.length > 0
     property bool searchActive: false
+    property bool topicCreateActive: false   // показан ли инлайн-бар ввода имени темы
     property string searchQuery: ""
     property int searchCurrentIndex: -1
     property var searchMatchIndices: []
@@ -518,6 +519,7 @@ Rectangle {
                     var synth = { kind: "photo_group", group_id: gid, caption: "", text: "",
                                   id: "grp:" + gid, sender: m.sender, sender_name: m.sender_name,
                                   isMe: m.isMe, status: m.status, ts: m.ts, seq: m.seq,
+                                  topic_name: m.topic_name || "",
                                   reactions_json: "[]", photos: [] }
                     groups[gid] = synth
                     committedCount[gid] = 0
@@ -608,6 +610,10 @@ Rectangle {
             root.closeSearch()
             return true
         }
+        if (root.topicCreateActive) {
+            root.closeTopicCreate()
+            return true
+        }
         return false
     }
 
@@ -624,6 +630,35 @@ Rectangle {
         root.searchQuery = ""
         root.searchMatchIndices = []
         root.searchCurrentIndex = -1
+    }
+
+    // Создание темы — инлайн-бар (НЕ Popup: центрированный Popup с вводом текста
+    // затеняется экранной клавиатурой на Android). Бар сидит в раскладке над полем
+    // ввода, клавиатура его не перекрывает — как строка поиска.
+    function openTopicCreate() {
+        if (root.searchActive) root.closeSearch()
+        topicCreateField.text = ""
+        root.topicCreateActive = true
+        topicCreateField.forceActiveFocus()
+    }
+    function commitTopicCreate() {
+        // Зафиксировать последнее КОМПОЗ-слово (pre-edit предиктивного ввода) в
+        // text — иначе на Android слово под spell-check'ом не попадает в имя темы.
+        Qt.inputMethod.commit()
+        let name = topicCreateField.text.trim()
+        // Подстраховка (как в doSend): если commit() не сложил pre-edit в text
+        // (например первое слово) — берём напрямую из preeditText.
+        if (name.length === 0 && topicCreateField.preeditText && topicCreateField.preeditText.length > 0)
+            name = String(topicCreateField.preeditText).trim()
+        if (name === "") { root.closeTopicCreate(); return }
+        root.topicCreateActive = false
+        topicCreateField.text = ""
+        root._pendingNewTopic = name   // показать чип сразу, до первого сообщения
+        root.selectTopic(name)         // тема становится активной для отправки
+    }
+    function closeTopicCreate() {
+        root.topicCreateActive = false
+        topicCreateField.text = ""
     }
 
     function beginSelection(messageId) {
@@ -914,10 +949,142 @@ Rectangle {
     property int _windowCount: 50
     property bool _loadingOlder: false
 
+    // ── Темы (ветки диалога) ──────────────────────────────────────────────
+    // Фильтр ленты: "__all__" — все, "__main__" — «Главная» (без темы), иначе имя
+    // конкретной темы. Чип-бар появляется только если в диалоге есть темы.
+    readonly property string _topicAll: "__all__"
+    readonly property string _topicMain: "__main__"
+    property string topicFilter: "__all__"
+    property var _topicNames: []   // различимые имена тем (порядок появления)
+    property string _topicToDelete: ""   // имя темы в ожидании подтверждения удаления
+    // Только что созданная пользователем тема, ещё без сообщений: показывается
+    // чипом (активной) до первой отправки, которая её материализует.
+    property string _pendingNewTopic: ""
+    // Сессионные бейджи непрочитанного по темам (без записи на диск): тема горит,
+    // если в неё пришло входящее, пока активен ДРУГОЙ фильтр. На первом показе
+    // диалога всё считается просмотренным (пользователь только открыл чат).
+    property var _topicMaxIncoming: ({})   // имя → max seq среди ВХОДЯЩИХ
+    property var _topicSeenSeq: ({})       // имя → до какого seq «просмотрено»
+    property bool _topicSeenInit: false
+    // Однократное восстановление последнего выбранного фильтра темы при входе в
+    // диалог (Dialog::lastTopic). Взводится на свежем входе, гасится в
+    // updateMessageModel после применения. Дефолт первого входа — «Все».
+    property bool _topicRestorePending: false
+
+    // Различимые имена тем из всех сообщений диалога (для чип-бара).
+    function computeTopicNames(messages) {
+        const seen = ({})
+        const out = []
+        for (let i = 0; i < messages.length; ++i) {
+            const t = messages[i].topic_name || ""
+            if (t !== "" && seen[t] === undefined) { seen[t] = true; out.push(t) }
+        }
+        return out
+    }
+
+    // Отфильтровать сообщения по активному фильтру темы.
+    function filterByTopic(messages) {
+        const f = root.topicFilter
+        if (f === root._topicAll) return messages
+        const wantMain = (f === root._topicMain)
+        const out = []
+        for (let i = 0; i < messages.length; ++i) {
+            const t = messages[i].topic_name || ""
+            if (wantMain ? (t === "") : (t === f)) out.push(messages[i])
+        }
+        return out
+    }
+
+    // Пересчёт бейджей непрочитанного: max seq входящих по темам + пометка
+    // просмотренными тех, что под активным фильтром.
+    function recomputeTopicUnread(messages) {
+        const maxIn = ({})
+        for (let i = 0; i < messages.length; ++i) {
+            const m = messages[i]
+            const t = m.topic_name || ""
+            if (t === "" || m.isMe) continue
+            const s = m.seq || 0
+            if (s > (maxIn[t] || 0)) maxIn[t] = s
+        }
+        root._topicMaxIncoming = maxIn
+        if (!root._topicSeenInit) {
+            // Первый показ диалога — всё уже «просмотрено».
+            const seen = ({})
+            for (const k in maxIn) seen[k] = maxIn[k]
+            root._topicSeenSeq = seen
+            root._topicSeenInit = true
+        } else {
+            root.markActiveTopicSeen()
+        }
+    }
+
+    // Пометить тему(ы) под активным фильтром просмотренными (новый объект — чтобы
+    // QML переоценил биндинги бейджей).
+    function markActiveTopicSeen() {
+        const seen = ({})
+        for (const k in root._topicSeenSeq) seen[k] = root._topicSeenSeq[k]
+        const f = root.topicFilter
+        if (f === root._topicAll) {
+            for (const k in root._topicMaxIncoming) seen[k] = root._topicMaxIncoming[k]
+        } else if (f !== root._topicMain) {
+            seen[f] = root._topicMaxIncoming[f] || 0
+        }
+        root._topicSeenSeq = seen
+    }
+
+    function topicHasUnread(name) {
+        return (root._topicMaxIncoming[name] || 0) > (root._topicSeenSeq[name] || 0)
+    }
+
+    // Выбрать чип темы: переключить фильтр, задать активную тему отправки и
+    // пересобрать окно. Для «Все»/«Главная» отправка идёт в «Главную» (пусто).
+    function selectTopic(filter) {
+        root.topicFilter = filter
+        Chat.setActiveTopic((filter === root._topicAll || filter === root._topicMain) ? "" : filter)
+        // Запомнить выбор для этого диалога (восстановим при следующем входе).
+        // «Все» (дефолт) храним как пусто — чтобы не засорять dialogs.json.
+        Chat.setLastTopic(root.peer, filter === root._topicAll ? "" : filter)
+        root._windowCount = root._windowDefault
+        root.updateMessageModel(root._allMessages)
+        listView.positionViewAtIndex(0, ListView.End)   // к низу (новейшее)
+    }
+
     function updateMessageModel(messages) {
         root._allMessages = messages
-        const start = Math.max(0, messages.length - root._windowCount)
-        const slice = start > 0 ? messages.slice(start) : messages
+        root._topicNames = root.computeTopicNames(messages)
+        root.recomputeTopicUnread(messages)
+        // Только что созданная тема материализовалась (появились сообщения) → она
+        // уже в _topicNames, pending-пометка больше не нужна.
+        if (root._pendingNewTopic !== "" && root._topicNames.indexOf(root._pendingNewTopic) >= 0)
+            root._pendingNewTopic = ""
+        // Однократное восстановление последнего фильтра темы при входе в диалог
+        // (Dialog::lastTopic). Делаем ДО фильтрации (без повторного прохода).
+        // Сентинелы «Все»/«Главная» применяем сразу; именованную — только когда она
+        // уже среди загруженных тем (иначе ждём следующего вызова). Не найдена среди
+        // загруженных → остаёмся на «Все» (дефолт). Пусто/нет → «Все».
+        if (root._topicRestorePending) {
+            const saved = Chat.getLastTopic(root.peer)
+            const sentinel = (saved === root._topicAll || saved === root._topicMain)
+            if (saved === "" || sentinel || root._topicNames.indexOf(saved) >= 0) {
+                if (saved !== "" && saved !== root.topicFilter) {
+                    root.topicFilter = saved
+                    Chat.setActiveTopic(sentinel ? "" : saved)
+                }
+                root._topicRestorePending = false
+            } else if (root._topicNames.length > 0) {
+                root._topicRestorePending = false   // сохранённой темы больше нет
+            }
+        }
+        // Активная тема пропала (удалена/не существует) → сброс на «Все». Только
+        // что созданную (pending) тему НЕ сбрасываем — у неё ещё нет сообщений.
+        if (root.topicFilter !== root._topicAll && root.topicFilter !== root._topicMain
+            && root.topicFilter !== root._pendingNewTopic
+            && root._topicNames.indexOf(root.topicFilter) < 0) {
+            root.topicFilter = root._topicAll
+        }
+        const filtered = root.filterByTopic(messages)
+        const start = Math.max(0, filtered.length - root._windowCount)
+        const slice = start > 0 ? filtered.slice(start) : filtered
         // Разворачиваем: index 0 = новейшее (для BottomToTop-ленты).
         const windowed = slice.slice().reverse()
         // Пилюля-разделитель дня крепится к САМОМУ СТАРОМУ сообщению дня (рисуется НАД
@@ -1252,6 +1419,10 @@ Rectangle {
             // _windowCount от прошлого открытия (пагинация #39).
             if (wasEmpty) {
                 root._windowCount = root._windowDefault
+                root._topicSeenInit = false   // новый вход в диалог — пересеять «просмотрено»
+                root._pendingNewTopic = ""    // несохранённая новая тема не переживает выход
+                root.topicFilter = root._topicAll      // сброс перед восстановлением
+                root._topicRestorePending = true       // восстановить lastTopic диалога
                 // Подавляем анимацию появления на ~1.5с после ВХОДА в диалог: непрочитанные
                 // догружаются разом и, дешифруясь, ломали раскладку инверт-ленты (наложение
                 // пузырей). Они просто появляются; дешифровка остаётся для сообщений,
@@ -1328,10 +1499,13 @@ Rectangle {
             root.uploadTick++
         }
         function onAttachmentsPicked(uris) {
-            // Мобильный нативный пикер — складываем в стейджинг (как десктоп-диалоги).
-            // Тип угадываем по расширению (фото/видео), отправится при «Отправить».
+            // attachmentsPicked эмитится ТОЛЬКО для фото (видео уходит отдельным
+            // путём в consumePickedAttachment). Прикрепляем с явным kind="image":
+            // content://-URI из галереи не имеет расширения, и guessAttachmentKind
+            // классифицировал бы его как "file" → файлы уходили бы по одному вместо
+            // мозаики (regression после стейджинга вложений).
             for (var i = 0; i < uris.length; ++i)
-                root.stageAttachment(uris[i])
+                root.stageAttachment(uris[i], "image")
         }
         // ── Видео: транскод перед отправкой («Подготовка…») ──
         // ── Голосовое: тик длительности записи ──
@@ -2055,7 +2229,8 @@ Rectangle {
                     { label: qsTr("Файл"),       icon: "file"  },
                     { label: qsTr("Фото"),       icon: "image" },
                     { label: qsTr("Видео"),      icon: "video" },
-                    { label: qsTr("Голосовое"),  icon: "mic"   }
+                    { label: qsTr("Голосовое"),  icon: "mic"   },
+                    { label: qsTr("Новая тема"), icon: "plus"  }
                 ]
                 delegate: Rectangle {
                     required property int index
@@ -2090,6 +2265,12 @@ Rectangle {
                         hoverEnabled: true
                         onClicked: {
                             attachMenu.close()
+                            if (index === 4) {
+                                // Новая тема (ветка диалога): инлайн-бар ввода имени
+                                // (не Popup — клавиатура его не затеняет на Android).
+                                root.openTopicCreate()
+                                return
+                            }
                             Chat.requestFileAccessPermissions()
                             if (index === 0) {
                                 attachDialog.open()
@@ -2551,6 +2732,187 @@ Rectangle {
             }
         }
 
+        // ── Бар создания темы (инлайн, дружелюбен к клавиатуре — не Popup) ──
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: root.topicCreateActive ? 48 : 0
+            visible: root.topicCreateActive
+            color: Theme.bgSecondary
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width; height: 1
+                color: Theme.separator
+            }
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                anchors.topMargin: 6
+                anchors.bottomMargin: 6
+                spacing: 6
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 20
+                    color: Theme.bgInput
+                    border.color: Theme.border
+                    border.width: 1
+
+                    TextField {
+                        id: topicCreateField
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSm
+                        font.family: Theme.fontFamily
+                        background: null
+                        verticalAlignment: TextInput.AlignVCenter
+                        topPadding: 0; bottomPadding: 0; leftPadding: 0; rightPadding: 0
+                        selectByMouse: true
+                        maximumLength: 64
+                        Keys.onEscapePressed: root.closeTopicCreate()
+                        Keys.onReturnPressed: root.commitTopicCreate()
+                        onAccepted: root.commitTopicCreate()
+
+                        Text {
+                            anchors.fill: parent
+                            verticalAlignment: Text.AlignVCenter
+                            visible: topicCreateField.text.length === 0 && topicCreateField.preeditText.length === 0
+                            text: qsTr("Название новой темы…")
+                            color: Theme.textHint
+                            font: topicCreateField.font
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+
+                // Создать
+                Rectangle {
+                    Layout.preferredWidth: 32; Layout.preferredHeight: 32
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: 16
+                    color: topicOkArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: 1; border.color: Theme.border
+                    AppIcon {
+                        anchors.centerIn: parent; width: 16; height: 16
+                        name: "check"; iconColor: Theme.accentHover; strokeWidth: 2
+                    }
+                    MouseArea {
+                        id: topicOkArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.commitTopicCreate()
+                    }
+                }
+                // Отмена
+                Rectangle {
+                    Layout.preferredWidth: 32; Layout.preferredHeight: 32
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: 16
+                    color: topicCancelArea.containsMouse ? Theme.bgCard : "transparent"
+                    border.width: 1; border.color: Theme.border
+                    AppIcon {
+                        anchors.centerIn: parent; width: 16; height: 16
+                        name: "close"; iconColor: Theme.accentHover; strokeWidth: 2
+                    }
+                    MouseArea {
+                        id: topicCancelArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.closeTopicCreate()
+                    }
+                }
+            }
+        }
+
+        // ── Чип-бар тем (ветки диалога) ───────────────────────
+        // Появляется только если в диалоге есть темы. «Все» / «Главная» / темы.
+        // Тап — фильтр + маршрут отправки; долгое нажатие на тему — удалить.
+        Flickable {
+            id: topicBar
+            readonly property bool _hasTopics: root._topicNames.length > 0 || root._pendingNewTopic !== ""
+            Layout.fillWidth: true
+            Layout.preferredHeight: _hasTopics ? 40 : 0
+            visible: _hasTopics
+            clip: true
+            contentWidth: topicRow.width
+            flickableDirection: Flickable.HorizontalFlick
+            boundsBehavior: Flickable.StopAtBounds
+
+            Row {
+                id: topicRow
+                height: 40
+                spacing: 6
+                leftPadding: 10
+                rightPadding: 10
+
+                Repeater {
+                    model: {
+                        const base = [{ f: root._topicAll, label: qsTr("Все") },
+                                      { f: root._topicMain, label: qsTr("Главная") }]
+                        const names = root._topicNames.slice()
+                        // Только что созданная тема ещё без сообщений — показываем её чип.
+                        if (root._pendingNewTopic !== "" && names.indexOf(root._pendingNewTopic) < 0)
+                            names.push(root._pendingNewTopic)
+                        for (let i = 0; i < names.length; ++i)
+                            base.push({ f: names[i], label: names[i] })
+                        return base
+                    }
+                    delegate: Rectangle {
+                        id: chip
+                        required property var modelData
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 28
+                        radius: 14
+                        readonly property bool active: root.topicFilter === modelData.f
+                        readonly property bool named: modelData.f !== root._topicAll && modelData.f !== root._topicMain
+                        width: chipLabel.implicitWidth + 24
+                        color: active ? Theme.accent : Theme.bgCard
+                        border.color: active ? Theme.accent : Theme.border
+                        border.width: 1
+
+                        Text {
+                            id: chipLabel
+                            anchors.centerIn: parent
+                            text: chip.modelData.label
+                            color: chip.active ? "#FFFFFF" : Theme.textPrimary
+                            font.pixelSize: 13
+                            font.bold: chip.active
+                        }
+                        // Бейдж непрочитанного: тема горит, если в неё пришло входящее,
+                        // пока активен другой фильтр.
+                        Rectangle {
+                            visible: chip.named && !chip.active && root.topicHasUnread(chip.modelData.label)
+                            width: 8; height: 8; radius: 4
+                            color: Theme.accent
+                            border.color: Theme.bgPrimary
+                            border.width: 1
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.topMargin: -1
+                            anchors.rightMargin: -1
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: root.selectTopic(chip.modelData.f)
+                            onPressAndHold: {
+                                if (chip.named) {
+                                    root._topicToDelete = chip.modelData.f
+                                    topicDeleteConfirm.open()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Message list ──────────────────────────────────────
         Item {
             id: messageListPane
@@ -2976,7 +3338,11 @@ Rectangle {
                         anchors.top: parent.top
                         anchors.left: parent.left
                         anchors.margins: 10
-                        text: isMe ? "" : root.displayName
+                        // В режиме «Все» к нику входящего добавляем метку темы, чтобы
+                        // видеть принадлежность сообщения (ветку диалога).
+                        text: isMe ? "" : (root.displayName
+                              + ((root.topicFilter === root._topicAll && model.topic_name)
+                                 ? ("   ·   " + model.topic_name) : ""))
                         color: Theme.accent
                         font.pixelSize: Theme.fontXs
                         font.family: Theme.fontFamily
@@ -4555,6 +4921,68 @@ Rectangle {
                     text: qsTr("Отмена")
                     secondary: true
                     onClicked: deleteSelectionConfirm.close()
+                }
+            }
+        }
+    }
+
+    // ── Подтверждение удаления темы целиком ─────────────────────────────
+    Popup {
+        id: topicDeleteConfirm
+        anchors.centerIn: Overlay.overlay
+        width: 320; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color: Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text: qsTr("Удалить тему «%1»?").arg(root._topicToDelete)
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family: Theme.fontFamily
+                font.weight: Font.Medium
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+            }
+            Text {
+                Layout.fillWidth: true
+                text: qsTr("Все сообщения этой темы (включая вложения) будут удалены и с сервера, и у собеседника при следующей синхронизации.")
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSm
+                font.family: Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: qsTr("Удалить")
+                    onClicked: {
+                        topicDeleteConfirm.close()
+                        if (root._topicToDelete !== "") {
+                            // Если удаляем активный фильтр — вернёмся на «Все».
+                            if (root.topicFilter === root._topicToDelete)
+                                root.selectTopic(root._topicAll)
+                            Chat.deleteTopic(root._topicToDelete)
+                            root._topicToDelete = ""
+                        }
+                    }
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: qsTr("Отмена")
+                    secondary: true
+                    onClicked: { topicDeleteConfirm.close(); root._topicToDelete = "" }
                 }
             }
         }

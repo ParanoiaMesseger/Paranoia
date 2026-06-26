@@ -11,7 +11,7 @@ use crate::routes::{
     call_signal::{ApiResponse as CallSignalResp, CallSignalRequest},
     determinate::{ApiResponse as DetResp, DeterminateRequest},
     map::{ApiResponse as MapResp, MapRequest},
-    notify::{ApiResponse as NotifyResp, NotifyRequest},
+    notify::{ApiResponse as NotifyResp, NotifyItem, NotifyRequest},
     pull::{ApiResponse as PullResp, PullRequest},
     push::{ApiResponse as PushResp, PushRequest},
 };
@@ -19,7 +19,8 @@ use anyhow::Result;
 use paranoia_cover::MaskingProfile;
 use paranoia_cover::core::{
     CallPollCore, CallPollRespCore, CallSignalCore, DeterminateCore, EnvelopeCore, MapCore,
-    MapRespCore, NotifyCore, NotifyRespCore, PacketCore, PullCore, PullRespCore, PushCore,
+    MapRespCore, NotifyCore, NotifyRespCore, NotifyRespItemCore, PacketCore,
+    PullCore, PullRespCore, PushCore,
     PushRespCore, SimpleRespCore, kind,
 };
 use serde::Serialize;
@@ -100,6 +101,14 @@ impl Cover for SchemaCover {
             seq: c.seq,
             sig: c.sig,
             long_poll_ms: c.long_poll_ms,
+            items: c
+                .items
+                .into_iter()
+                .map(|i| NotifyItem {
+                    partner: i.partner,
+                    seq: i.seq,
+                })
+                .collect(),
         })
     }
 
@@ -201,6 +210,14 @@ impl Cover for SchemaCover {
                 ok: resp.success,
                 n: resp.n,
                 message: resp.message.clone(),
+                items: resp
+                    .items
+                    .iter()
+                    .map(|i| NotifyRespItemCore {
+                        partner: i.partner.clone(),
+                        n: i.n,
+                    })
+                    .collect(),
             },
         )
     }

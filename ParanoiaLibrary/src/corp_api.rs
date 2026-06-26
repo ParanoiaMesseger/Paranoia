@@ -140,6 +140,82 @@ pub fn corp_delete(dist_url: &str, admin_secret_b64: &str, server_id: &str) -> R
     send_write(dist_url, "/corp/delete", "corp.delete", &body)
 }
 
+/// Запушить РОСТЕР сотрудника (список доступных диалогов БЕЗ ключей, шифртекст
+/// `corp::seal(.., CTX_ROSTER, ..)`). Нода хранит его отдельным ресурсом
+/// `/corp/{server_id}/roster`. Ленивая раздача: клиент тянет ростер, чтобы
+/// показать «какие диалоги можно добавить», ключи качает по одному отдельно.
+pub fn corp_push_roster(
+    dist_url: &str,
+    admin_secret_b64: &str,
+    server_id: &str,
+    version: u64,
+    blob_b64: &str,
+) -> Result<String> {
+    let kp =
+        AdminKeyPair::from_secret_b64(admin_secret_b64).map_err(|_| anyhow!("invalid_admin_key"))?;
+    let blob = decode_b64(blob_b64).map_err(|_| anyhow!("invalid_blob_b64"))?;
+    let nonce = Uuid::new_v4().to_string();
+    let ts = now_secs();
+    // resource="roster" в extra — нода привязывает запись к ресурсу ростера.
+    let extra = format!("{server_id}\nroster\n{version}\n{}", sha256_hex(&blob));
+    let sig = kp.sign_canonical(&canonical_write("corp.put.roster", &nonce, ts, &extra));
+    let body = json!({
+        "op": "corp.put.roster", "nonce": nonce, "ts": ts,
+        "server_id": server_id, "version": version, "blob_b64": blob_b64, "sig": sig,
+    });
+    send_write(dist_url, "/corp/put", "corp.put.roster", &body)
+}
+
+/// Запушить ключ ОДНОГО диалога сотрудника с `partner_server_id` (шифртекст
+/// `corp::seal(.., ctx_dialogue(partner), ..)`). Нода хранит его ресурсом
+/// `/corp/{server_id}/dialogue/{partner_server_id}`. Ленивая раздача — клиент
+/// качает только нужные диалоги.
+pub fn corp_push_dialogue(
+    dist_url: &str,
+    admin_secret_b64: &str,
+    server_id: &str,
+    partner_server_id: &str,
+    version: u64,
+    blob_b64: &str,
+) -> Result<String> {
+    let kp =
+        AdminKeyPair::from_secret_b64(admin_secret_b64).map_err(|_| anyhow!("invalid_admin_key"))?;
+    let blob = decode_b64(blob_b64).map_err(|_| anyhow!("invalid_blob_b64"))?;
+    let nonce = Uuid::new_v4().to_string();
+    let ts = now_secs();
+    // resource="dlg:<partner>" в extra — привязывает запись к ресурсу диалога.
+    let extra = format!("{server_id}\ndlg:{partner_server_id}\n{version}\n{}", sha256_hex(&blob));
+    let sig = kp.sign_canonical(&canonical_write("corp.put.dialogue", &nonce, ts, &extra));
+    let body = json!({
+        "op": "corp.put.dialogue", "nonce": nonce, "ts": ts,
+        "server_id": server_id, "partner_server_id": partner_server_id,
+        "version": version, "blob_b64": blob_b64, "sig": sig,
+    });
+    send_write(dist_url, "/corp/put", "corp.put.dialogue", &body)
+}
+
+/// Удалить ключ ОДНОГО диалога сотрудника (отзыв доступа к конкретному диалогу
+/// без снятия всей связки). Нода удаляет ресурс
+/// `/corp/{server_id}/dialogue/{partner_server_id}`.
+pub fn corp_delete_dialogue(
+    dist_url: &str,
+    admin_secret_b64: &str,
+    server_id: &str,
+    partner_server_id: &str,
+) -> Result<String> {
+    let kp =
+        AdminKeyPair::from_secret_b64(admin_secret_b64).map_err(|_| anyhow!("invalid_admin_key"))?;
+    let nonce = Uuid::new_v4().to_string();
+    let ts = now_secs();
+    let extra = format!("{server_id}\ndlg:{partner_server_id}");
+    let sig = kp.sign_canonical(&canonical_write("corp.delete.dialogue", &nonce, ts, &extra));
+    let body = json!({
+        "op": "corp.delete.dialogue", "nonce": nonce, "ts": ts,
+        "server_id": server_id, "partner_server_id": partner_server_id, "sig": sig,
+    });
+    send_write(dist_url, "/corp/delete", "corp.delete.dialogue", &body)
+}
+
 /// Запушить весь коммерческий датасет (несекретный; раздаётся ботам на чтение).
 pub fn commercial_push(dist_url: &str, admin_secret_b64: &str, data_json: &str) -> Result<String> {
     let kp =
@@ -181,13 +257,30 @@ pub fn masking_publish(
 }
 
 // ── Чтение (клиент сотрудника) ──────────────────────────────────────────────
+//
+// Контракт ноды (приватный `ParanoiaAdminPanel/AdminApi`), RESTful-чтение по
+// owner-proof (заголовки X-Pubkey/X-Ts/X-Sig, `server_id` выводится из pubkey):
+//   GET /corp/{server_id}                          → вся связка   (CTX_KEYRING)
+//   GET /corp/{server_id}/roster                   → ростер       (CTX_ROSTER)
+//   GET /corp/{server_id}/dialogue/{partner_id}    → ключ диалога (ctx_dialogue)
+// Ответ всех трёх: `{ "blob_b64": "<corp::seal>" }` либо 404, если блоба нет.
+// Owner-proof одинаков для всех ресурсов (сотрудник вправе читать любой свой
+// блоб); подмену блоба одного ресурса под другой ловит AAD-context в corp::open,
+// поэтому ресурс в подпись не вшиваем — нода различает его по пути URL.
 
-async fn corp_get(base: &str, server_id: &str, pubkey_b64: &str, ts: u64, sig_b64: &str) -> Result<(u16, String)> {
+async fn http_get_blob(
+    base: &str,
+    server_id: &str,
+    path_suffix: &str,
+    pubkey_b64: &str,
+    ts: u64,
+    sig_b64: &str,
+) -> Result<(u16, String)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
     let resp = client
-        .get(format!("{}/corp/{}", trim_url(base), server_id))
+        .get(format!("{}/corp/{}{}", trim_url(base), server_id, path_suffix))
         .header("X-Pubkey", pubkey_b64)
         .header("X-Ts", ts.to_string())
         .header("X-Sig", sig_b64)
@@ -198,15 +291,16 @@ async fn corp_get(base: &str, server_id: &str, pubkey_b64: &str, ts: u64, sig_b6
     Ok((status, text))
 }
 
-/// Забрать и расшифровать связку сотрудника. Возвращает plaintext keyring JSON,
-/// либо пустую строку, если блоба ещё нет (404). Owner-proof: подпись
-/// signing-ключом сотрудника; server_id обязан выводиться из его pubkey.
-pub fn corp_sync(
+/// Owner-proof GET одного блоба. `path_suffix`: `""` → вся связка, `"/roster"`,
+/// `"/dialogue/{partner}"`. Возвращает сырой блоб (выход `corp::seal`) или `None`
+/// (404 — блоба ещё нет). Через cover-туннель, если активен masking-профиль ноды.
+fn fetch_blob(
     dist_url: &str,
     server_id: &str,
+    path_suffix: &str,
+    op: &str,
     signing_key_b64: &str,
-    psk_b64: &str,
-) -> Result<String> {
+) -> Result<Option<Vec<u8>>> {
     let sk_bytes = decode_b64(signing_key_b64).map_err(|_| anyhow!("invalid_signing_key"))?;
     if sk_bytes.len() != 32 {
         bail!("invalid_signing_key");
@@ -215,7 +309,6 @@ pub fn corp_sync(
     seed.copy_from_slice(&sk_bytes);
     let sk = SigningKey::from_bytes(&seed);
     let vk = sk.verifying_key();
-    let psk = decode_b64(psk_b64).map_err(|_| anyhow!("invalid_psk"))?;
 
     let ts = now_secs();
     let canon = canonical_read(server_id, ts);
@@ -224,18 +317,18 @@ pub fn corp_sync(
     let sig_b64 = encode_b64(sig.as_slice());
 
     let descriptor = json!({
-        "op": "corp.get", "server_id": server_id,
+        "op": op, "server_id": server_id, "path_suffix": path_suffix,
         "x_pubkey": pubkey_b64, "x_ts": ts.to_string(), "x_sig": sig_b64,
     });
     let (status, text) = match node_tunnel(dist_url, &descriptor)? {
         Some(r) => r,
         None => {
             let rt = Runtime::new()?;
-            rt.block_on(corp_get(dist_url, server_id, &pubkey_b64, ts, &sig_b64))?
+            rt.block_on(http_get_blob(dist_url, server_id, path_suffix, &pubkey_b64, ts, &sig_b64))?
         }
     };
     if status == 404 {
-        return Ok(String::new()); // блоба ещё нет
+        return Ok(None); // блоба ещё нет
     }
     if status != 200 {
         bail!("http {}: {}", status, text);
@@ -243,9 +336,67 @@ pub fn corp_sync(
     let v: Value = serde_json::from_str(&text).map_err(|_| anyhow!("bad_response"))?;
     let blob_b64 = v.get("blob_b64").and_then(|x| x.as_str()).unwrap_or("");
     if blob_b64.is_empty() {
-        return Ok(String::new());
+        return Ok(None);
     }
     let blob = decode_b64(blob_b64).map_err(|_| anyhow!("invalid_blob_b64"))?;
-    let (_version, pt) = corp::open(&psk, server_id, &blob)?;
-    String::from_utf8(pt).map_err(|_| anyhow!("bad_utf8"))
+    Ok(Some(blob))
+}
+
+/// Забрать и расшифровать ВСЮ связку сотрудника (legacy/жадный путь). Возвращает
+/// plaintext keyring JSON, либо пустую строку, если блоба ещё нет.
+pub fn corp_sync(
+    dist_url: &str,
+    server_id: &str,
+    signing_key_b64: &str,
+    psk_b64: &str,
+) -> Result<String> {
+    let psk = decode_b64(psk_b64).map_err(|_| anyhow!("invalid_psk"))?;
+    match fetch_blob(dist_url, server_id, "", "corp.get", signing_key_b64)? {
+        None => Ok(String::new()),
+        Some(blob) => {
+            let (_v, pt) = corp::open(&psk, server_id, corp::CTX_KEYRING, &blob)?;
+            String::from_utf8(pt).map_err(|_| anyhow!("bad_utf8"))
+        }
+    }
+}
+
+/// Забрать и расшифровать РОСТЕР сотрудника — список доступных диалогов БЕЗ
+/// ключей (ленивая раздача). Возвращает plaintext roster JSON, либо пустую
+/// строку, если ростера ещё нет. Клиент показывает его в «Добавить диалог».
+pub fn corp_fetch_roster(
+    dist_url: &str,
+    server_id: &str,
+    signing_key_b64: &str,
+    psk_b64: &str,
+) -> Result<String> {
+    let psk = decode_b64(psk_b64).map_err(|_| anyhow!("invalid_psk"))?;
+    match fetch_blob(dist_url, server_id, "/roster", "corp.get.roster", signing_key_b64)? {
+        None => Ok(String::new()),
+        Some(blob) => {
+            let (_v, pt) = corp::open(&psk, server_id, corp::CTX_ROSTER, &blob)?;
+            String::from_utf8(pt).map_err(|_| anyhow!("bad_utf8"))
+        }
+    }
+}
+
+/// Забрать и расшифровать ключ ОДНОГО диалога с `partner_server_id` (ленивая
+/// раздача — скачивается, когда сотрудник добавляет именно этот диалог).
+/// Возвращает plaintext dialogue-key JSON, либо пустую строку, если ключа нет.
+pub fn corp_fetch_dialogue(
+    dist_url: &str,
+    server_id: &str,
+    partner_server_id: &str,
+    signing_key_b64: &str,
+    psk_b64: &str,
+) -> Result<String> {
+    let psk = decode_b64(psk_b64).map_err(|_| anyhow!("invalid_psk"))?;
+    let suffix = format!("/dialogue/{partner_server_id}");
+    match fetch_blob(dist_url, server_id, &suffix, "corp.get.dialogue", signing_key_b64)? {
+        None => Ok(String::new()),
+        Some(blob) => {
+            let ctx = corp::ctx_dialogue(partner_server_id);
+            let (_v, pt) = corp::open(&psk, server_id, &ctx, &blob)?;
+            String::from_utf8(pt).map_err(|_| anyhow!("bad_utf8"))
+        }
+    }
 }

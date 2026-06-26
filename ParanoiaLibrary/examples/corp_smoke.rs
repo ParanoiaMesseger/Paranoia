@@ -44,7 +44,7 @@ fn main() {
             let version: u64 = 1000;
 
             // publish v1000
-            let blob = corp::seal(&psk, &server_id, version, plaintext.as_bytes()).unwrap();
+            let blob = corp::seal(&psk, &server_id, version, corp::CTX_KEYRING, plaintext.as_bytes()).unwrap();
             let blob_b64 = B64.encode(&blob);
             match corp_api::corp_push(dist, admin_secret, &server_id, version, &blob_b64) {
                 Ok(r) => println!("[push v{version}] {r}"),

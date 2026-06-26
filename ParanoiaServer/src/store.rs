@@ -115,6 +115,28 @@ impl PacketStore {
         Ok(count)
     }
 
+    /// Посчитать пакеты, считающиеся для `username` «новыми»: с seq строго больше
+    /// `max(after_seq, last_seq[username])`.
+    ///
+    /// `last_seq[username]` (см. [`update_last_seq`]) — высшая позиция, которую этот
+    /// аккаунт уже видел: всё, что он подтянул (`pull`) ИЛИ сам отправил (`push`
+    /// поднимает её, т.к. pull-before-push гарантирует, что отправитель прочитал всё
+    /// до своего seq). Поэтому пакеты, отправленные ЛЮБЫМ устройством этого аккаунта,
+    /// а равно прочитанные на другом устройстве, не считаются новыми — своё же
+    /// сообщение не всплывает уведомлением на других устройствах. Партнёрские
+    /// сообщения сюда не попадают: `last_seq[username]` никогда не растёт от чужих
+    /// пакетов. Детерминированно (без гонки `push`→`pull`), т.к. floor читается
+    /// заново на момент подсчёта.
+    pub fn count_new_for_user(
+        &self,
+        dialogue_id: &str,
+        after_seq: u64,
+        username: &str,
+    ) -> Result<u64> {
+        let floor = self.receipt_state(username, dialogue_id)?.last_seq;
+        self.count_after(dialogue_id, after_seq.max(floor))
+    }
+
     /// Карта живых seq в диалоге.
     ///
     /// Возвращает список непрерывных runs `(begin, end)` (включительно с обеих
@@ -779,5 +801,70 @@ mod tests {
     fn list_dialogues_empty_store() {
         let (_tmp, store) = open_store();
         assert!(store.list_dialogues().unwrap().is_empty());
+    }
+
+    // ── count_new_for_user: дедуп своих/прочитанных-на-другом-устройстве ──
+
+    #[test]
+    fn count_new_without_receipt_state_equals_count_after() {
+        let (_tmp, store) = open_store();
+        push_seqs(&store, "dlg", &[1, 2, 3]);
+        // Нет receipt-состояния → floor = 0 → как обычный count_after.
+        assert_eq!(store.count_new_for_user("dlg", 0, "u").unwrap(), 3);
+        assert_eq!(store.count_new_for_user("dlg", 2, "u").unwrap(), 1);
+    }
+
+    #[test]
+    fn count_new_excludes_own_after_push_bump() {
+        let (_tmp, store) = open_store();
+        // U отправляет seq 1; push-обработчик поднимает last_seq[U] = 1.
+        store.push("dlg", 1, &[0xAB]).expect("push");
+        store.update_last_seq("u", "dlg", 1).expect("bump");
+
+        // Другое устройство U (baseline 0) НЕ считает своё сообщение новым.
+        assert_eq!(store.count_new_for_user("dlg", 0, "u").unwrap(), 0);
+        // Партнёр P (свой last_seq = 0) видит сообщение U как новое.
+        assert_eq!(store.count_new_for_user("dlg", 0, "p").unwrap(), 1);
+    }
+
+    #[test]
+    fn count_new_counts_partner_message() {
+        let (_tmp, store) = open_store();
+        // P отправляет seq 1; поднимается last_seq[P], но не last_seq[U].
+        store.push("dlg", 1, &[0xAB]).expect("push");
+        store.update_last_seq("p", "dlg", 1).expect("bump");
+
+        // U (last_seq[U] = 0) получает уведомление о сообщении партнёра.
+        assert_eq!(store.count_new_for_user("dlg", 0, "u").unwrap(), 1);
+    }
+
+    #[test]
+    fn count_new_excludes_messages_read_on_another_device() {
+        let (_tmp, store) = open_store();
+        push_seqs(&store, "dlg", &[1, 2, 3]); // сообщения партнёра
+        // Устройство A аккаунта U подтянуло всё (pull → update_last_seq).
+        store.update_last_seq("u", "dlg", 3).expect("pull");
+
+        // Устройство B того же аккаунта (baseline 0) не получает уведомлений
+        // о уже прочитанных сообщениях.
+        assert_eq!(store.count_new_for_user("dlg", 0, "u").unwrap(), 0);
+
+        // Приходит новое (seq 4) — оно уже считается новым.
+        store.push("dlg", 4, &[0xAB]).expect("push");
+        assert_eq!(store.count_new_for_user("dlg", 0, "u").unwrap(), 1);
+    }
+
+    #[test]
+    fn count_new_degrades_when_receipts_disabled() {
+        let (_tmp, store) = open_store();
+        // U отключил уведомления о прочтении → last_seq заморожен (update — no-op),
+        // поэтому дедуп своих уведомлений для этого диалога не действует (край).
+        store
+            .set_receipts_enabled("u", "dlg", false)
+            .expect("disable");
+        store.push("dlg", 1, &[0xAB]).expect("push");
+        store.update_last_seq("u", "dlg", 1).expect("bump-noop");
+
+        assert_eq!(store.count_new_for_user("dlg", 0, "u").unwrap(), 1);
     }
 }
