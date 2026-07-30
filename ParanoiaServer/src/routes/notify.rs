@@ -107,7 +107,7 @@ async fn do_notify(state: &Arc<AppState>, req: NotifyRequest) -> ApiResponse {
     // комментарий ниже в multi-ветке — логика идентична).
 
     // Быстрая ветка: уже есть новые — отдать сразу.
-    match state.store.count_new_for_user(&dialogue_id, req.seq, &req.sender) {
+    match count_new_async(state, dialogue_id.clone(), req.seq, req.sender.clone()).await {
         Ok(n) if n > 0 => return ok(n),
         Ok(_) => {}
         Err(e) => return fail(format!("{e}")),
@@ -123,14 +123,14 @@ async fn do_notify(state: &Arc<AppState>, req: NotifyRequest) -> ApiResponse {
     let waker = state.dialogue_notify.waker(&dialogue_id).await;
     let notified = waker.notified();
     tokio::pin!(notified);
-    match state.store.count_new_for_user(&dialogue_id, req.seq, &req.sender) {
+    match count_new_async(state, dialogue_id.clone(), req.seq, req.sender.clone()).await {
         Ok(n) if n > 0 => return ok(n),
         Ok(_) => {}
         Err(e) => return fail(format!("{e}")),
     }
 
     let _ = tokio::time::timeout(Duration::from_millis(wait_ms as u64), notified.as_mut()).await;
-    match state.store.count_new_for_user(&dialogue_id, req.seq, &req.sender) {
+    match count_new_async(state, dialogue_id.clone(), req.seq, req.sender.clone()).await {
         Ok(n) => ok(n),
         Err(e) => fail(format!("{e}")),
     }
@@ -190,7 +190,7 @@ async fn do_notify_multi(state: &Arc<AppState>, req: NotifyRequest) -> ApiRespon
     }
 
     // Быстрая ветка: какие диалоги уже с новыми.
-    match scan_pairs(state, &pairs, &req.sender) {
+    match scan_pairs(state, &pairs, &req.sender).await {
         Ok(lit) if !lit.is_empty() => return ok_multi(lit),
         Ok(_) => {}
         Err(e) => return fail(e),
@@ -212,7 +212,7 @@ async fn do_notify_multi(state: &Arc<AppState>, req: NotifyRequest) -> ApiRespon
         v
     };
     let futs: Vec<_> = wakers.iter().map(|w| Box::pin(w.notified())).collect();
-    match scan_pairs(state, &pairs, &req.sender) {
+    match scan_pairs(state, &pairs, &req.sender).await {
         Ok(lit) if !lit.is_empty() => return ok_multi(lit),
         Ok(_) => {}
         Err(e) => return fail(e),
@@ -220,14 +220,48 @@ async fn do_notify_multi(state: &Arc<AppState>, req: NotifyRequest) -> ApiRespon
 
     // Просыпаемся на ПЕРВОМ зажёгшемся диалоге или по таймауту, затем пере-скан всех.
     let _ = tokio::time::timeout(Duration::from_millis(wait_ms as u64), select_all(futs)).await;
-    match scan_pairs(state, &pairs, &req.sender) {
+    match scan_pairs(state, &pairs, &req.sender).await {
         Ok(lit) => ok_multi(lit),
         Err(e) => fail(e),
     }
 }
 
-/// Посчитать новые по каждому диалогу; вернуть только зажжённые (`n>0`).
-fn scan_pairs(
+/// Один count_new_for_user на пуле spawn_blocking (01#1): синхронный RocksDB-скан не
+/// должен блокировать tokio-воркер горячего роута /notify.
+async fn count_new_async(
+    state: &Arc<AppState>,
+    dialogue_id: String,
+    seq: u64,
+    sender: String,
+) -> Result<u64, String> {
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        state
+            .store
+            .count_new_for_user(&dialogue_id, seq, &sender)
+            .map_err(|e| format!("{e}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Посчитать новые по каждому диалогу; вернуть только зажжённые (`n>0`). Скан всех пар
+/// (до 512 диалогов × блокирующие DB-операции) уходит на spawn_blocking (01#1) — иначе
+/// весь event loop сервера (push/pull/call) деградирует под длинным сканом.
+async fn scan_pairs(
+    state: &Arc<AppState>,
+    pairs: &[(String, String, u64)],
+    sender: &str,
+) -> Result<Vec<NotifyRespItem>, String> {
+    let state = Arc::clone(state);
+    let pairs = pairs.to_vec();
+    let sender = sender.to_string();
+    tokio::task::spawn_blocking(move || scan_pairs_blocking(&state, &pairs, &sender))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+fn scan_pairs_blocking(
     state: &Arc<AppState>,
     pairs: &[(String, String, u64)],
     sender: &str,

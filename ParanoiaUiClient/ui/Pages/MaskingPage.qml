@@ -50,6 +50,23 @@ Rectangle {
             root.feedbackError = !ok
             root.feedback = message
         }
+        // Итог асинхронного применения профиля из файла (01#6).
+        function onMaskingApplyResult(ok, needsUnsignedConfirm, sourcePath, profileName, error) {
+            if (ok) {
+                root.pendingUnsignedPath = ""
+                root.feedbackError = false
+                root.feedback = qsTr("Профиль применён: %1").arg(profileName || "")
+            } else if (needsUnsignedConfirm) {
+                // Профиль без подписи — предложить подтверждение (кнопка ниже).
+                root.pendingUnsignedPath = sourcePath
+                root.feedbackError = true
+                root.feedback = error
+            } else {
+                root.pendingUnsignedPath = ""
+                root.feedbackError = true
+                root.feedback = error || qsTr("Ошибка применения")
+            }
+        }
     }
 
     ParaFileDialog {
@@ -58,21 +75,9 @@ Rectangle {
         mode: "open"
         nameFilters: [qsTr("Профиль маскировки (*.json)"), qsTr("JSON (*.json)"), qsTr("Все файлы (*)")]
         onAccepted: {
-            const path = Backend.urlToLocalPath(selectedFile)
+            // Применение асинхронное (01#6) — результат придёт в onMaskingApplyResult.
             root.pendingUnsignedPath = ""
-            const res = Backend.applyMaskingFromFile(path, false)
-            if (res.ok) {
-                root.feedbackError = false
-                root.feedback = qsTr("Профиль применён: %1").arg(res.profileName || "")
-            } else if (res.unsigned) {
-                // Профиль без подписи — спросить подтверждение.
-                root.pendingUnsignedPath = path
-                root.feedbackError = true
-                root.feedback = res.error
-            } else {
-                root.feedbackError = true
-                root.feedback = res.error || qsTr("Ошибка применения")
-            }
+            Backend.applyMaskingFromFile(Backend.urlToLocalPath(selectedFile), false)
         }
     }
 
@@ -220,13 +225,8 @@ Rectangle {
                             Layout.fillWidth: true
                             implicitHeight: 36
                             text: qsTr("Применить без проверки")
-                            onClicked: {
-                                const res = Backend.applyMaskingFromFile(root.pendingUnsignedPath, true)
-                                root.pendingUnsignedPath = ""
-                                root.feedbackError = !res.ok
-                                root.feedback = res.ok ? (qsTr("Профиль применён: %1").arg(res.profileName || ""))
-                                                       : (res.error || qsTr("Ошибка применения"))
-                            }
+                            // Результат — в onMaskingApplyResult (01#6).
+                            onClicked: Backend.applyMaskingFromFile(root.pendingUnsignedPath, true)
                         }
                         ParaButton {
                             Layout.fillWidth: true

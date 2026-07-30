@@ -4,6 +4,84 @@
 #include "utils/Utils.hpp"
 
 #include <QJsonObject>
+#include <QThreadPool>
+#include <QWaitCondition>
+#include <utility>
+
+// ── Асинхронная коалесирующая запись dialogs.json ────────────────────────────
+//
+// Корень фризов 01#7/01#12: saveDialogs() сериализовал ВСЕ диалоги профиля (вместе
+// с base64-аватарами), шифровал их через vault-FFI и писал файл на диск СИНХРОННО
+// на GUI-потоке — на каждый батч сообщений, каждый символ черновика, каждое
+// переключение чипа темы. Здесь запись уходит на QThreadPool: вызывающий поток лишь
+// снимает копию QList<Dialog> (implicitly-shared, дёшево) и кладёт её как «ожидающий
+// снимок». Инварианты:
+//   • одновременно на очередь крутится не более одного воркера → записи в один и тот
+//     же файл сериализованы (без гонки atomic-rename), и всегда пишется САМЫЙ СВЕЖИЙ
+//     снимок (последняя запись побеждает; промежуточные схлопываются — коалесинг);
+//   • m_hasPending ⇒ m_running (enqueue взводит running вместе с pending; drain
+//     снимает running, только когда pending пуст) → дождавшись простоя, flush()
+//     гарантирует, что последний снимок уже на диске;
+//   • очередь живёт в shared_ptr, воркер держит свою копию → запись доводится до
+//     конца даже если ServerSession уже разрушен (снимок снят по значению, путь
+//     хранится здесь). Все QList — отдельные объекты поверх общих atomically-refcnt
+//     данных: GUI-мутация dialogs делает detach, воркер читает свой снимок — гонки
+//     данных нет (потокобезопасность implicit sharing Qt).
+class DialogSaveQueue : public std::enable_shared_from_this<DialogSaveQueue>
+{
+public:
+    explicit DialogSaveQueue(QString path) : m_path(std::move(path)) {}
+
+    void enqueue(QList<Dialog> snapshot)
+    {
+        bool needStart = false;
+        {
+            QMutexLocker lock(&m_mutex);
+            m_pending    = std::move(snapshot);
+            m_hasPending = true;
+            if (!m_running) {
+                m_running = true;
+                needStart = true;
+            }
+        }
+        if (needStart) {
+            auto self = shared_from_this();
+            QThreadPool::globalInstance()->start([self]() { self->drain(); });
+        }
+    }
+
+    void flush()
+    {
+        QMutexLocker lock(&m_mutex);
+        while (m_running) m_idle.wait(&m_mutex);
+    }
+
+private:
+    void drain()
+    {
+        for (;;) {
+            QList<Dialog> snap;
+            {
+                QMutexLocker lock(&m_mutex);
+                if (!m_hasPending) {
+                    m_running = false;
+                    m_idle.wakeAll(); // разбудить flush(), ждущий простоя
+                    return;
+                }
+                snap         = std::move(m_pending);
+                m_hasPending = false;
+            }
+            Dialog::saveToPath(m_path, snap); // сериализация + vault-шифр + запись, БЕЗ лока
+        }
+    }
+
+    const QString  m_path;
+    QMutex         m_mutex;
+    QWaitCondition m_idle;
+    QList<Dialog>  m_pending;
+    bool           m_hasPending = false;
+    bool           m_running    = false;
+};
 
 ServerSession::ServerSession(std::shared_ptr<ParanoiaFFI> ffi, const QString &server, const QString &username,
                              const QString &serverId, const QString &privateKey, const QString &profileId,
@@ -12,7 +90,12 @@ ServerSession::ServerSession(std::shared_ptr<ParanoiaFFI> ffi, const QString &se
       reserveServerUrls(Utils::normalizedServerUrls(reserveServerUrls, server)),
       turnServerUrls(turnServerUrls), ffi(std::move(ffi))
 {
+    if (!this->profileId.isEmpty())
+        m_saveQueue = std::make_shared<DialogSaveQueue>(Paths::profileDialogs(this->profileId));
 }
+
+// Определён здесь (а не =default в заголовке): DialogSaveQueue тут полный.
+ServerSession::~ServerSession() = default;
 
 bool ServerSession::isLoggedIn() const { return ffi != nullptr && ffi->isRawOk(); }
 
@@ -40,13 +123,14 @@ Dialog *ServerSession::findDialogByServerId(const QString &serverId)
 
 void ServerSession::saveDialogs() const
 {
-    if (!profileId.isEmpty()) Dialog::saveToPath(Paths::profileDialogs(profileId), dialogs);
+    // Снимок диалогов снимается СЕЙЧАС, на вызывающем потоке (владельце dialogs), а
+    // тяжёлая часть (vault-шифр + запись) уходит воркеру — GUI больше не встаёт.
+    if (m_saveQueue) m_saveQueue->enqueue(dialogs);
 }
 
-void ServerSession::loadDialogs()
+void ServerSession::flushDialogs() const
 {
-    dialogs.clear();
-    if (!profileId.isEmpty()) dialogs = Dialog::loadFromPath(Paths::profileDialogs(profileId));
+    if (m_saveQueue) m_saveQueue->flush();
 }
 
 void ServerSession::saveClientConfig() const

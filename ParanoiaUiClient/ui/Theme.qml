@@ -46,6 +46,10 @@ QtObject {
     readonly property color messageMetaOutgoing: darkMode ? "#F0C8CE" : "#F7E8EA"
     readonly property color messageMetaIncoming: darkMode ? "#C8929A" : "#6B4639"
     readonly property color controlText: darkMode ? "#F2D8DD" : "#3D2217"
+    // Текст на ХОВЕР-фоне bgButton. bgButton тёмный в ОБЕИХ темах (#650710 / #7D4535),
+    // а textPrimary в светлой теме тёмный (#231209) → был чёрный-на-тёмном при наведении.
+    // Всегда светлый, читаемо на тёмном ховере в любой теме.
+    readonly property color textOnButton: "#F7E8EA"
 
     // ── Accent ───────────────────────────────────────────
     readonly property color accent:      "#C91122"

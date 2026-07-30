@@ -105,7 +105,7 @@ Item {
         Rectangle {
             id: backBtn
             anchors { left: parent.left; verticalCenter: parent.verticalCenter; leftMargin: 8 }
-            width: 40; height: 40; radius: Theme.radiusSm
+            width: 40; height: 40; radius: height / 2
             color: backArea.containsMouse ? "#33FFFFFF" : "transparent"
             AppIcon {
                 anchors.centerIn: parent

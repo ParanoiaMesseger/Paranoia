@@ -73,8 +73,17 @@ impl LocalStore {
         // сервера ОДИН процесс-пулер, остальные только читают. busy_timeout —
         // подстраховка для редких пересекающихся записей (исходящие эхо/реакции
         // из не-пулера): вместо мгновенного `database is locked` ждём до 5с.
+        //
+        // synchronous = NORMAL (02#18): в WAL это БЕЗОПАСНО от повреждения (SQLite
+        // гарантирует консистентность WAL), а fsync делается лишь на checkpoint, а не
+        // на КАЖДЫЙ commit. Раньше дефолт FULL давал fsync на каждый из ~4N автокоммитов
+        // приёма батча (save_message ×2 + set_last_pulled_seq на пакет) — секунды на
+        // Android-флеше под ffiMutex. Потеря последних коммитов при внезапном питании
+        // не критична: сервер — источник истины, повторный pull идемпотентен
+        // (process_incoming сверяет get_message_by_seq).
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; \
+             PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
         )?;
         // Проверка ключа: первая операция чтения упадёт если ключ неверный.
         conn.query_row("SELECT count(*) FROM sqlite_master;", [], |_| Ok(()))
@@ -456,44 +465,32 @@ impl LocalStore {
             return Ok(());
         }
         let conn = self.conn()?;
-        let mut del_msg = conn.prepare(
-            "DELETE FROM messages
-             WHERE dialogue_a = ?1
-               AND dialogue_b = ?2
-               AND server_seq = ?3",
-        )?;
-        let mut del_map = conn.prepare(
-            "DELETE FROM seq_map
-             WHERE dialogue_a = ?1
-               AND dialogue_b = ?2
-               AND server_seq = ?3",
-        )?;
-        for &seq in seqs {
-            del_msg.execute(params![dialogue.a, dialogue.b, seq as i64])?;
-            del_map.execute(params![dialogue.a, dialogue.b, seq as i64])?;
+        // Один транзакционный батч вместо 2 автокоммитов на seq (02#18): удаление
+        // темы / tombstone-sweep часто затрагивает много seq — автокоммиты плодят
+        // WAL-фреймы и overhead, а транзакция делает удаление ещё и АТОМАРНЫМ
+        // (падение посередине не оставляет полу-удалённый набор). unchecked_transaction
+        // корректна на shared &Connection (стор = Mutex<Connection>, писатель один).
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut del_msg = tx.prepare(
+                "DELETE FROM messages
+                 WHERE dialogue_a = ?1
+                   AND dialogue_b = ?2
+                   AND server_seq = ?3",
+            )?;
+            let mut del_map = tx.prepare(
+                "DELETE FROM seq_map
+                 WHERE dialogue_a = ?1
+                   AND dialogue_b = ?2
+                   AND server_seq = ?3",
+            )?;
+            for &seq in seqs {
+                del_msg.execute(params![dialogue.a, dialogue.b, seq as i64])?;
+                del_map.execute(params![dialogue.a, dialogue.b, seq as i64])?;
+            }
         }
+        tx.commit()?;
         Ok(())
-    }
-
-    /// Все `server_seq` локальных сообщений диалога, относящихся к теме
-    /// `topic_id` (отсортированы). Для пакетного удаления темы — список затем
-    /// идёт в [`Self::delete_messages_by_seqs`] и в серверное удаление диапазона.
-    pub fn seqs_for_topic(&self, dialogue: &DialogueKey, topic_id: &str) -> Result<Vec<u64>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT server_seq
-             FROM messages
-             WHERE dialogue_a = ?1
-               AND dialogue_b = ?2
-               AND topic_id = ?3
-               AND server_seq IS NOT NULL
-             ORDER BY server_seq ASC",
-        )?;
-        let rows = stmt.query_map(params![dialogue.a, dialogue.b, topic_id], |row| {
-            row.get::<_, i64>(0).map(|v| v as u64)
-        })?;
-        rows.collect::<rusqlite::Result<Vec<u64>>>()
-            .map_err(Into::into)
     }
 
     /// Все локальные сообщения темы (без лимита/времени) — для удаления темы
@@ -920,7 +917,12 @@ impl LocalStore {
     /// Удалить все локальные данные диалога из SQLite.
     pub fn delete_dialogue(&self, dialogue: &DialogueKey) -> Result<()> {
         let conn = self.conn()?;
-        for table in ["messages", "seq_map", "dialogue_state", "incoming_chunks"] {
+        // outbound_transfers добавлена в список позже, чем появилась таблица: без
+        // неё журнал resumable-передач переживал удаление диалога — приватность
+        // (filename/mime/cache_path/timestamp остаются в БД), плюс при пересоздании
+        // диалога с тем же партнёром resume_pending_transfers подхватывал старый
+        // журнал и заново заливал файл на сервер.
+        for table in ["messages", "seq_map", "dialogue_state", "incoming_chunks", "outbound_transfers"] {
             conn.execute(
                 &format!("DELETE FROM {table} WHERE dialogue_a = ?1 AND dialogue_b = ?2"),
                 params![dialogue.a, dialogue.b],
@@ -1154,9 +1156,6 @@ mod outbound_tests {
         assert_eq!(m1.topic_id.as_deref(), Some(rel.as_str()));
         assert_eq!(m1.topic_name.as_deref(), Some("релиз"));
         assert!(store.get_message_by_id(&dlg, "m4").unwrap().unwrap().topic_id.is_none());
-
-        // seqs_for_topic собирает обе «релиз»-записи (m1, m3), не задевая прочие.
-        assert_eq!(store.seqs_for_topic(&dlg, &rel).unwrap(), vec![1, 3]);
 
         // list_topics: две темы; «релиз» имеет 2 сообщения, «Главная» не входит.
         let topics = store.list_topics(&dlg).unwrap();

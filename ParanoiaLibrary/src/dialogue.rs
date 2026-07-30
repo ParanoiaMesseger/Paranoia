@@ -658,48 +658,6 @@ impl Dialogue {
         self.transport.notify(&core_notify).await
     }
 
-    /// Кол-во НЕпрочитанных МНОЙ сообщений: как [`notify_count`], но базой берёт
-    /// `max(локальный last_pulled_seq, мой server-side read-seq)`. Сервер хранит
-    /// мой read-seq в receipt_state(me) и обновляет его при pull на ЛЮБОМ
-    /// устройстве — поэтому, если я уже прочитал сообщение на другом устройстве,
-    /// `own_seq` выше и notify не вернёт его (нет лишнего уведомления).
-    pub async fn notify_unread_count(&self) -> Result<u64> {
-        let username = &self.client_cfg.username;
-        let partner = self.partner();
-        let local_seq = self.store.get_last_pulled_seq(&self.key)?;
-        // Best-effort: при ошибке/старом сервере own_seq = 0 → база = локальная.
-        let own_seq = self.own_read_seq().await.unwrap_or(0);
-        let seq = local_seq.max(own_seq);
-
-        let msg = format!("{username}{partner}{seq}");
-        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
-        let core_notify = CoreNotify {
-            sender: username.clone(),
-            partner: partner.to_string(),
-            seq,
-            sig,
-            long_poll_ms: 0,
-        };
-        self.transport.notify(&core_notify).await
-    }
-
-    /// Мой собственный read-seq в этом диалоге по данным сервера (receipt_state(me),
-    /// обновляется при pull на любом устройстве). Через тот же arrived-эндпоинт.
-    async fn own_read_seq(&self) -> Result<u64> {
-        let username = &self.client_cfg.username;
-        let partner = self.partner();
-        let dialogue_id = crypto::make_dialogue_id(username, partner);
-        let msg = format!("arrived:get:{username}:{partner}:{dialogue_id}");
-        let sig = crypto::sign(&self.client_cfg.signing_key, msg.as_bytes());
-        let core = CoreArrivedGet {
-            sender: username.clone(),
-            partner: partner.to_string(),
-            dialogue_id,
-            sig,
-        };
-        Ok(self.transport.arrived_get(&core).await?.own_last_seq)
-    }
-
     pub async fn refresh_arrived_status(&self) -> Result<usize> {
         let username = &self.client_cfg.username;
         if matches!(
@@ -896,6 +854,54 @@ impl Dialogue {
         server_seqs.dedup();
         // Сервер удаляет диапазонами [from,to]; шлём по смежным «ранам», чтобы не
         // задеть сообщения других тем/«Главной» между ними.
+        for (from, to) in contiguous_runs(&server_seqs) {
+            self.remove_server_range(from, to).await?;
+        }
+        self.store.delete_messages_by_seqs(&self.key, &local_seqs)?;
+        Ok(local_seqs.len())
+    }
+
+    /// Обрезать хвост темы: оставить `keep` САМЫХ НОВЫХ сообщений темы, удалить более
+    /// старые — локально и на сервере (как `delete_topic`, но не всю тему). Сообщения
+    /// без `server_seq` (неотправленные) не трогаем. `dry_run` — только посчитать,
+    /// ничего не удалять. Возвращает число удалённых (или к удалению) сообщений.
+    pub async fn trim_topic_keep_last(
+        &self,
+        topic_name: &str,
+        keep: usize,
+        dry_run: bool,
+    ) -> Result<usize> {
+        let topic_id = crate::types::derive_topic_id(&self.key, topic_name);
+        let mut msgs = self.store.list_topic_messages(&self.key, &topic_id)?;
+        // По возрастанию server_seq: хвост (последние `keep`) — оставить, остальное —
+        // под удаление. Неотправленные (server_seq = None) уносим в конец и не трогаем.
+        msgs.sort_by_key(|m| m.server_seq.unwrap_or(u64::MAX));
+        let sendable = msgs.iter().filter(|m| m.server_seq.is_some()).count();
+        if sendable <= keep {
+            return Ok(0);
+        }
+        let to_delete = sendable - keep;
+
+        let mut server_seqs: Vec<u64> = Vec::new();
+        let mut local_seqs: Vec<u64> = Vec::new();
+        for m in msgs.iter().filter(|m| m.server_seq.is_some()).take(to_delete) {
+            let Some(seq) = m.server_seq else { continue };
+            local_seqs.push(seq);
+            server_seqs.push(seq);
+            // Тело вложения: его чанки лежат на seq после header'а (не тегированы темой).
+            if let Some(file) = attachment_ref(&m.content) {
+                if file.body_to_seq >= seq {
+                    for s in (seq + 1)..=file.body_to_seq {
+                        server_seqs.push(s);
+                    }
+                }
+            }
+        }
+        if dry_run {
+            return Ok(local_seqs.len());
+        }
+        server_seqs.sort_unstable();
+        server_seqs.dedup();
         for (from, to) in contiguous_runs(&server_seqs) {
             self.remove_server_range(from, to).await?;
         }
@@ -1988,60 +1994,11 @@ fn strip_remote_local_attachment_state(content: &mut MessageContent) {
     }
 }
 
-fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    Ok(())
-}
-
-fn write_bytes_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    ensure_parent_dir(path)?;
-    let temp_path = temporary_output_path(path);
-    let result = (|| {
-        fs::write(&temp_path, data)?;
-        replace_file(&temp_path, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    result
-}
-
-fn copy_file(source: &Path, target: &Path) -> Result<()> {
-    if source == target {
-        return Ok(());
-    }
-    ensure_parent_dir(target)?;
-    let temp_path = temporary_output_path(target);
-    let result = (|| {
-        fs::copy(source, &temp_path)?;
-        replace_file(&temp_path, target)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    result
-}
-
-fn temporary_output_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("attachment.bin");
-    path.with_file_name(format!(".{file_name}.{}.part", Uuid::new_v4()))
-}
-
-fn replace_file(temp_path: &Path, target: &Path) -> Result<()> {
-    if target.exists() {
-        fs::remove_file(target)?;
-    }
-    fs::rename(temp_path, target)?;
-    Ok(())
-}
+// Атомарная запись/копирование файлов — единый хелпер крейта (03#26),
+// см. crate::atomic_io (uuid-tmp + чистый rename, без remove-перед-rename).
+use crate::atomic_io::{
+    copy_file, ensure_parent_dir, replace_file, temporary_output_path, write_bytes_atomic,
+};
 
 
 /// Бинпоиск seq в сортированном списке непересекающихся runs `[(begin, end)]`.

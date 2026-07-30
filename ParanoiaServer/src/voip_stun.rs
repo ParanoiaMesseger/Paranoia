@@ -21,6 +21,10 @@ use tokio::{
 };
 use tracing::{debug, info, trace, warn};
 
+// Примитивы STUN/TURN (magic cookie, message-type, XOR-address-кодек ниже) — это
+// осознанный дубль клиентских ParanoiaLibrary/src/voip/{stun,turn}.rs: сервер —
+// отдельный крейт без общего с клиентом STUN-крейта (03#65). RFC-математика (RFC
+// 8489 / RFC 5766) стабильна; при правке XOR-ветки IPv6 синхронизировать оба места.
 pub const MAGIC_COOKIE: u32 = 0x2112_A442;
 const HEADER_LEN: usize = 20;
 const MAX_UDP_PACKET: usize = 2048;
@@ -85,7 +89,18 @@ struct Allocation {
     shutdown: Arc<Notify>,
 }
 
-type Allocations = Arc<Mutex<HashMap<SocketAddr, Allocation>>>;
+/// Таблица аллокаций TURN под ОДНИМ локом с обратным индексом
+/// `relayed_addr → client`. Локальная релей-доставка (`handle_send`) вызывается
+/// на каждый media-пакет — обратный индекс делает поиск адресата O(1) вместо
+/// O(n)-скана всех аллокаций под общим локом (02#3). Оба поля меняются лишь под
+/// этим мьютексом (единый источник истины) — рассинхрон индекса невозможен.
+#[derive(Default)]
+struct AllocTable {
+    by_client: HashMap<SocketAddr, Allocation>,
+    by_relayed: HashMap<SocketAddr, SocketAddr>,
+}
+
+type Allocations = Arc<Mutex<AllocTable>>;
 
 fn padded_len(len: usize) -> usize {
     (len + 3) & !3
@@ -405,12 +420,13 @@ async fn get_or_create_allocation(
     let now = Instant::now();
     {
         let mut guard = allocations.lock().await;
-        if let Some(existing) = guard.get_mut(&client) {
+        if let Some(existing) = guard.by_client.get_mut(&client) {
             if existing.expires_at > now {
                 existing.expires_at = now + Duration::from_secs(TURN_LIFETIME_SECONDS as u64);
                 return Ok(existing.clone());
             }
-            let expired = guard.remove(&client).expect("checked existing");
+            let expired = guard.by_client.remove(&client).expect("checked existing");
+            guard.by_relayed.remove(&expired.relayed_addr);
             expired.shutdown.notify_waiters();
         }
     }
@@ -432,7 +448,11 @@ async fn get_or_create_allocation(
         expires_at: now + Duration::from_secs(TURN_LIFETIME_SECONDS as u64),
         shutdown,
     };
-    allocations.lock().await.insert(client, allocation.clone());
+    {
+        let mut guard = allocations.lock().await;
+        guard.by_client.insert(client, allocation.clone());
+        guard.by_relayed.insert(relayed_addr, client);
+    }
     info!("TURN allocated {relayed_addr} for {client}");
     Ok(allocation)
 }
@@ -494,10 +514,11 @@ async fn handle_refresh(
     let lifetime = parse_lifetime(msg);
     let mut guard = allocations.lock().await;
     if lifetime == 0 {
-        if let Some(allocation) = guard.remove(&from) {
+        if let Some(allocation) = guard.by_client.remove(&from) {
+            guard.by_relayed.remove(&allocation.relayed_addr);
             allocation.shutdown.notify_waiters();
         }
-    } else if let Some(allocation) = guard.get_mut(&from) {
+    } else if let Some(allocation) = guard.by_client.get_mut(&from) {
         allocation.expires_at = Instant::now() + Duration::from_secs(lifetime as u64);
     }
     drop(guard);
@@ -526,16 +547,16 @@ async fn handle_send(socket: Arc<UdpSocket>, allocations: Allocations, from: Soc
     let (relay_socket, source_relay, local_destination) = {
         let mut guard = allocations.lock().await;
         let (relay_socket, source_relay) = {
-            let Some(allocation) = guard.get_mut(&from) else {
+            let Some(allocation) = guard.by_client.get_mut(&from) else {
                 trace!("TURN Send from {from} without allocation");
                 return;
             };
             allocation.expires_at = Instant::now() + Duration::from_secs(TURN_LIFETIME_SECONDS as u64);
             (Arc::clone(&allocation.relay_socket), allocation.relayed_addr)
         };
-        let local_destination = guard
-            .iter()
-            .find_map(|(client, allocation)| (allocation.relayed_addr == peer).then_some(*client));
+        // O(1) обратный индекс relayed_addr→client вместо линейного скана всех
+        // аллокаций на каждый media-пакет (02#3).
+        let local_destination = guard.by_relayed.get(&peer).copied();
         (relay_socket, source_relay, local_destination)
     };
     if let Some(destination_client) = local_destination {
@@ -558,7 +579,7 @@ async fn spawn_gc(allocations: Allocations) {
         let mut expired = Vec::new();
         {
             let guard = allocations.lock().await;
-            for (client, allocation) in guard.iter() {
+            for (client, allocation) in guard.by_client.iter() {
                 if allocation.expires_at <= now {
                     expired.push(*client);
                 }
@@ -569,7 +590,8 @@ async fn spawn_gc(allocations: Allocations) {
         }
         let mut guard = allocations.lock().await;
         for client in expired {
-            if let Some(allocation) = guard.remove(&client) {
+            if let Some(allocation) = guard.by_client.remove(&client) {
+                guard.by_relayed.remove(&allocation.relayed_addr);
                 allocation.shutdown.notify_waiters();
                 info!("TURN allocation expired for {client}");
             }
@@ -601,7 +623,7 @@ pub async fn run(
         info!("Paranoia TURN relay port range: {start}-{end}");
     }
 
-    let allocations: Allocations = Arc::new(Mutex::new(HashMap::new()));
+    let allocations: Allocations = Arc::new(Mutex::new(AllocTable::default()));
     tokio::spawn(spawn_gc(Arc::clone(&allocations)));
 
     let mut buf = vec![0u8; MAX_UDP_PACKET];

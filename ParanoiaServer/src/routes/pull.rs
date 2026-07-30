@@ -17,7 +17,12 @@ pub struct PullRequest {
 #[derive(Serialize)]
 pub struct ApiResponse {
     pub success: bool,
-    pub message: Value,
+    /// Пакеты `(seq, base64-payload)` при `success`; на ошибке пусто. Типизировано
+    /// (не `Value`), чтобы cover-слой оборачивал готовые поля без повторного парса и
+    /// без второй копии всех payload'ов (02#2).
+    pub packets: Vec<(u64, String)>,
+    /// Текст ошибки при `!success`; пусто при `success`.
+    pub message: String,
 }
 
 pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Json<Value> {
@@ -35,7 +40,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>)
     };
 
     let core_resp = do_pull(&state, req).await;
-    let wrapped = state.cover.wrap_pull_response(&core_resp);
+    let wrapped = state.cover.wrap_pull_response(core_resp);
     Json(wrapped)
 }
 
@@ -73,46 +78,48 @@ async fn do_pull(state: &Arc<AppState>, req: PullRequest) -> ApiResponse {
     } else if crypto::verify_signature(&recver_pub, signed_msg.as_bytes(), &sig).is_ok() {
         req.recver.clone()
     } else {
-        dbg!(
+        warn!(
             "Invalid pull signature for dialogue {}<->{}",
-            req.sender,
-            req.recver
+            req.sender, req.recver
         );
         return fail("Invalid signature".into());
     };
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
-    match state.store.pull(&dialogue_id, req.after_seq, req.to_seq) {
-        Ok(packets) => {
+    // Чтение диапазона пакетов + подъём last_seq + base64-кодирование payload'ов —
+    // всё блокирующее либо CPU-тяжёлое (диапазон бывает большим). Уводим целиком на
+    // spawn_blocking, чтобы горячий роут /pull не вставал на tokio-воркере (01#3).
+    let pull_result = {
+        let state = Arc::clone(state);
+        let did = dialogue_id.clone();
+        let (after_seq, to_seq) = (req.after_seq, req.to_seq);
+        tokio::task::spawn_blocking(move || -> Result<Vec<(u64, String)>, anyhow::Error> {
+            let packets = state.store.pull(&did, after_seq, to_seq)?;
             if let Some(pulled_seq) = packets.iter().map(|(seq, _)| *seq).max() {
-                if let Err(e) = state
-                    .store
-                    .update_last_seq(&signer, &dialogue_id, pulled_seq)
-                {
-                    return fail(format!("{e}"));
-                }
+                state.store.update_last_seq(&signer, &did, pulled_seq)?;
             }
-            let arr: Vec<Value> = packets
+            Ok(packets
                 .into_iter()
-                .map(|(seq, data)| {
-                    serde_json::json!({
-                        "seq":     seq,
-                        "payload": crypto::encode_b64(&data),
-                    })
-                })
-                .collect();
-            ApiResponse {
-                success: true,
-                message: Value::Array(arr),
-            }
-        }
-        Err(e) => fail(format!("{e}")),
+                .map(|(seq, data)| (seq, crypto::encode_b64(&data)))
+                .collect())
+        })
+        .await
+    };
+    match pull_result {
+        Ok(Ok(packets)) => ApiResponse {
+            success: true,
+            packets,
+            message: String::new(),
+        },
+        Ok(Err(e)) => fail(format!("{e}")),
+        Err(e) => fail(format!("join error: {e}")),
     }
 }
 
 fn fail(msg: String) -> ApiResponse {
     ApiResponse {
         success: false,
-        message: Value::String(msg),
+        packets: Vec::new(),
+        message: msg,
     }
 }

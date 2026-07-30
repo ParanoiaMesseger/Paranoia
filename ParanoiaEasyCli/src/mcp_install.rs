@@ -266,6 +266,34 @@ fn register_codex_toml(path: &Path, spec: &RegSpec, dry_run: bool) -> Result<Str
     Ok(format!("{} ← [mcp_servers.{}]", path.display(), spec.name))
 }
 
+/// Установлен ли channel-плагин Claude Code в workdir (обе раскладки: новая —
+/// directory-marketplace `marketplace/plugins/paranoia`, старая — `channel-plugin`).
+fn channel_plugin_installed(workdir: &Path) -> bool {
+    [
+        workdir.join("marketplace").join("plugins").join("paranoia"),
+        workdir.join("channel-plugin"),
+    ]
+    .iter()
+    .any(|d| d.join(".claude-plugin").join("plugin.json").is_file())
+}
+
+/// Снять регистрации наших MCP-серверов в Claude Code: оба исторических имени,
+/// user+local scope. Best-effort — отсутствие записи не ошибка. Нужна, потому
+/// что харнесс дедупит серверы ПО КОМАНДЕ и при наличии записи с тем же бинарём
+/// молча подавляет channel-плагин: тулзы работают, а push-инъекции теряются.
+fn remove_claude_cli_regs() {
+    if !binary_on_path("claude") {
+        return;
+    }
+    for name in ["paranoia-cli", "paranoia"] {
+        for scope in ["user", "local"] {
+            let _ = Command::new("claude")
+                .args(["mcp", "remove", name, "--scope", scope])
+                .output();
+        }
+    }
+}
+
 fn register_claude_cli(spec: &RegSpec, dry_run: bool) -> Result<String> {
     if !binary_on_path("claude") {
         bail!("`claude` не найден в PATH (Claude Code не установлен?)");
@@ -778,11 +806,7 @@ pub fn run(opts: InstallOpts) -> Result<()> {
         // читателя (pull-тулзы и push-луп) дренажат сообщения друг у друга.
         let mut pull_removed = false;
         if !opts.dry_run && binary_on_path("claude") {
-            for scope in ["user", "local"] {
-                let _ = std::process::Command::new("claude")
-                    .args(["mcp", "remove", "paranoia-cli", "--scope", scope])
-                    .status();
-            }
+            remove_claude_cli_regs();
             pull_removed = true;
         }
         let launch = "claude --dangerously-load-development-channels server:paranoia";
@@ -827,8 +851,22 @@ pub fn run(opts: InstallOpts) -> Result<()> {
     }
 
     // 9) регистрация
+    let plugin_present = channel_plugin_installed(&workdir);
     let mut results: Vec<(String, bool, String)> = Vec::new();
     for h in &hosts {
+        // При установленном channel-плагине host claude-code НЕ регистрируем:
+        // user-scope запись того же бинаря заставит харнесс подавить плагин как
+        // дубликат — канал молча оглохнет. Вместо этого вычищаем старые записи.
+        if h == "claude-code" && plugin_present {
+            let detail = if opts.dry_run {
+                "(dry-run) пропуск: установлен channel-плагин, регистрация подавила бы канал".to_string()
+            } else {
+                remove_claude_cli_regs();
+                "пропуск: установлен channel-плагин (канал живёт только через него); старые записи paranoia/paranoia-cli сняты".to_string()
+            };
+            results.push((h.clone(), true, detail));
+            continue;
+        }
         match register_host(&real_home, h, &spec, opts.dry_run) {
             Ok(desc) => results.push((h.clone(), true, desc)),
             Err(e) => results.push((h.clone(), false, e.to_string())),

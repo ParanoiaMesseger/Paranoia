@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API ≤30. Расшифрованные вложения open-кэша (files/paranoia_open) не должны
+     уезжать в облачный auto-backup: остальные данные (vault) зашифрованы, этот
+     каталог — plaintext. -->
+<full-backup-content>
+    <exclude domain="file" path="paranoia_open/" />
+</full-backup-content>

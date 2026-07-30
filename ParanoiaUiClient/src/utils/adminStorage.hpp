@@ -11,7 +11,7 @@ namespace admin
         QString domain;
         QString private_key;
         QStringList reserveServerUrls;
-        Q_INVOKABLE QFuture<bool> regUser(const QString &username, const QString &pubkey) const;
+        QFuture<bool> regUser(const QString &username, const QString &pubkey) const;
 
         static void initAdmins();
 

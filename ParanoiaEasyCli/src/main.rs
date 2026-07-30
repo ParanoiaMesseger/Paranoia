@@ -415,6 +415,51 @@ async fn cmd_topic_delete(
     Ok(())
 }
 
+/// TOPIC TRIM — оставить последние `keep` сообщений в теме (или во всех темах),
+/// старее — удалить локально и на сервере. `dry_run` — только посчитать.
+#[allow(clippy::too_many_arguments)]
+async fn cmd_topic_trim(
+    server_url: &str,
+    reserve_server_urls: &[String],
+    username: &str,
+    db_path: &str,
+    peer: &str,
+    keep: usize,
+    topic: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    let client = build_client(server_url, reserve_server_urls, username, db_path)?;
+    let dialogue = build_dialogue(&client, server_url, username, peer)?;
+    // НЕ вызываем receive(): двигать курсор приёма нельзя — параллельно работающий
+    // MCP-сервер на той же БД пропустил бы сообщения. Обрезаем по текущему локальному
+    // состоянию (его и так держит актуальным MCP-сервер).
+    let topics = dialogue.list_topics()?;
+    let targets: Vec<(String, u64)> = match &topic {
+        Some(t) => topics
+            .into_iter()
+            .filter(|(_, name, _)| name == t)
+            .map(|(_, name, count)| (name, count))
+            .collect(),
+        None => topics.into_iter().map(|(_, name, count)| (name, count)).collect(),
+    };
+    if targets.is_empty() {
+        println!("(нет подходящих тем)");
+        return Ok(());
+    }
+    let verb = if dry_run { "к удалению" } else { "удалено" };
+    let mut total = 0usize;
+    for (name, count) in targets {
+        let n = dialogue.trim_topic_keep_last(&name, keep, dry_run).await?;
+        total += n;
+        println!("Тема «{name}»: было {count}, оставляем {keep}, {verb} {n}");
+    }
+    println!(
+        "{} всего: {total}",
+        if dry_run { "К удалению" } else { "Удалено" }
+    );
+    Ok(())
+}
+
 /// RECEIVE
 async fn cmd_receive(
     server_url: &str,
@@ -606,7 +651,7 @@ fn dialog_master_key(server_url: &str, username: &str, peer_id: &str) -> Result<
 /// живого клиента: шлём валидный подписанный+зашифрованный оффер на сервер,
 /// клиент-получатель ловит его поллингом call_poll и поднимает баннер вызова.
 /// Медиа НЕ поднимается (мы не отвечаем на answer) — проверяется именно ДОСТАВКА
-/// и показ входящего. Мирроринг paranoia_call_signal_send (voip_ffi.rs).
+/// и показ входящего. Мирроринг call-signal send (voip_ffi.rs).
 async fn cmd_call_offer(
     server_url: &str,
     reserve_server_urls: &[String],
@@ -1691,6 +1736,23 @@ enum TopicCmd {
         #[arg(long)]
         topic: String,
     },
+    /// Обрезать хвост: оставить последние N сообщений в теме (или во всех темах),
+    /// удалить более старые — локально и на сервере (у обеих сторон при синхре).
+    Trim {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        peer: String,
+        /// Сколько последних сообщений оставить в каждой теме.
+        #[arg(long, default_value_t = 20)]
+        keep: usize,
+        /// Имя конкретной темы. Не задано — обрезать ВСЕ темы.
+        #[arg(long)]
+        topic: Option<String>,
+        /// Только посчитать, что будет удалено, ничего не удаляя.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// CLI — это dev-инструмент: гонять «промышленную» policy с интерактивным
@@ -1899,6 +1961,19 @@ async fn main() -> Result<()> {
                     &cli.db_path,
                     &peer,
                     &topic,
+                )
+                .await?;
+            }
+            TopicCmd::Trim { username, peer, keep, topic, dry_run } => {
+                cmd_topic_trim(
+                    &cli.server_url,
+                    &cli.reserve_server_urls,
+                    &username,
+                    &cli.db_path,
+                    &peer,
+                    keep,
+                    topic,
+                    dry_run,
                 )
                 .await?;
             }

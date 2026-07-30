@@ -11,7 +11,7 @@
 - Чёткая граница: Rust держит крипто-ядро, транспорт, сигналинг, NAT-протоколы; Qt — захват/воспроизведение медиа, кодеки, QML-UI.
 - Один кодек на каждый медиа-поток: Opus для голоса, H.264 для видео.
 - Один UDP-сокет на звонок мультиплексирует оба потока — это даёт одно NAT-mapping вместо двух.
-- P2P первично; релей сервера (TURN) опционален и только при отсутствии прямой связности (см. ниже — TURN-протокол реализован, но в путь звонка пока не подключён).
+- P2P первично; релей сервера (TURN) опционален и используется как fallback только при отсутствии прямой связности — он полностью подключён к пути звонка (Allocate/Refresh/CreatePermission/Send/Data поверх того же UDP-сокета сессии, см. ниже).
 
 ***
 
@@ -238,12 +238,12 @@ QAudioSource (PCM s16 mono 48 kHz)
     → encrypt + send_to
 
 recv_from → decrypt → frame_cb → CallEngine::enqueueIncomingFrame
-    → jitter-буфер (Qt-side: 3..16 фреймов глубины, sequence-ordered, sliding по `expected`)
+    → jitter-буфер (Qt-side: 1..16 фреймов глубины, sequence-ordered, sliding по `expected`)
     → 20-мс QTimer pop → OpusDecoder::decode (или PLC на пропуске)
     → AudioPlayback (QAudioSink)
 ```
 
-Jitter-буфер реализован на Qt-стороне. Параметры: initial delay 3 фрейма (60 мс), max depth 16 (320 мс); при PLC-streak > 12 — resync с минимального доступного seq.
+Jitter-буфер реализован на Qt-стороне. Параметры (`CallEngine.hpp`): initial delay 1 фрейм (20 мс), max depth 16 (320 мс); при PLC-streak > 12 — resync с минимального доступного seq.
 
 ***
 
@@ -268,17 +268,19 @@ Jitter-буфер реализован на Qt-стороне. Параметр�
 
 | Платформа | Приоритет |
 |---|---|
-| macOS / iOS | `h264_videotoolbox` → `libx264` → `h264` |
-| Android | `h264_mediacodec`* → `libx264` → `h264` |
-| Windows | `h264_nvenc` → `h264_qsv` → `h264_amf` → `libx264` → `h264` |
-| Linux | `h264_nvenc` → `h264_vaapi` → `libx264` → `h264` |
-| Прочее | `libx264` → `h264` |
+| macOS / iOS | `h264_videotoolbox` → `libx264` → `libopenh264` → `h264` |
+| Android | `h264_mediacodec`* → `libopenh264` → `libx264` → `h264` |
+| Windows | `h264_nvenc` → `h264_qsv` → `h264_amf` → `libx264` → `libopenh264` → `h264` |
+| Linux | `libx264` → `libopenh264` → `h264_nvenc` → `h264_vaapi` → `h264_v4l2m2m` → `h264` |
+| Прочее | `libx264` → `libopenh264` → `h264` |
 
-*Android `h264_mediacodec` требует `AVHWFramesContext` с Surface input — на текущий момент init дропается и поток уходит на `libx264` (software).
+`libopenh264` — кросс-компилируемый software-fallback (см. `scripts/build_openh264_android.sh`), стоящий в каждом списке как надёжный резерв. На Linux `libx264` намеренно поставлен **перед** hw-кодеками: `h264_nvenc` на десктопе с интегрированным GPU «находится» и `open2` возвращает 0, а падает только на первом `send_frame` — software-энкодер надёжнее как первый выбор, hw остаётся fallback'ом.
 
-Низколатентные опции выставляются адресно по выбранному кодеку: `libx264` получает `preset=veryfast tune=zerolatency`; `videotoolbox` — `realtime=1 allow_sw=1`; `nvenc` — `preset=p1 tune=ull zerolatency=1`.
+*Android `h264_mediacodec` — hw-энкодер через JNI; требует включения в FFmpeg-сборке и runtime SDK API. Если он недоступен, поток уходит на `libopenh264` (software).
 
-Декодер: на macOS/iOS — `h264_videotoolbox`, на Android — `h264_mediacodec`, иначе software `h264`. Не-`yuv420p` входы конвертируются через `swscale` в I420.
+Низколатентные опции выставляются адресно по выбранному кодеку: `libx264` получает `preset=veryfast tune=zerolatency`; `videotoolbox` — `realtime=1 allow_sw=1`; `nvenc` — `preset=p1 tune=ull zerolatency=1`; `qsv` — `preset=veryfast`.
+
+Декодер: на macOS/iOS — `h264_videotoolbox`, на Android — `h264_mediacodec`, иначе software `h264`; во всех случаях `libopenh264` — финальный fallback. Не-`yuv420p` входы конвертируются через `swscale` в I420.
 
 ### Поток
 
@@ -288,7 +290,7 @@ QCamera + QMediaCaptureSession + QVideoSink (захват)
     → swscale → I420 (1280×720, 1.4 MB / кадр)
     → emit frameReady(QByteArray, pts_90khz)
     → H264Encoder::encode → vector<QByteArray> (Annex B NAL'ы)
-    → разрезание на фрагменты ≤ 1368 байт:
+    → разрезание на фрагменты ≤ 1168 байт (MAX_DATAGRAM 1200 − header 16 − tag 16):
         первый: flags = FRAME_START
         последний: flags |= FRAGMENT_END
         rtp_timestamp общий на весь NAL
@@ -426,6 +428,6 @@ NULL-значения video_cb / frame_cb допустимы — соответ�
 3. **DoS forged-пакетами** — Poly1305 MAC проверяется до любой обработки. Невалидные пакеты в трейс/лог не падают (только trace-level).
 4. **Zeroization** — `SessionKeys` зануляется при drop'е через `zeroize` крейт; явно вызывается при штатном завершении `run_session`.
 5. **Исчерпание nonce** — 64-битный sequence + 20-мс voice фреймы → ~11.7 млн лет до исчерпания; не практический риск.
-6. **Метаданные** — размер и тайминг пакетов видимы сети. DTX в Opus уменьшает трафик в тишине, но не скрывает полностью. Длина видео-пакетов выдаёт scene complexity. Маскировка не предусмотрена.
+6. **Метаданные** — размер и тайминг пакетов видимы сети. DTX в Opus **выключен**, поэтому voice-поток идёт непрерывно (фрейм каждые 20 мс) и паузы не выдаются таймингом; но размер пакета в тишине меньше (минимальный фрейм ~7 байт) и может косвенно выдавать молчание. Длина видео-пакетов выдаёт scene complexity. Маскировка медиа-трафика не предусмотрена.
 7. **Сервер сигналинга** — наблюдает {sender, recver, kind, ts_ms, длина_зашифрованного_payload}. Содержимое Offer/Answer/Ice (call_id, session_id, кандидаты, list streams) для него недоступно.
 8. **Reserved-биты header'а** — любой пакет с выставленным резервированным битом отвергается до AEAD; это даёт окно для будущих расширений wire-format без поломки версии.

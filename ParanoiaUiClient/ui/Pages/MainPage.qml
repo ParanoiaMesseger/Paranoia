@@ -58,6 +58,7 @@ Rectangle {
     signal openChangePin()
     signal openMasking()
     signal openDataManagement()
+    signal openSettings()
 
     function reserveDomainsText(domains) {
         if (!domains || domains.length === 0)
@@ -223,7 +224,7 @@ Rectangle {
                     Layout.preferredWidth: 36
                     Layout.preferredHeight: 36
                     Layout.alignment: Qt.AlignVCenter
-                    radius: Theme.radiusSm
+                    radius: height / 2
                     color: shareCancelArea.containsMouse ? Theme.bgCard : "transparent"
                     border.width: 1
                     border.color: Theme.border
@@ -264,32 +265,42 @@ Rectangle {
                 color: Theme.accent
             }
 
-            VectorImage {
-                id: logoSymbol
-                anchors.left: parent.left
-                anchors.leftMargin: 14
+            // Явный переключатель темы (на месте бывшего лого).
+            Rectangle {
+                anchors.left:           parent.left
+                anchors.leftMargin:     12
                 anchors.verticalCenter: parent.verticalCenter
                 width: 32; height: 32
-                source: "qrc:/logo_symbol_animated.svg"
-                fillMode: VectorImage.PreserveAspectFit
-                preferredRendererType: VectorImage.CurveRenderer
-                animations.loops: Animation.Infinite
-                assumeTrustedSource: true
+                radius: height / 2
+                color: themeArea.containsMouse ? Theme.bgCard : "transparent"
+                border.width: themeArea.containsMouse ? 1 : 0
+                border.color: Theme.border
 
-                scale: symbolArea.containsPress ? 0.82 : 1.0
-                Behavior on scale {
-                    NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                AppIcon {
+                    anchors.centerIn: parent
+                    width: 20; height: 20
+                    // Иконка отражает действие: в тёмной теме — солнце (→ светлая),
+                    // в светлой — месяц (→ тёмная).
+                    name: Theme.darkMode ? "sun" : "moon"
+                    iconColor: Theme.accentHover
+                    strokeWidth: 2
+
+                    scale: themeArea.containsPress ? 0.82 : 1.0
+                    Behavior on scale {
+                        NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                    }
                 }
-
                 MouseArea {
-                    id: symbolArea
+                    id: themeArea
                     anchors.fill: parent
-                    anchors.margins: -6
+                    hoverEnabled: true
                     onClicked: Theme.toggleTheme()
                 }
             }
 
+            // Слово «PARANOIA» — строго по центру шапки.
             Text {
+                id: wordmark
                 anchors.centerIn: parent
                 text:             "PARANOIA"
                 color:            Theme.textPrimary
@@ -298,12 +309,27 @@ Rectangle {
                 font.weight:      Font.DemiBold
             }
 
+            // Анимированное лого — слева вплотную к слову (декоративное),
+            // надпись при этом остаётся центрированной.
+            VectorImage {
+                id: logoSymbol
+                anchors.right:          wordmark.left
+                anchors.rightMargin:    8
+                anchors.verticalCenter: parent.verticalCenter
+                width: 28; height: 28
+                source: "qrc:/logo_symbol_animated.svg"
+                fillMode: VectorImage.PreserveAspectFit
+                preferredRendererType: VectorImage.CurveRenderer
+                animations.loops: Animation.Infinite
+                assumeTrustedSource: true
+            }
+
             Rectangle {
                 anchors.right:         parent.right
                 anchors.rightMargin:   12
                 anchors.verticalCenter: parent.verticalCenter
                 width: 32; height: 32
-                radius: Theme.radiusSm
+                radius: height / 2
                 color: exportArea.containsMouse ? Theme.bgCard : "transparent"
                 border.width: exportArea.containsMouse ? 1 : 0
                 border.color: Theme.border
@@ -321,6 +347,33 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     onClicked: root.openExportImport()
+                }
+            }
+
+            // Кнопка настроек (⚙)
+            Rectangle {
+                anchors.right:         parent.right
+                anchors.rightMargin:   48
+                anchors.verticalCenter: parent.verticalCenter
+                width: 32; height: 32
+                radius: height / 2
+                color: settingsArea.containsMouse ? Theme.bgCard : "transparent"
+                border.width: settingsArea.containsMouse ? 1 : 0
+                border.color: Theme.border
+
+                AppIcon {
+                    anchors.centerIn: parent
+                    width: 20
+                    height: 20
+                    name: "settings"
+                    iconColor: Theme.accentHover
+                    strokeWidth: 2
+                }
+                MouseArea {
+                    id: settingsArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: root.openSettings()
                 }
             }
         }
@@ -730,19 +783,35 @@ Rectangle {
                                 Column {
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 3
-                                    Text {
-                                        text:           modelData.displayName || modelData.peer
-                                        color:          dlgItem.highlighted ? Theme.accentHover : Theme.textPrimary
-                                        font.pixelSize: Theme.fontMd
-                                        font.family:    Theme.fontFamily
-                                        font.weight:    dlgItem.highlighted ? Font.DemiBold : Font.Medium
-                                    }
-                                    Text {
-                                        text: {
-                                            if (!modelData.hasKey) return "KEY MISSING // SIGNAL BLOCKED"
-                                            return modelData.lastMsg ? String(modelData.lastMsg).replace(/\s+/g, " ") : qsTr("Нет сообщений")
+                                    Row {
+                                        spacing: 6
+                                        Text {
+                                            text:           modelData.displayName || modelData.peer
+                                            color:          dlgItem.highlighted ? Theme.accentHover : Theme.textPrimary
+                                            font.pixelSize: Theme.fontMd
+                                            font.family:    Theme.fontFamily
+                                            font.weight:    dlgItem.highlighted ? Font.DemiBold : Font.Medium
                                         }
-                                        color: !modelData.hasKey ? Theme.error : Theme.textSecondary
+                                        AppIcon {
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: 14; height: 14
+                                            name: "bellOff"
+                                            iconColor: Theme.textHint
+                                            strokeWidth: 2
+                                            visible: modelData.muted === true
+                                        }
+                                    }
+                                    // Превью последнего сообщения УБРАНО (решение юзера
+                                    // 2026-07-22): текст превью обновлялся лишь при дочитывании
+                                    // тела (receive_keyring), а форграунд-notify двигает только
+                                    // счётчик → превью «замерзало» на старом сообщении, пока
+                                    // бейдж горел = вводило в заблуждение. Источник «непрочитано»
+                                    // — бейдж (unreadCount). Оставлена ТОЛЬКО индикация «нет
+                                    // ключа» (важный статус безопасности, не превью).
+                                    Text {
+                                        visible:        !modelData.hasKey
+                                        text:           "KEY MISSING // SIGNAL BLOCKED"
+                                        color:          Theme.error
                                         font.pixelSize: Theme.fontSm
                                         font.family:    Theme.fontFamily
                                         elide:          Text.ElideRight
@@ -761,7 +830,9 @@ Rectangle {
                                 width: Math.max(20, unreadText.implicitWidth + 10)
                                 height: 20
                                 radius: 10
-                                color: Theme.accent
+                                // У замьюченного диалога бейдж приглушён: новое видно,
+                                // но без «алярма» (уведомлений по нему нет).
+                                color: modelData.muted === true ? Theme.accentDim : Theme.accent
                                 visible: dlgItem.unreadCount > 0
 
                                 Text {
@@ -813,6 +884,7 @@ Rectangle {
                                         dlgContextMenu.selectedDisplayName = modelData.displayName || modelData.peer
                                         dlgContextMenu.selectedLocalName = modelData.localName || ""
                                         dlgContextMenu.selectedHasAvatar = (modelData.avatar || "").length > 0
+                                        dlgContextMenu.selectedMuted = modelData.muted === true
 
                                         dlgContextMenu.x = dlgItem.x + (dlgItem.width - dlgContextMenu.width - 8)
                                         dlgContextMenu.y = dlgItem.mapToItem(root, 0, 0).y + 16
@@ -1037,34 +1109,6 @@ Rectangle {
                         secondary:        true
                         onClicked:        root.installNewServer()
                     }
-
-                    ParaButton {
-                        Layout.fillWidth: true
-                        text:             qsTr("Маскировка трафика")
-                        secondary:        true
-                        onClicked:        root.openMasking()
-                    }
-
-                    ParaButton {
-                        Layout.fillWidth: true
-                        text:             qsTr("Сменить PIN-код")
-                        secondary:        true
-                        onClicked:        root.openChangePin()
-                    }
-
-                    ParaButton {
-                        Layout.fillWidth: true
-                        text:             qsTr("Версия приложения")
-                        secondary:        true
-                        onClicked:        root.openVersionInfo()
-                    }
-
-                    ParaButton {
-                        Layout.fillWidth: true
-                        text:             qsTr("Управление данными")
-                        secondary:        true
-                        onClicked:        root.openDataManagement()
-                    }
                 }
             }
         }
@@ -1085,6 +1129,7 @@ Rectangle {
         property string selectedDisplayName: ""
         property string selectedLocalName: ""
         property bool   selectedHasAvatar: false
+        property bool   selectedMuted: false
 
         background: Rectangle {
             color: Theme.bgSecondary
@@ -1102,14 +1147,14 @@ Rectangle {
             Rectangle {
                 width: contextMenuColumn.width
                 height: 34
-                radius: Theme.radiusSm
+                radius: Theme.radiusMd
                 color: renameArea.containsMouse ? Theme.bgButton : "transparent"
                 Text {
                     anchors.left: parent.left; anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10; anchors.rightMargin: 10
                     text: qsTr("Переименовать")
-                    color: Theme.textPrimary
+                    color: renameArea.containsMouse ? Theme.textOnButton : Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
                     elide: Text.ElideRight
@@ -1131,14 +1176,14 @@ Rectangle {
             Rectangle {
                 width: contextMenuColumn.width
                 height: 34
-                radius: Theme.radiusSm
+                radius: Theme.radiusMd
                 color: avatarArea.containsMouse ? Theme.bgButton : "transparent"
                 Text {
                     anchors.left: parent.left; anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10; anchors.rightMargin: 10
                     text: dlgContextMenu.selectedHasAvatar ? qsTr("Сменить аватар") : qsTr("Задать аватар")
-                    color: Theme.textPrimary
+                    color: avatarArea.containsMouse ? Theme.textOnButton : Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
                     elide: Text.ElideRight
@@ -1169,14 +1214,14 @@ Rectangle {
                 width: contextMenuColumn.width
                 height: dlgContextMenu.selectedHasAvatar ? 34 : 0
                 visible: dlgContextMenu.selectedHasAvatar
-                radius: Theme.radiusSm
+                radius: Theme.radiusMd
                 color: clearAvatarArea.containsMouse ? Theme.bgButton : "transparent"
                 Text {
                     anchors.left: parent.left; anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: 10; anchors.rightMargin: 10
                     text: qsTr("Убрать аватар")
-                    color: Theme.textPrimary
+                    color: clearAvatarArea.containsMouse ? Theme.textOnButton : Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
                     elide: Text.ElideRight
@@ -1192,6 +1237,34 @@ Rectangle {
                 }
             }
 
+            // ── Уведомления по диалогу (бейдж непрочитанного остаётся) ─────
+            Rectangle {
+                width: contextMenuColumn.width
+                height: 34
+                radius: Theme.radiusMd
+                color: muteArea.containsMouse ? Theme.bgButton : "transparent"
+                Text {
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 10; anchors.rightMargin: 10
+                    text: dlgContextMenu.selectedMuted ? qsTr("Включить уведомления")
+                                                       : qsTr("Отключить уведомления")
+                    color: muteArea.containsMouse ? Theme.textOnButton : Theme.textPrimary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: muteArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                        dlgContextMenu.close()
+                        Backend.setDialogMuted(dlgContextMenu.selectedPeer, !dlgContextMenu.selectedMuted)
+                    }
+                }
+            }
+
             // ── Separator ──────────────────────────────────────────────────
             Rectangle {
                 width: contextMenuColumn.width
@@ -1203,7 +1276,7 @@ Rectangle {
             Rectangle {
                 width: contextMenuColumn.width
                 height: 34
-                radius: Theme.radiusSm
+                radius: Theme.radiusMd
                 color: updateKeyArea.containsMouse ? Theme.bgButton : "transparent"
                 Text {
                     anchors.left: parent.left
@@ -1212,7 +1285,7 @@ Rectangle {
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
                     text: qsTr("Обновить ключ диалога")
-                    color: Theme.textPrimary
+                    color: updateKeyArea.containsMouse ? Theme.textOnButton : Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
                     elide: Text.ElideRight
@@ -1232,7 +1305,7 @@ Rectangle {
             Rectangle {
                 width: contextMenuColumn.width
                 height: 34
-                radius: Theme.radiusSm
+                radius: Theme.radiusMd
                 color: clearHistoryArea.containsMouse ? Theme.bgButton : "transparent"
                 Text {
                     anchors.left: parent.left
@@ -1241,7 +1314,7 @@ Rectangle {
                     anchors.leftMargin: 10
                     anchors.rightMargin: 10
                     text: qsTr("Очистить диалог")
-                    color: Theme.textPrimary
+                    color: clearHistoryArea.containsMouse ? Theme.textOnButton : Theme.textPrimary
                     font.pixelSize: Theme.fontSm
                     font.family: Theme.fontFamily
                     elide: Text.ElideRight
@@ -1269,7 +1342,7 @@ Rectangle {
             Rectangle {
                 width: contextMenuColumn.width
                 height: 34
-                radius: Theme.radiusSm
+                radius: Theme.radiusMd
                 color: deleteDialogArea.containsMouse ? Theme.errorBg : "transparent"
                 Text {
                     anchors.left: parent.left
@@ -1737,13 +1810,62 @@ Rectangle {
         }
     }
 
+    // Затемняющая подложка под попапом переименования. Своя (НЕ modal-dim попапа),
+    // потому что modal-overlay Qt блокирует ввод по ВСЕМУ, что вне попапа — включая
+    // виртуальную клавиатуру (её кнопки = MouseArea, и modal съедал их тапы → «нажатия
+    // не проходят», жалоба Иванова). Поэтому попап НЕ модальный, а фокус/блокировку
+    // фона даёт этот скрим, который НЕ накрывает зону клавиатуры (тапы по VKB проходят,
+    // и она не выглядит «выключенной»). Тап по скриму — закрыть.
+    Item {
+        id: renameScrim
+        parent: Overlay.overlay
+        anchors.fill: parent
+        visible: renamePopup.visible
+        z: 100
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            // До верхней кромки клавиатуры (фолбэк ~55% высоты, если keyboardRectangle
+            // отдаёт 0 — частый случай с Qt VirtualKeyboard).
+            height: {
+                const H = renameScrim.height
+                if (!Qt.inputMethod.visible) return H
+                const kbH = Qt.inputMethod.keyboardRectangle.height
+                return kbH > 0 ? (H - kbH) : Math.round(H * 0.55)
+            }
+            color: "#88000000"
+            MouseArea { anchors.fill: parent; onClicked: renamePopup.close() }
+        }
+    }
+
     // ── Попап: переименовать диалог (локальное имя) ───────────
     Popup {
         id: renamePopup
-        anchors.centerIn: Overlay.overlay
+        // Не центрируем жёстко: при показе клавиатуры поднимаем попап над ней,
+        // иначе поле ввода уезжает под VKB и выглядит как баг.
+        parent: Overlay.overlay
+        z: 101                               // выше своего скрима (renameScrim z:100)
+        x: Math.round((Overlay.overlay.width - width) / 2)
+        // При показе клавиатуры прижимаем попап К ВЕРХУ экрана — так его низ заведомо
+        // выше и самой VKB, и её строки подсказок/spelling (которая выше, чем отдаёт
+        // keyboardRectangle, и накрывала последнее слово ввода — жалоба Иванова).
+        // keyboardRectangle с Qt VirtualKeyboard ненадёжен, поэтому не считаем точную
+        // кромку, а просто ставим попап в верхние ~7% экрана.
+        y: {
+            const H = Overlay.overlay.height
+            if (Qt.inputMethod.visible)
+                return Math.max(12, Math.round(H * 0.07))
+            return Math.round((H - height) / 2)
+        }
+        Behavior on y { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
         width: 320; padding: 24
-        modal: true
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        // НЕ модальный: modal-overlay Qt блокировал бы тапы по виртуальной клавиатуре.
+        // Фон затемняет/перехватывает свой скрим renameScrim (см. выше), не накрывая VKB.
+        modal: false
+        dim: false
+        // Закрытие — Esc или кнопки Сохранить/Отмена (тап по скриму тоже закрывает).
+        closePolicy: Popup.CloseOnEscape
 
         property string peer: ""
         property string presetName: ""
@@ -1756,7 +1878,15 @@ Rectangle {
         }
 
         function commit() {
-            Backend.setDialogLocalName(renamePopup.peer, renameInput.text)
+            // Зафиксировать последнее КОМПОЗ-слово (pre-edit предиктивного ввода) в
+            // text — иначе на Android слово под spell-check'ом не попадает в имя
+            // (жалоба Иванова). Подстраховка: если commit() не сложил pre-edit в text
+            // (напр. единственное слово) — берём напрямую из preeditText.
+            Qt.inputMethod.commit()
+            let nm = renameInput.text
+            if ((!nm || nm.length === 0) && renameInput.preeditText.length > 0)
+                nm = renameInput.preeditText
+            Backend.setDialogLocalName(renamePopup.peer, nm)
             renamePopup.close()
         }
 

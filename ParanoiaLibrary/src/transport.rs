@@ -101,7 +101,6 @@ pub struct ArrivedResponse {
     pub partner_last_seq: Option<u64>,
     /// Собственный read-seq запрашивающего (receipt_state(me) на сервере).
     pub own_last_seq: u64,
-    pub ts: u64,
 }
 
 /// Ответ одного пакета с сервера (после pull).
@@ -376,14 +375,12 @@ impl Transport {
                     .ok_or_else(|| anyhow!("Arrived: invalid partner_last_seq"))?,
             ),
         };
-        let ts = resp.get("ts").and_then(Value::as_u64).unwrap_or(0);
         // own_last_seq — мой собственный read-seq на сервере (обновляется при pull
         // на любом устройстве). Старый сервер поля не отдаёт → 0 (нейтрально).
         let own_last_seq = resp.get("own_last_seq").and_then(Value::as_u64).unwrap_or(0);
         Ok(ArrivedResponse {
             partner_last_seq,
             own_last_seq,
-            ts,
         })
     }
 

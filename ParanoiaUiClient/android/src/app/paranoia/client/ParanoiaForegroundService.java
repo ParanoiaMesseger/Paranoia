@@ -62,6 +62,9 @@ public final class ParanoiaForegroundService extends Service {
     private static final String PREF_APP_FOREGROUND_UNTIL = "app_foreground_until";
     private static final long APP_FOREGROUND_TTL_MS = 150_000L;
     private static final String PREF_SERVICE_REQUESTED = "service_requested";
+    // Режим фонового опроса (cross-process, как PREF_APP_FOREGROUND): пишет и
+    // UI-процесс (persistPollMode по JNI), и сервис (applyPollMode из snapshot).
+    private static final String PREF_POLL_MODE = "poll_mode";
     private static final String PREF_OPEN_PROFILE_ID = "open_profile_id";
     private static final String PREF_OPEN_PEER = "open_peer";
     // Отложенный конверт входящего звонка (#6 handoff): фон-процесс пишет в prefs
@@ -144,6 +147,15 @@ public final class ParanoiaForegroundService extends Service {
     private static final AtomicLong callPollStartedAtMs = new AtomicLong(0L);
     private static volatile boolean started = false;
     private static volatile boolean appForeground = false;
+    // Режим фонового опроса: "normal" (60с + long-poll), "battery_saving" (5 мин, без long-poll),
+    // "off" (сервис остановлен). Персистится в prefs (переживает рестарт процесса
+    // :notifications — иначе после убийства сервиса системой режим молча
+    // откатывался бы в "normal"); живому сервису обновления доезжают со snapshot'ом.
+    // null = ещё не читали персист (ленивая инициализация в pollMode(Context)).
+    private static volatile String pollMode = null;
+    // Момент последнего автономного опроса (elapsedRealtime) — гасит немедленные
+    // опросы от частых ACTION_START в экономном режиме (см. triggerPollAndReschedule).
+    private static volatile long lastAutonomousPollMs = 0L;
     // true ТОЛЬКО когда snapshot пуст из-за ЯВНОГО logout/clear из UI. Пустой
     // snapshot из-за рестарта процесса (ещё не пришёл) — НЕ повод останавливать
     // сервис (раньше любой пустой snapshot → stop() + сброс service_requested →
@@ -224,10 +236,71 @@ public final class ParanoiaForegroundService extends Service {
     private static final class DialogHint {
         final String partnerServerId;
         final long seq;
-        DialogHint(String partnerServerId, long seq) {
+        // Уведомления по диалогу выключены: диалог опрашивается как обычно
+        // (курсоры seen не должны разъезжаться), но в счёт уведомления не входит.
+        final boolean muted;
+        DialogHint(String partnerServerId, long seq, boolean muted) {
             this.partnerServerId = partnerServerId;
             this.seq = seq;
+            this.muted = muted;
         }
+    }
+
+    private static boolean isMutedPartner(ProfileHint profile, String partnerServerId) {
+        for (DialogHint d : profile.dialogs) {
+            if (d.partnerServerId.equals(partnerServerId)) return d.muted;
+        }
+        return false;
+    }
+
+    // ── Poll mode helpers ──────────────────────────────────────────────────
+    private static boolean isValidPollMode(String mode) {
+        return "normal".equals(mode) || "battery_saving".equals(mode) || "off".equals(mode);
+    }
+
+    // Текущий режим. Первое обращение в свежем процессе читает персист с диска —
+    // сервис обязан помнить режим и без живого UI (START_STICKY-рестарт, Doze).
+    private static String pollMode(Context context) {
+        String mode = pollMode;
+        if (mode == null) {
+            mode = prefs(context).getString(PREF_POLL_MODE, "normal");
+            if (!isValidPollMode(mode)) mode = "normal";
+            pollMode = mode;
+        }
+        return mode;
+    }
+
+    // Единая точка смены режима: статик текущего процесса + персист.
+    private static void applyPollMode(Context context, String mode) {
+        if (!isValidPollMode(mode) || mode.equals(pollMode(context))) return;
+        pollMode = mode;
+        // commit, не apply — как у соседних cross-process флагов: значение должно
+        // лечь на диск ДО того, как другой процесс его прочитает.
+        prefs(context).edit().putString(PREF_POLL_MODE, mode).commit();
+        Log.i(TAG, "poll mode changed to: " + mode);
+    }
+
+    // Вызывается по JNI из UI-процесса при смене режима в настройках. ТОЛЬКО
+    // персист: статики здесь — копия UI-процесса (сервис живёт в :notifications),
+    // командовать сервисом через них нельзя. Живому сервису режим доедет со
+    // snapshot'ом, свежему — из prefs; стартом/остановкой фоновой доставки
+    // управляет NotificationCoordinator.
+    public static void persistPollMode(Context context, String mode) {
+        applyPollMode(context, mode);
+    }
+
+    // Интервал AlarmManager. В battery_saving — 5 мин ±30% jitter (210–390 с)
+    // для снижения предсказуемости паттерна (§6.3 NotificationsPolicy).
+    private static long getPollIntervalMs(Context context) {
+        if ("battery_saving".equals(pollMode(context))) {
+            return 210_000L + (long)(Math.random() * 180_000L);
+        }
+        return POLL_INTERVAL_MS; // 60 с (normal)
+    }
+
+    // Долгий polling (message long-poll chain + call-poll) включён только в normal.
+    private static boolean useLongPoll(Context context) {
+        return "normal".equals(pollMode(context));
     }
 
     public static void initialize(Context context) {
@@ -261,19 +334,6 @@ public final class ParanoiaForegroundService extends Service {
             startServiceCompat(context, intent);
         } catch (RuntimeException e) {
             Log.w(TAG, "Cannot publish snapshot", e);
-        }
-    }
-
-    /// Очистить snapshot (logout / явная отписка). После этого сервис
-    /// останавливается на следующем poll'е («нет целей»).
-    public static void clearSnapshot(Context context) {
-        if (context == null) return;
-        Intent intent = new Intent(context, ParanoiaForegroundService.class);
-        intent.setAction(ACTION_CLEAR_SNAPSHOT);
-        try {
-            startServiceCompat(context, intent);
-        } catch (RuntimeException e) {
-            Log.w(TAG, "Cannot clear snapshot", e);
         }
     }
 
@@ -367,7 +427,7 @@ public final class ParanoiaForegroundService extends Service {
         final String action = intent != null ? intent.getAction() : null;
         Log.i(TAG, "onStartCommand action=" + action);
         if (ACTION_SET_SNAPSHOT.equals(action)) {
-            handleSnapshotIntent(intent);
+            handleSnapshotIntent(this, intent);
             // Непустой snapshot пришёл → это НЕ logout; пустой publish трактуем как очистку.
             snapshotExplicitlyCleared = SNAPSHOT.get() == null || SNAPSHOT.get().isEmpty();
         } else if (ACTION_CLEAR_SNAPSHOT.equals(action)) {
@@ -466,12 +526,30 @@ public final class ParanoiaForegroundService extends Service {
     }
 
     private void triggerPollAndReschedule() {
+        // "off" — сервис останавливается.
+        if ("off".equals(pollMode(this))) {
+            Log.i(TAG, "poll mode off — stopping service");
+            stop(this);
+            return;
+        }
         // Отменяем прежний alarm ДО постановки нового: иначе при повторном
         // onStartCommand (start/snapshot/foreground-toggle) к ещё-не-сработавшему
         // alarm'у добавляется новый → два alarm'а, интервал опроса дрейфует.
         cancelPollAlarm(this);
+        // В экономном режиме частые ACTION_START от UI (schedulePoll шлёт их
+        // примерно раз в минуту, пока UI-процесс жив) не должны сбрасывать
+        // 5-минутный цикл немедленным опросом — иначе фактический интервал
+        // равен интервалу UI-таймера, а не 5 минутам.
+        if ("battery_saving".equals(pollMode(this))) {
+            long interval = getPollIntervalMs(this);
+            long since = android.os.SystemClock.elapsedRealtime() - lastAutonomousPollMs;
+            if (lastAutonomousPollMs != 0L && since >= 0L && since < interval) {
+                schedulePollAlarm(this, interval - since);
+                return;
+            }
+        }
         runAutonomousPoll();
-        schedulePollAlarm(this, POLL_INTERVAL_MS);
+        schedulePollAlarm(this, getPollIntervalMs(this));
     }
 
     // ── Wake-locked polling через AlarmManager ───────────────────────────
@@ -506,10 +584,16 @@ public final class ParanoiaForegroundService extends Service {
                 Log.i(TAG, "incoming call dismissed by user");
                 return;
             }
+            // Страховка от гонок со stop(): осиротевший alarm в режиме "off"
+            // не перепланирует цепочку (свежий процесс прочитает режим из prefs).
+            if ("off".equals(pollMode(appContext))) {
+                Log.i(TAG, "alarm ignored: poll mode off");
+                return;
+            }
             Log.i(TAG, "alarm received, dispatching poll");
             // Сразу планируем следующий alarm, чтобы цикл не сломался, если
             // текущий poll зависнет в сети или native-вызове.
-            schedulePollAlarm(appContext, POLL_INTERVAL_MS);
+            schedulePollAlarm(appContext, getPollIntervalMs(appContext));
 
             PowerManager pm = (PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
             final PowerManager.WakeLock wakeLock = pm == null ? null
@@ -718,11 +802,13 @@ public final class ParanoiaForegroundService extends Service {
     // (следующий alarm уже запланирован заранее). Зовётся И из alarm-пути
     // (PollAlarmReceiver — рекуррентный, переживает Doze), И из runAutonomousPoll.
     private static void executeFullPoll(Context appContext) {
+        lastAutonomousPollMs = android.os.SystemClock.elapsedRealtime();
         PollResult r = pollNotifications(appContext);
         processPollResult(appContext, r);
         // Слот/wakelock сообщений освобождается СРАЗУ (как до #6) — call-poll уходит
         // в свою задачу со своим guard'ом/wakelock'ом и не задерживает уведомления.
-        if (r.hasTargets) {
+        // Long-poll chain (message + call) включён только в режиме "normal".
+        if (r.hasTargets && useLongPoll(appContext)) {
             scheduleCallPoll(appContext);
             startMessageLongPolls(appContext); // мгновенные сообщения, параллельно
         }
@@ -819,7 +905,7 @@ public final class ParanoiaForegroundService extends Service {
                             String partner = o.optString("partner", "");
                             long n = o.optLong("n", 0L);
                             if (partner.isEmpty() || n <= 0) continue;
-                            anyLit = true;
+                            if (!isMutedPartner(profile, partner)) anyLit = true;
                             // Сдвигаем высшую seq за посчитанные → следующий long-poll ждёт
                             // ГЕНУИННО новые (без tight-loop при непрочитанных).
                             Long base = polled.get(partner);
@@ -928,7 +1014,9 @@ public final class ParanoiaForegroundService extends Service {
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject o = arr.getJSONObject(i);
                     long n = o.optLong("n", 0L);
-                    if (n > 0) { result.total += n; result.pendingPeers++; }
+                    if (n <= 0 || isMutedPartner(profile, o.optString("partner", ""))) continue;
+                    result.total += n;
+                    result.pendingPeers++;
                 }
             } catch (JSONException e) {
                 Log.w(TAG, "bad notify_multi json", e);
@@ -1103,7 +1191,7 @@ public final class ParanoiaForegroundService extends Service {
         }
     }
 
-    private static void handleSnapshotIntent(Intent intent) {
+    private static void handleSnapshotIntent(Context context, Intent intent) {
         if (intent == null) return;
         String json = intent.getStringExtra(EXTRA_SNAPSHOT_JSON);
         if (json == null || json.isEmpty()) {
@@ -1136,7 +1224,7 @@ public final class ParanoiaForegroundService extends Service {
                     String partner = d.optString("partnerServerId").trim();
                     if (partner.isEmpty()) continue;
                     long seq = d.optLong("seq", 0L);
-                    dialogs.add(new DialogHint(partner, seq < 0 ? 0 : seq));
+                    dialogs.add(new DialogHint(partner, seq < 0 ? 0 : seq, d.optBoolean("muted", false)));
                 }
                 if (dialogs.isEmpty()) continue;
 
@@ -1148,7 +1236,11 @@ public final class ParanoiaForegroundService extends Service {
             SNAPSHOT.set(new Snapshot(profiles));
             int total = 0;
             for (ProfileHint p : profiles) total += p.dialogs.size();
-            Log.i(TAG, "snapshot updated: profiles=" + profiles.size() + " dialogs=" + total);
+            // Режим опроса из snapshot (от UI-процесса). Дефолт "normal" для
+            // совместимости со старыми APK. applyPollMode валидирует и персистит.
+            applyPollMode(context, root.optString("pollMode", "normal"));
+            Log.i(TAG, "snapshot updated: profiles=" + profiles.size() + " dialogs=" + total
+                    + " pollMode=" + pollMode(context));
         } catch (JSONException e) {
             Log.w(TAG, "Cannot parse snapshot JSON", e);
         }

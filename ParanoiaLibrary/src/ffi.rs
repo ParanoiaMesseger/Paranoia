@@ -43,9 +43,47 @@ macro_rules! ffi_try {
 // (future дропается, reqwest рвёт соединение) → потоки джойнятся мгновенно.
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// Событийная отмена long-poll'ов (02#16): вместо поллинга флага каждые 100 мс (150-300
+// лишних пробуждений рантайма на каждый опрос, а в фон-процессе `:notifications` флаг
+// вообще не взводится → вечные 10 Гц вхолостую) ждём Notify. Ноль пробуждений до
+// реального shutdown. get_or_init — Notify не const-конструируется в static.
+static SHUTDOWN_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+
+fn shutdown_notify() -> &'static tokio::sync::Notify {
+    SHUTDOWN_NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+// Общий процессный рантайм для ОДИНОЧНЫХ фоновых long-poll'ов (keystone C, 02#15/34):
+// service_notify_*/service_call_poll раньше поднимали новый Runtime::new() (пул воркеров
+// по числу ядер + blocking-пул, затем всё уничтожалось) на КАЖДЫЙ 15-30с/12с опрос —
+// постоянный перерасход CPU/памяти на батарейно-критичном фоне. Теперь один рантайм на
+// процесс, worker_threads(2) хватает на конкурентные notify+call long-poll'ы, треды
+// паркуются в простое; НЕ дропается (нет блокирующего Runtime::drop на shutdown).
+// Прецедент — VOIP_RUNTIME (voip_ffi.rs). Хендл-рантайм (per-login) и холодные
+// register/keygen НЕ трогаем — они не в горячем цикле.
+static POLL_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
+pub(crate) fn poll_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    if let Some(rt) = POLL_RUNTIME.get() {
+        return Some(rt);
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .thread_name("paranoia-poll")
+        .build()
+        .ok()?;
+    let _ = POLL_RUNTIME.set(rt); // при гонке инициализации лишний рантайм дропнется здесь
+    POLL_RUNTIME.get()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn paranoia_begin_shutdown() {
+    // Порядок важен: сначала флаг (его видит re-check в race_shutdown), потом будим
+    // уже зарегистрированных ждущих. Пара «флаг перед notify» + «enable перед load»
+    // в race_shutdown исключает потерю пробуждения.
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    shutdown_notify().notify_waiters();
 }
 
 /// Гонка long-poll-future против флага завершения. `Some(_)` — future завершился
@@ -56,16 +94,18 @@ pub(crate) async fn race_shutdown<F: std::future::Future>(fut: F) -> Option<F::O
     if SHUTTING_DOWN.load(Ordering::SeqCst) {
         return None;
     }
+    // Регистрируем ждущего (enable) ДО повторной проверки флага: если shutdown взвёлся
+    // между быстрым путём и регистрацией, notify_waiters мог не застать нас — но флаг
+    // (взводится ПЕРЕД notify_waiters) поймается здесь. Иначе — разбудит select ниже.
+    let notified = shutdown_notify().notified();
+    tokio::pin!(notified);
+    let already = notified.as_mut().enable();
+    if already || SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return None;
+    }
     tokio::select! {
         r = fut => Some(r),
-        _ = async {
-            loop {
-                if SHUTTING_DOWN.load(Ordering::SeqCst) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        } => None,
+        _ = notified => None,
     }
 }
 
@@ -230,6 +270,20 @@ pub struct ParanoiaHandle {
     pub(crate) active_topic: std::sync::Mutex<Option<String>>,
 }
 
+// Инвариант, на котором держится сужение ffiMutex на C++-стороне (см. 01#32):
+// хэндл шарится между потоками как `*mut ParanoiaHandle` (raw pointer через C FFI
+// ОБХОДИТ проверки Send/Sync компилятора), поэтому конкурентный доступ без общего
+// лока безопасен ТОЛЬКО если хэндл действительно Send+Sync. Сейчас это так: все
+// поля синхронизированы — ParanoiaClient = Arc<ClientConfig>+Arc<Transport>+
+// Arc<LocalStore> (Transport: reqwest::Client+RwLock; LocalStore: Mutex<Connection>
+// → доступ к БД сериализуется внутри), Runtime и active_topic: Mutex — Send+Sync.
+// Ассерт ЛОМАЕТ сборку, если кто-то добавит в хэндл !Send/!Sync-поле, — иначе это
+// стало бы латентным UB в конкурентном доступе. Комментарии «handle !Send» устарели.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ParanoiaHandle>();
+};
+
 impl ParanoiaHandle {
     pub(crate) fn client(&self) -> &ParanoiaClient {
         &self.client
@@ -393,9 +447,9 @@ pub extern "C" fn paranoia_http_download(
                 return -1;
             }
         };
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(_) => {
+        let rt = match poll_runtime() {
+            Some(rt) => rt,
+            None => {
                 set_last_error("runtime_error");
                 return -1;
             }
@@ -1061,96 +1115,12 @@ pub extern "C" fn paranoia_set_active_topic(
     })
 }
 
-/// Отправить файл, прочитав его с локального пути, через keyring-конфигурацию.
-/// Возвращает JSON-массив сообщений или NULL при ошибке.
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_send_file_json_keyring(
-    handle: *mut ParanoiaHandle,
-    user_a: *const c_char,
-    user_b: *const c_char,
-    keyring_json: *const c_char,
-    file_path: *const c_char,
-    mime_type: *const c_char,
-) -> *mut c_char {
-    paranoia_send_file_json_keyring_with_progress(
-        handle,
-        user_a,
-        user_b,
-        keyring_json,
-        file_path,
-        mime_type,
-        None,
-        std::ptr::null_mut(),
-    )
-}
-
 /// Тип callback'а для прогресса отправки файла. chunk_index — индекс уже
 /// отосланного chunk'а (1-based), total — общее число chunk'ов. user_data —
 /// opaque-указатель, переданный вызывающей стороной (например, id transfer'а
 /// или this-pointer).
 pub type ProgressCallback =
     extern "C" fn(chunk_index: u32, total: u32, user_data: *mut std::ffi::c_void);
-
-/// То же, что paranoia_send_file_json_keyring, но дополнительно дёргает
-/// `progress` (если задан) после успешной отправки каждого chunk'а. callback
-/// гарантированно вызывается из runtime-потока FFI; вызывающая сторона должна
-/// маршалить результат обратно в свой UI-thread.
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_send_file_json_keyring_with_progress(
-    handle: *mut ParanoiaHandle,
-    user_a: *const c_char,
-    user_b: *const c_char,
-    keyring_json: *const c_char,
-    file_path: *const c_char,
-    mime_type: *const c_char,
-    progress: Option<ProgressCallback>,
-    user_data: *mut std::ffi::c_void,
-) -> *mut c_char {
-    // user_data приходит как *mut c_void, но захватывать его в FnMut напрямую
-    // не получается (raw-указатели не Send). Пакуем в usize.
-    let user_data_addr = user_data as usize;
-    ffi_catch_ptr("send_error", || {
-        clear_last_error();
-        let path = ffi_try!(cstr_arg(file_path), invalid_argument_ptr());
-        let mime_type = cstr_arg(mime_type).unwrap_or_default();
-        let filename = std::path::Path::new(&path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("attachment.bin")
-            .to_string();
-        let mime_type = if mime_type.trim().is_empty() {
-            "application/octet-stream".to_string()
-        } else {
-            mime_type
-        };
-
-        let on_progress = move |chunk_index: u32, total: u32| {
-            if let Some(cb) = progress {
-                cb(chunk_index, total, user_data_addr as *mut std::ffi::c_void);
-            }
-        };
-
-        with_keyring_dialogue(
-            handle,
-            user_a,
-            user_b,
-            keyring_json,
-            std::ptr::null_mut(),
-            |h, dialogue| match h.rt.block_on(dialogue.send_file_path_with_progress(
-                filename,
-                mime_type,
-                std::path::Path::new(&path),
-                on_progress,
-            )) {
-                Ok(msgs) => messages_to_c_string(&msgs),
-                Err(e) => {
-                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
-                    std::ptr::null_mut()
-                }
-            },
-        )
-    })
-}
 
 /// Отправить сообщение-заголовок фото-группы (мозаики): `group_id` + подпись
 /// (`caption` может быть пустой). Сами фото идут отдельными вызовами
@@ -1186,7 +1156,7 @@ pub extern "C" fn paranoia_send_photo_group_json_keyring(
     })
 }
 
-/// То же, что [`paranoia_send_file_json_keyring_with_progress`], но помечает
+/// Как обычная отправка файла (с прогрессом), но помечает
 /// вложение тегом `group_id` (фото отправляется в составе мозаики). Вид
 /// фиксируется как изображение. Возвращает JSON-массив сообщений или NULL.
 #[unsafe(no_mangle)]
@@ -1235,98 +1205,6 @@ pub extern "C" fn paranoia_send_photo_grouped_file_json_keyring_with_progress(
                 mime_type,
                 std::path::Path::new(&path),
                 group_id,
-                on_progress,
-            )) {
-                Ok(msgs) => messages_to_c_string(&msgs),
-                Err(e) => {
-                    set_last_error(&classify_send_error(&anyhow_error_chain(&e)));
-                    std::ptr::null_mut()
-                }
-            },
-        )
-    })
-}
-
-/// Лимиты файлов с сервера (blob `info`): JSON `{max_history_file_size,
-/// large_file_max, ephemeral_retention_secs}` (байты/секунды) или NULL.
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_blob_limits_json_keyring(
-    handle: *mut ParanoiaHandle,
-    user_a: *const c_char,
-    user_b: *const c_char,
-    keyring_json: *const c_char,
-) -> *mut c_char {
-    ffi_catch_ptr("blob_error", || {
-        clear_last_error();
-        with_keyring_dialogue(
-            handle,
-            user_a,
-            user_b,
-            keyring_json,
-            std::ptr::null_mut(),
-            |h, dialogue| match h.rt.block_on(dialogue.blob_limits()) {
-                Ok(l) => {
-                    let v = serde_json::json!({
-                        "max_history_file_size": l.max_history_file_size,
-                        "large_file_max": l.large_file_max,
-                        "ephemeral_retention_secs": l.ephemeral_retention_secs,
-                    });
-                    json_value_to_c_string(v)
-                }
-                Err(e) => {
-                    set_last_error(&anyhow_error_chain(&e));
-                    std::ptr::null_mut()
-                }
-            },
-        )
-    })
-}
-
-/// Отправить БОЛЬШОЙ файл эфемерно (вне истории, через blob-хранилище с TTL).
-/// Тело уходит чанками в blob, в историю пушится reference-сообщение. Прогресс —
-/// как у send_file_with_progress. Возвращает JSON-массив сообщений или NULL
-/// (`file_too_large`, если файл больше `large_file_max`).
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_send_large_file_json_keyring_with_progress(
-    handle: *mut ParanoiaHandle,
-    user_a: *const c_char,
-    user_b: *const c_char,
-    keyring_json: *const c_char,
-    file_path: *const c_char,
-    mime_type: *const c_char,
-    progress: Option<ProgressCallback>,
-    user_data: *mut std::ffi::c_void,
-) -> *mut c_char {
-    let user_data_addr = user_data as usize;
-    ffi_catch_ptr("send_error", || {
-        clear_last_error();
-        let path = ffi_try!(cstr_arg(file_path), invalid_argument_ptr());
-        let mime_type = cstr_arg(mime_type).unwrap_or_default();
-        let filename = std::path::Path::new(&path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("attachment.bin")
-            .to_string();
-        let mime_type = if mime_type.trim().is_empty() {
-            "application/octet-stream".to_string()
-        } else {
-            mime_type
-        };
-        let on_progress = move |chunk_index: u32, total: u32| {
-            if let Some(cb) = progress {
-                cb(chunk_index, total, user_data_addr as *mut std::ffi::c_void);
-            }
-        };
-        with_keyring_dialogue(
-            handle,
-            user_a,
-            user_b,
-            keyring_json,
-            std::ptr::null_mut(),
-            |h, dialogue| match h.rt.block_on(dialogue.send_large_file_path_with_progress(
-                filename,
-                mime_type,
-                std::path::Path::new(&path),
                 on_progress,
             )) {
                 Ok(msgs) => messages_to_c_string(&msgs),
@@ -1552,47 +1430,8 @@ pub extern "C" fn paranoia_notify_count_wait_keyring(
     })
 }
 
-/// Как [`paranoia_notify_count_keyring`], но НЕ считает сообщения, уже прочитанные
-/// мной на другом устройстве (базой берёт max(локальный seq, мой read-seq с
-/// сервера через arrived). Для сервиса уведомлений — не уведомлять о прочитанном.
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_notify_unread_count_keyring(
-    handle: *mut ParanoiaHandle,
-    user_a: *const c_char,
-    user_b: *const c_char,
-    keyring_json: *const c_char,
-    out_count: *mut u64,
-) -> i32 {
-    ffi_catch_i32("notify_error", || {
-        clear_last_error();
-        if out_count.is_null() {
-            return invalid_argument_i32();
-        }
-        with_keyring_dialogue(
-            handle,
-            user_a,
-            user_b,
-            keyring_json,
-            -1,
-            |h, dialogue| match h.rt.block_on(dialogue.notify_unread_count()) {
-                Ok(count) => {
-                    unsafe { *out_count = count };
-                    0
-                }
-                Err(e) => {
-                    set_last_error(&classify_network_error(
-                        &anyhow_error_chain(&e),
-                        "notify_error",
-                    ));
-                    -1
-                }
-            },
-        )
-    })
-}
-
 /// MULTI-notify (in-process, по сессионному handle): ОДИН long-poll-запрос на N
-/// диалогов вместо N отдельных `paranoia_notify_unread_count_keyring`. Снимает
+/// диалогов вместо N отдельных одиночных unread-запросов. Снимает
 /// «N диалогов = N запросов» (батарея фон-сервиса / поллинг ленты). Курсор seq
 /// берётся локально из стора; сервер сам отсекает прочитанное (receipt-floor) —
 /// корректная непрочитанность без per-диалог `/arrived`.
@@ -2111,40 +1950,6 @@ pub extern "C" fn paranoia_set_signed_masking_profile(
         let signed = ffi_try!(cstr_arg(signed_json), invalid_argument_i32());
         let trusted = ffi_try!(cstr_arg(trusted_pubkey_b64), invalid_argument_i32());
         match h.client.set_signed_masking_profile(&signed, &trusted) {
-            Ok(()) => 0,
-            Err(e) => {
-                set_last_error(&anyhow_error_chain(&e));
-                -1
-            }
-        }
-    })
-}
-
-/// Скачать подписанный профиль с ноды (`GET url`, опц. Bearer `bearer_token` —
-/// NULL/"" без токена), проверить подпись `trusted_pubkey_b64` и применить.
-/// 0=ok, -1=error (см. paranoia_last_error()).
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_fetch_and_apply_signed_profile(
-    handle: *mut ParanoiaHandle,
-    url: *const c_char,
-    trusted_pubkey_b64: *const c_char,
-    bearer_token: *const c_char,
-) -> i32 {
-    ffi_catch_i32("fetch_masking_profile_error", || {
-        clear_last_error();
-        let h = ffi_try!(handle_ref(handle), invalid_argument_i32());
-        let url = ffi_try!(cstr_arg(url), invalid_argument_i32());
-        let trusted = ffi_try!(cstr_arg(trusted_pubkey_b64), invalid_argument_i32());
-        let bearer = if bearer_token.is_null() {
-            None
-        } else {
-            cstr_arg(bearer_token).ok()
-        };
-        match h.rt.block_on(h.client.fetch_and_apply_signed_profile(
-            &url,
-            &trusted,
-            bearer.as_deref(),
-        )) {
             Ok(()) => 0,
             Err(e) => {
                 set_last_error(&anyhow_error_chain(&e));
@@ -3170,76 +2975,6 @@ pub extern "C" fn paranoia_vault_decrypt_json(path: *const c_char) -> *mut c_cha
     })
 }
 
-/// Зашифровать файл-attachment на per-file ключе HKDF(files_key, salt_str, "attachment-v1").
-/// Читает `src_path`, пишет результат атомарно в `dst_path`.
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_vault_encrypt_attachment(
-    salt_str: *const c_char,
-    src_path: *const c_char,
-    dst_path: *const c_char,
-) -> i32 {
-    ffi_catch_i32("vault_attach_encrypt_error", || {
-        clear_last_error();
-        let salt = ffi_try!(cstr_arg(salt_str), invalid_argument_i32());
-        let src = ffi_try!(cstr_arg(src_path), invalid_argument_i32());
-        let dst = ffi_try!(cstr_arg(dst_path), invalid_argument_i32());
-        let plaintext = match std::fs::read(&src) {
-            Ok(b) => b,
-            Err(e) => {
-                set_last_error(&format!("read {src}: {e}"));
-                return -1;
-            }
-        };
-        match crate::local_vault::encrypt_attachment(salt.as_bytes(), &plaintext) {
-            Ok(sealed) => {
-                if let Err(e) = atomic_write_bytes(&dst, &sealed) {
-                    set_last_error(&anyhow_error_chain(&e));
-                    return -1;
-                }
-                0
-            }
-            Err(e) => {
-                set_last_error(&anyhow_error_chain(&e));
-                -1
-            }
-        }
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_vault_decrypt_attachment(
-    salt_str: *const c_char,
-    src_path: *const c_char,
-    dst_path: *const c_char,
-) -> i32 {
-    ffi_catch_i32("vault_attach_decrypt_error", || {
-        clear_last_error();
-        let salt = ffi_try!(cstr_arg(salt_str), invalid_argument_i32());
-        let src = ffi_try!(cstr_arg(src_path), invalid_argument_i32());
-        let dst = ffi_try!(cstr_arg(dst_path), invalid_argument_i32());
-        let sealed = match std::fs::read(&src) {
-            Ok(b) => b,
-            Err(e) => {
-                set_last_error(&format!("read {src}: {e}"));
-                return -1;
-            }
-        };
-        match crate::local_vault::decrypt_attachment(salt.as_bytes(), &sealed) {
-            Ok(plaintext) => {
-                if let Err(e) = atomic_write_bytes(&dst, &plaintext) {
-                    set_last_error(&anyhow_error_chain(&e));
-                    return -1;
-                }
-                0
-            }
-            Err(e) => {
-                set_last_error(&anyhow_error_chain(&e));
-                -1
-            }
-        }
-    })
-}
-
 // ── Background notification poll (без SQLCipher / vault) ─────────────────────
 //
 // Используется автономным notifications-сервисом на Android: у сервиса нет
@@ -3290,9 +3025,9 @@ pub extern "C" fn paranoia_service_notify_count(
         let msg = format!("{sender}{partner}{seq}");
         let sig = crate::crypto::sign(&signing_key, msg.as_bytes());
 
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(_) => {
+        let rt = match poll_runtime() {
+            Some(rt) => rt,
+            None => {
                 set_last_error("runtime_error");
                 return -1;
             }
@@ -3365,9 +3100,9 @@ pub extern "C" fn paranoia_service_notify_count_wait(
         let msg = format!("{sender}{partner}{seq}");
         let sig = crate::crypto::sign(&signing_key, msg.as_bytes());
 
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(_) => {
+        let rt = match poll_runtime() {
+            Some(rt) => rt,
+            None => {
                 set_last_error("runtime_error");
                 return -1;
             }
@@ -3480,9 +3215,9 @@ pub extern "C" fn paranoia_service_notify_multi_wait(
         }
         let sig = crate::crypto::sign(&signing_key, signed.as_bytes());
 
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(_) => {
+        let rt = match poll_runtime() {
+            Some(rt) => rt,
+            None => {
                 set_last_error("runtime_error");
                 return -1;
             }
@@ -3522,18 +3257,4 @@ pub extern "C" fn paranoia_service_notify_multi_wait(
             }
         }
     })
-}
-
-fn atomic_write_bytes(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
-    let p = std::path::Path::new(path);
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = match p.file_name() {
-        Some(name) => p.with_file_name(format!("{}.tmp", name.to_string_lossy())),
-        None => anyhow::bail!("invalid path: {path}"),
-    };
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, p)?;
-    Ok(())
 }

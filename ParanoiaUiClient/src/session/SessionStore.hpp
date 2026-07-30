@@ -12,7 +12,6 @@ public:
     static SessionStore *instance();
 
     std::shared_ptr<ServerSession> activeSession() const;
-    std::shared_ptr<ServerSession> sessionFor(const QString &server, const QString &username) const;
     std::shared_ptr<ServerSession> sessionForProfile(const QString &profileId) const;
     const std::vector<std::shared_ptr<ServerSession>> &allSessions() const { return m_sessions; }
 

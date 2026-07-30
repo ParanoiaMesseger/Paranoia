@@ -5,18 +5,25 @@ namespace Paths
 {
     QDir appDataRoot()
     {
-        QString root = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-        if (root.isEmpty()) root = QDir::currentPath();
-        QDir dir(root);
-        dir.mkpath(QStringLiteral("."));
-        return dir;
+        // Путь статичен на всю жизнь процесса (02#26): QStandardPaths-лукап + mkpath
+        // корня делаем ОДИН раз (thread-safe static init), дальше лишь оборачиваем строку.
+        static const QString root = []() {
+            QString r = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+            if (r.isEmpty()) r = QDir::currentPath();
+            QDir(r).mkpath(QStringLiteral("."));
+            return r;
+        }();
+        return QDir(root);
     }
 
     QDir profilesRoot()
     {
-        QDir root = appDataRoot();
-        root.mkpath(QStringLiteral("profiles"));
-        return QDir(root.filePath(QStringLiteral("profiles")));
+        static const QString path = []() {
+            QDir root = appDataRoot();
+            root.mkpath(QStringLiteral("profiles"));
+            return root.filePath(QStringLiteral("profiles"));
+        }();
+        return QDir(path);
     }
 
     QString profilesManifest() { return appDataRoot().filePath(QStringLiteral("profiles.json")); }
@@ -27,14 +34,19 @@ namespace Paths
 
     bool isVaultProtected(const QString &path)
     {
-        const QString canonical = QDir::cleanPath(path);
-        if (canonical == QDir::cleanPath(vaultState())) return false; // сам vault.json — plaintext
-        if (canonical == QDir::cleanPath(profilesManifest())) return true;
-        if (canonical == QDir::cleanPath(deviceKey())) return true;
-        if (canonical == QDir::cleanPath(pendingRegistrationKey())) return true;
-        if (canonical == QDir::cleanPath(admins())) return true;
-        const QString profilesRootPath = QDir::cleanPath(profilesRoot().path());
-        if (canonical.startsWith(profilesRootPath + QLatin1Char('/'))) return true;
+        // Эталонные пути статичны → чистим их ОДИН раз (02#26); зовётся в начале
+        // каждого readAll/writeFile, включая каждый saveDialogs.
+        static const QString vaultC        = QDir::cleanPath(vaultState());
+        static const QString manifestC     = QDir::cleanPath(profilesManifest());
+        static const QString deviceC       = QDir::cleanPath(deviceKey());
+        static const QString pendingC      = QDir::cleanPath(pendingRegistrationKey());
+        static const QString adminsC       = QDir::cleanPath(admins());
+        static const QString profilesRootC = QDir::cleanPath(profilesRoot().path());
+        const QString canonical            = QDir::cleanPath(path);
+        if (canonical == vaultC) return false; // сам vault.json — plaintext
+        if (canonical == manifestC || canonical == deviceC || canonical == pendingC || canonical == adminsC)
+            return true;
+        if (canonical.startsWith(profilesRootC + QLatin1Char('/'))) return true;
         return false;
     }
 

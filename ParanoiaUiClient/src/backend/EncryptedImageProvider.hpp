@@ -19,8 +19,13 @@ public:
     // (~150-400 КБ JPEG, см. makePreviewBytes в ChatBackend), поэтому 128 МБ —
     // это сотни фото без вытеснения. Храним ЭНКОДНЫЕ байты (не декод), декод
     // живёт в scene-graph отдельно, так что для RAM это умеренно. Достигнут —
-    // QCache вытесняет LRU.
+    // QCache вытесняет LRU. На мобильных бюджет ниже: сверху ложатся текстуры
+    // scene-graph, а 128 МБ энкодных байт — уже зона OOM-килла.
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+    static constexpr int kMaxBytesBudget = 48 * 1024 * 1024;
+#else
     static constexpr int kMaxBytesBudget = 128 * 1024 * 1024;
+#endif
 
     EncryptedImageProvider()
         : QQuickImageProvider(QQuickImageProvider::Image), m_cache(kMaxBytesBudget) {}

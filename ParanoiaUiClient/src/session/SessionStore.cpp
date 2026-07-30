@@ -17,6 +17,11 @@ SessionStore::SessionStore(QObject *parent) : QObject(parent) {}
 
 void SessionStore::shutdown()
 {
+    // Дожидаемся фоновой записи dialogs.json каждой сессии, ПОКА объекты живы —
+    // иначе последний снимок (черновик/lastMsg/новый ключ) мог не успеть на диск до
+    // выхода процесса. flush() блокирует лишь на время текущей записи (мс).
+    for (const auto &s : m_sessions)
+        if (s) s->flushDialogs();
     // Гасим сессии, пока жив event-loop: дроп shared_ptr<ServerSession> →
     // ParanoiaFFI → Rust paranoia_client_free → чистое закрытие SQLCipher-БД здесь,
     // а не в atexit. Сигналы НЕ шлём — приложение уже завершается, реагировать
@@ -26,13 +31,6 @@ void SessionStore::shutdown()
 }
 
 std::shared_ptr<ServerSession> SessionStore::activeSession() const { return m_activeSession; }
-
-std::shared_ptr<ServerSession> SessionStore::sessionFor(const QString &server, const QString &username) const
-{
-    for (const auto &s : m_sessions)
-        if (s->server == server && s->username == username) return s;
-    return nullptr;
-}
 
 std::shared_ptr<ServerSession> SessionStore::sessionForProfile(const QString &profileId) const
 {

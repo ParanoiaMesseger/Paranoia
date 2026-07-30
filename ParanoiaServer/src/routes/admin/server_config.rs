@@ -69,7 +69,17 @@ pub async fn set(State(state): State<Arc<AppState>>, Json(env): Json<AdminEnvelo
         cfg.turn_relay_port_range = string_or_null(v);
     }
 
-    if let Err(e) = cfg.save(&config_path()) {
+    // Сериализуем под write-локом, отпускаем гард и пишем асинхронно — не держим
+    // config-RwLock во время блокирующего диск-I/O (01-freezes п.2).
+    let data = match cfg.to_pretty_json() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Failed to serialize config after admin set: {e}");
+            return err_json("config_save_failed");
+        }
+    };
+    drop(cfg);
+    if let Err(e) = crate::config::Config::write_file(&config_path(), data).await {
         warn!("Failed to persist config after admin set: {e}");
         return err_json("config_save_failed");
     }

@@ -25,7 +25,6 @@ use crate::ParanoiaClient;
 use crate::transport::{CallEnvelopeIn, CoreCallPoll, CoreCallSignal};
 use crate::voip::crypto::{Role, StreamKeys};
 use crate::voip::signaling::{CallSignalKind, open as signaling_open, seal as signaling_seal};
-use crate::voip::stun::discover_reflexive;
 use crate::voip::transport::{SessionParams, VideoOutboundPacket, spawn_session};
 
 /// Создать UdpSocket для VoIP сессии. Если `bind_addr` это IPv4-wildcard
@@ -171,109 +170,7 @@ unsafe fn runtime_ref<'a>(handle: *mut crate::ffi::ParanoiaHandle) -> Option<&'a
 
 // ── /call/signal ───────────────────────────────────────────────────────
 
-/// Отправить один сигнальный конверт.
-///
-/// - `from_user`, `to_user`: отправитель/получатель (зарегистрированные на сервере)
-/// - `master_key_b64`: dialog master key (32 байта base64) — им шифруется payload
-/// - `kind`: `0=Offer, 1=Answer, 2=Hangup, 3=Ice`
-/// - `payload_json`: JSON-тело соответствующей структуры (см. voip::signaling)
-///
-/// Возвращает 0 при успехе, -1 при ошибке (см. `paranoia_last_error`).
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_call_signal_send(
-    handle: *mut crate::ffi::ParanoiaHandle,
-    from_user: *const c_char,
-    to_user: *const c_char,
-    master_key_b64: *const c_char,
-    kind: u8,
-    payload_json: *const c_char,
-) -> i32 {
-    ffi_catch_i32("call_signal_panic", || {
-        let from = match unsafe { cstr(from_user) } {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                set_last_error("invalid_from_user");
-                return -1;
-            }
-        };
-        let to = match unsafe { cstr(to_user) } {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                set_last_error("invalid_to_user");
-                return -1;
-            }
-        };
-        let key = match unsafe { cstr(master_key_b64) }
-            .as_deref()
-            .and_then(decode_b64_32)
-        {
-            Some(k) => k,
-            None => {
-                set_last_error("invalid_master_key");
-                return -1;
-            }
-        };
-        if CallSignalKind::from_byte(kind).is_none() {
-            set_last_error("invalid_signal_kind");
-            return -1;
-        }
-        let payload = match unsafe { cstr(payload_json) } {
-            Some(s) => s,
-            None => {
-                set_last_error("invalid_payload");
-                return -1;
-            }
-        };
-        let client = match unsafe { client_ref(handle) } {
-            Some(c) => c,
-            None => {
-                set_last_error("invalid_handle");
-                return -1;
-            }
-        };
-        let rt = match unsafe { runtime_ref(handle) } {
-            Some(r) => r,
-            None => {
-                set_last_error("invalid_handle");
-                return -1;
-            }
-        };
-
-        // Запечатать payload dialog master key'ом.
-        let sealed = match signaling_seal(&key, payload.as_bytes()) {
-            Ok(v) => v,
-            Err(_) => {
-                set_last_error("signaling_seal_failed");
-                return -1;
-            }
-        };
-        let payload_b64 = B64.encode(&sealed);
-        let ts_ms = now_ms();
-
-        // Подпись соответствует серверной проверке: sender+recver+kind+ts_ms+payload_b64.
-        let signed = format!("{from}{to}{kind}{ts_ms}{payload_b64}");
-        let sig = crate::crypto::sign(&client.config().signing_key, signed.as_bytes());
-
-        let core = CoreCallSignal {
-            sender: from,
-            recver: to,
-            kind,
-            payload: sealed,
-            ts_ms,
-            sig,
-        };
-
-        match rt.block_on(client.transport().call_signal(&core)) {
-            Ok(()) => 0,
-            Err(e) => {
-                set_last_error(&format!("call_signal_failed: {e}"));
-                -1
-            }
-        }
-    })
-}
-
-/// Тип callback'а для async-варианта `paranoia_call_signal_send`.
+/// Тип callback'а для async-отправки сигналинга.
 /// `status == 0` — успех, `status != 0` — ошибка; `error_message` валиден
 /// только во время вызова, после возврата указатель использовать нельзя
 /// (caller обязан скопировать строку при необходимости). Callback вызывается
@@ -281,11 +178,12 @@ pub extern "C" fn paranoia_call_signal_send(
 pub type ParanoiaCallSignalCb =
     extern "C" fn(userdata: *mut std::ffi::c_void, status: i32, error_message: *const c_char);
 
-/// Асинхронный вариант [`paranoia_call_signal_send`]: сразу возвращает
+/// Отправить один сигнальный конверт (единственный путь, async): сразу возвращает
 /// управление, фактическая HTTP-отправка выполняется в tokio-runtime, по
 /// завершении вызывается `cb(userdata, status, err_msg)`.
 ///
-/// Параметры идентичны синхронному варианту, добавлены только `cb` и `userdata`.
+/// Помимо параметров сигнала (from/to/master_key_b64/kind/payload_json) задаются
+/// `cb` и `userdata`.
 /// `cb` может быть NULL — тогда результат отправки никому не сообщается
 /// (fire-and-forget).
 ///
@@ -631,9 +529,10 @@ pub extern "C" fn paranoia_service_call_poll(
         };
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
 
-        let rt = match Runtime::new() {
-            Ok(r) => r,
-            Err(_) => {
+        // Общий процессный poll-рантайм вместо Runtime::new() на каждый 12с опрос (02#34).
+        let rt = match crate::ffi::poll_runtime() {
+            Some(r) => r,
+            None => {
                 set_last_error("runtime_error");
                 return ptr::null_mut();
             }
@@ -1044,8 +943,7 @@ pub extern "C" fn paranoia_call_session_set_peer(
 }
 
 /// Послать STUN Binding Request через UDP-сокет уже-запущенной сессии и
-/// вернуть reflexive `"ip:port"`. В отличие от `paranoia_stun_discover` (с
-/// собственным сокетом), это даёт reflexive *того же* порта, что использует
+/// вернуть reflexive `"ip:port"` *того же* порта, что использует
 /// сессия — критично для NAT-traversal'а через ICE-кандидаты.
 ///
 /// Возвращает строку или NULL при ошибке. Освобождать `paranoia_free_string`.
@@ -1460,73 +1358,3 @@ pub extern "C" fn paranoia_call_session_stop(session: *mut ParanoiaCallSession) 
     }));
 }
 
-// ── STUN ───────────────────────────────────────────────────────────────
-
-/// Определить публичный (reflexive) IP:port через один Binding Request к
-/// STUN-серверу. Шлёт запрос с локального `local_bind` (например
-/// `"0.0.0.0:0"`), ждёт ответ до `timeout_ms`.
-///
-/// Возвращает строку `"ip:port"` или NULL при ошибке (см. `paranoia_last_error`).
-/// Освобождать через `paranoia_free_string`.
-#[unsafe(no_mangle)]
-pub extern "C" fn paranoia_stun_discover(
-    local_bind: *const c_char,
-    stun_server: *const c_char,
-    timeout_ms: u32,
-) -> *mut c_char {
-    ffi_catch_ptr("stun_discover_panic", || {
-        let bind = match unsafe { cstr(local_bind) } {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                set_last_error("invalid_local_bind");
-                return ptr::null_mut();
-            }
-        };
-        let server_s = match unsafe { cstr(stun_server) } {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                set_last_error("invalid_stun_server");
-                return ptr::null_mut();
-            }
-        };
-        let server: SocketAddr = match server_s.to_socket_addrs().ok().and_then(|mut a| a.next()) {
-            Some(p) => p,
-            None => {
-                set_last_error("stun_server_parse_failed");
-                return ptr::null_mut();
-            }
-        };
-        let bind_addr: SocketAddr = match bind.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                set_last_error("local_bind_parse_failed");
-                return ptr::null_mut();
-            }
-        };
-
-        let rt = match voip_runtime() {
-            Some(r) => r,
-            None => {
-                set_last_error("runtime_error");
-                return ptr::null_mut();
-            }
-        };
-        let result = rt.block_on(async move {
-            let sock = bind_call_socket(bind_addr)?;
-            let reflexive = discover_reflexive(
-                &sock,
-                server,
-                std::time::Duration::from_millis(timeout_ms as u64),
-            )
-            .await?;
-            anyhow::Ok(reflexive.to_string())
-        });
-        match result {
-            Ok(s) => string_to_c(s),
-            Err(e) => {
-                set_last_error(&format!("stun_discover_failed: {e}"));
-                ptr::null_mut()
-            }
-        }
-    })
-}

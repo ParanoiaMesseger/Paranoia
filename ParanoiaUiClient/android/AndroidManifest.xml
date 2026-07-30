@@ -53,6 +53,8 @@
         android:roundIcon="@mipmap/icon_round"
         android:requestLegacyExternalStorage="true"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupOnly="false">
         <!-- Единственная активити приложения — подкласс QtActivity (см.
              ParanoiaActivity.java, добивает зависший Qt-shutdown). И иконка

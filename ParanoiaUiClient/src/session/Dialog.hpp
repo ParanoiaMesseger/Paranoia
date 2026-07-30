@@ -10,7 +10,6 @@ struct DialogKeyEntry {
 class Dialog
 {
 public:
-    static QByteArray deriveKey(const QString &sharedSecret);
     static QList<Dialog> loadFromPath(const QString &path);
     static void saveToPath(const QString &path, const QList<Dialog> &dialogs);
 
@@ -39,4 +38,8 @@ public:
     // при входе. Стабильные сентинелы: "__all__"/"__main__" (см. ChatPage), либо имя
     // темы. Локальное, не синхронизируется. Пусто → "__all__" (все темы).
     QString lastTopic;
+    // Уведомления по диалогу отключены: диалог остаётся в списке, бейдж
+    // непрочитанного считается, но системные уведомления не показываются.
+    // Локальное, не синхронизируется.
+    bool notificationsMuted = false;
 };

@@ -190,9 +190,6 @@ impl DialogueKey {
             }
         }
     }
-    pub fn participants(&self) -> (&str, &str) {
-        (&self.a, &self.b)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

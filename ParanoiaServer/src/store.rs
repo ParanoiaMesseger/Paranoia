@@ -31,10 +31,9 @@ impl Default for ReceiptState {
     }
 }
 
-// RocksDB внутри потокобезопасен для конкурентных чтений/записей
-// DB: Send + Sync, поэтому Arc<PacketStore> безопасен
-unsafe impl Send for PacketStore {}
-unsafe impl Sync for PacketStore {}
+// rocksdb::DB уже Send + Sync, поэтому PacketStore выводит эти трейты
+// автоматически — явные `unsafe impl` ничего не добавляли и лишь замаскировали
+// бы будущее не-Sync поле (кэш, RefCell) вместо ошибки компиляции.
 
 impl PacketStore {
     pub fn open(path: &str) -> Result<Self> {
@@ -134,7 +133,17 @@ impl PacketStore {
         username: &str,
     ) -> Result<u64> {
         let floor = self.receipt_state(username, dialogue_id)?.last_seq;
-        self.count_after(dialogue_id, after_seq.max(floor))
+        let effective_floor = after_seq.max(floor);
+        // O(1) reverse-seek перед O(n) forward-сканом (01#1): count_after считает
+        // ЖИВЫЕ ключи с seq > effective_floor, а last_seq — максимальный живой seq
+        // диалога, поэтому `last_seq <= effective_floor` СТРОГО эквивалентно
+        // «count_after == 0». Горячий /notify (multi — до 512 диалогов, из них
+        // «зажжённых» единицы) чаще всего видит именно «нет новых» — короткое
+        // замыкание делает такой диалог O(1) вместо поштучного скана всех seq.
+        if self.last_seq(dialogue_id)? <= effective_floor {
+            return Ok(0);
+        }
+        self.count_after(dialogue_id, effective_floor)
     }
 
     /// Карта живых seq в диалоге.

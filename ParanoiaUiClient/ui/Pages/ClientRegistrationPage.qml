@@ -28,6 +28,8 @@ Rectangle {
     property string importedMaskingUrl: ""
     property string importedMaskingTrusted: ""
     property string importFeedback: ""
+    // true, пока идёт асинхронный импорт бандла этой страницей (01#8) — фильтр сигнала.
+    property bool importingBundle: false
 
     // Режимы ввода: по умолчанию показан выбор источника (QR/файл) + кнопка
     // «Ввести вручную». manualMode — пользователь выбрал ручной ввод; imported —
@@ -87,6 +89,17 @@ Rectangle {
             root.privateKey = priv
             root.generating = false
         }
+        // Итог асинхронного импорта бандла (01#8); реагируем, только если запустили мы.
+        function onImportProfileFinished(res) {
+            if (!root.importingBundle) return
+            root.importingBundle = false
+            if (res.ok) {
+                root.importFeedback = qsTr("Бандл импортирован, выполняется вход…")
+                root.isLoading = true
+            } else {
+                root.importFeedback = res.error || qsTr("Ошибка импорта бандла.")
+            }
+        }
         function onLoginStateChanged() {
             if (Backend.loggedIn) {
                 root.isLoading = false
@@ -131,13 +144,10 @@ Rectangle {
         onAccepted: {
             // activate=true: импортированный профиль сразу становится активным и
             // логинится — onLoginStateChanged уведёт со страницы (без рестарта).
-            const res = Backend.importProfile(Backend.urlToLocalPath(selectedFile), true)
-            if (res.ok) {
-                root.importFeedback = qsTr("Бандл импортирован, выполняется вход…")
-                root.isLoading = true
-            } else {
-                root.importFeedback = res.error || qsTr("Ошибка импорта бандла.")
-            }
+            // Импорт асинхронный (01#8) — итог в onImportProfileFinished.
+            root.importingBundle = true
+            root.importFeedback = qsTr("Импорт бандла…")
+            Backend.importProfile(Backend.urlToLocalPath(selectedFile), true)
         }
     }
 

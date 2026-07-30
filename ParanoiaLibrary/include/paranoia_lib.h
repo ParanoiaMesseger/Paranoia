@@ -122,17 +122,10 @@ char *paranoia_send_text_reply_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR
 char *paranoia_send_reaction_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
                                           CSTR target_id, CSTR emoji);
 
-char *paranoia_send_file_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json, CSTR file_path,
-                                      CSTR mime_type);
-
 // Callback'и для прогресса отправки файла. Вызываются ПОСЛЕ успешной отправки
 // каждого chunk'а (1-based), из runtime-потока FFI — caller обязан перевести
 // результат в свой UI-thread.
 typedef void (*paranoia_progress_callback)(uint32_t chunk_index, uint32_t total, void *user_data);
-
-char *paranoia_send_file_json_keyring_with_progress(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
-                                                    CSTR keyring_json, CSTR file_path, CSTR mime_type,
-                                                    paranoia_progress_callback progress, void *user_data);
 
 // ── Фото-группы (мозаика из нескольких фото с общей подписью)
 // Заголовок группы: group_id + caption (может быть пустой). Сами фото шлются
@@ -148,16 +141,6 @@ char *paranoia_send_photo_grouped_file_json_keyring_with_progress(ParanoiaHandle
                                                                   void *user_data);
 
 // ── Эфемерные большие файлы (вне истории, blob-хранилище с TTL)
-// Лимиты файлов с сервера: JSON {max_history_file_size, large_file_max,
-// ephemeral_retention_secs} (байты/секунды) или NULL.
-char *paranoia_blob_limits_json_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json);
-
-// Отправить большой файл эфемерно (тело в blob, в историю — reference-сообщение).
-// NULL при ошибке (last_error="file_too_large", если больше large_file_max).
-char *paranoia_send_large_file_json_keyring_with_progress(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
-                                                          CSTR keyring_json, CSTR file_path, CSTR mime_type,
-                                                          paranoia_progress_callback progress, void *user_data);
-
 // Авто-выбор канала по размеру (история / эфемерно / отказ). C++ зовёт ЭТУ
 // функцию для обычной отправки файла — порог резолвит lib.
 char *paranoia_send_file_auto_json_keyring_with_progress(ParanoiaHandle *h, CSTR user_a, CSTR user_b,
@@ -185,11 +168,6 @@ int paranoia_notify_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, C
 // Блокирует до удержания сервера — вызывать на воркере (НЕ на GUI-потоке).
 int paranoia_notify_count_wait_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
                                        uint32_t long_poll_ms, uint64_t *out_count);
-
-// Как notify_count, но без учёта сообщений, уже прочитанных мной на другом
-// устройстве (база = max(локальный seq, мой read-seq с сервера через arrived).
-int paranoia_notify_unread_count_keyring(ParanoiaHandle *h, CSTR user_a, CSTR user_b, CSTR keyring_json,
-                                         uint64_t *out_count);
 
 // Полностью stateless проверка notify_count для notifications-сервиса. Не
 // открывает SQLCipher и не трогает vault. Все нужные параметры передаются
@@ -238,7 +216,7 @@ char *paranoia_service_call_poll(CSTR server_url, CSTR reserve_server_urls_json,
                                  CSTR peers_keys_json, unsigned int long_poll_ms);
 
 // MULTI-notify по сессионному handle: ОДИН long-poll-запрос на N диалогов вместо
-// N отдельных paranoia_notify_unread_count_keyring (батарея/поллинг). Курсор seq
+// N отдельных одиночных unread-запросов (батарея/поллинг). Курсор seq
 // берётся из локального стора; сервер сам отсекает прочитанное (receipt-floor) —
 // корректная непрочитанность без per-диалог /arrived.
 //   user_a     — собственный server-id (sender).
@@ -413,15 +391,6 @@ void paranoia_begin_shutdown(void);
 // Все возвращающие char* функции NULL на ошибке (paranoia_last_error()).
 // Освобождать строки через paranoia_free_string.
 
-// Отправить один сигнальный конверт (Offer/Answer/Hangup/Ice).
-// kind: 0=Offer, 1=Answer, 2=Hangup, 3=Ice.
-// master_key_b64 — dialog master key (32 байта base64), им шифруется payload.
-// payload_json   — JSON-тело структуры из voip::signaling.
-// Возвращает 0 при успехе, -1 при ошибке.
-int paranoia_call_signal_send(ParanoiaHandle *h, CSTR from_user, CSTR to_user,
-                              CSTR master_key_b64, unsigned char kind,
-                              CSTR payload_json);
-
 // Callback для async-варианта call_signal_send. Вызывается из фоновой
 // tokio-задачи, поэтому caller обязан переключаться на свой поток сам.
 // `status == 0` — успех; `error_message` валиден только во время вызова
@@ -429,9 +398,11 @@ int paranoia_call_signal_send(ParanoiaHandle *h, CSTR from_user, CSTR to_user,
 typedef void (*paranoia_call_signal_cb)(void *userdata, int status,
                                         CSTR error_message);
 
-// Асинхронный вариант paranoia_call_signal_send: сразу возвращает управление,
-// фактическая отправка идёт в tokio-runtime. Итог сообщается через `cb`
-// (`cb` может быть NULL — fire-and-forget).
+// Отправить один сигнальный конверт (Offer/Answer/Hangup/Ice) — единственный
+// путь, async: сразу возвращает управление, отправка идёт в tokio-runtime.
+// kind: 0=Offer,1=Answer,2=Hangup,3=Ice; master_key_b64 — dialog master key
+// (32 байта base64), им шифруется payload_json (JSON из voip::signaling).
+// Итог сообщается через `cb` (`cb` может быть NULL — fire-and-forget).
 // `userdata` валиден на момент вызова cb — caller обязан не освобождать его
 // раньше. Handle тоже должен жить до cb.
 // Возвращает 0 если задача поставлена в очередь, -1 при ошибке подготовки.
@@ -511,9 +482,8 @@ char *paranoia_call_session_local_addr(ParanoiaCallSession *s);
 char *paranoia_call_session_get_peer(ParanoiaCallSession *s);
 
 // Послать STUN Binding Request через UDP-сокет уже-запущенной сессии и
-// вернуть reflexive "ip:port". В отличие от paranoia_stun_discover (с
-// собственным сокетом), это даёт reflexive того же порта, что использует
-// сессия — критично для NAT-traversal'а через ICE-кандидаты.
+// вернуть reflexive "ip:port" того же порта, что использует сессия —
+// критично для NAT-traversal'а через ICE-кандидаты.
 // Возвращает строку или NULL. Освобождать через paranoia_free_string.
 char *paranoia_call_session_stun_discover(ParanoiaCallSession *s, CSTR stun_server,
                                           unsigned int timeout_ms);
@@ -547,15 +517,6 @@ int paranoia_call_session_push_h264(ParanoiaCallSession *s,
 // Корректно остановить и освободить сессию.
 void paranoia_call_session_stop(ParanoiaCallSession *s);
 
-// ── STUN
-// ────────────────────────────────────────────────────────────────────
-// Определить публичный (reflexive) IP:port через один STUN Binding Request.
-// local_bind — например "0.0.0.0:0"; stun_server — "host:port" вашего STUN.
-// Возвращает "ip:port" строкой или NULL при ошибке/таймауте.
-// Освобождать через paranoia_free_string.
-char *paranoia_stun_discover(CSTR local_bind, CSTR stun_server,
-                             unsigned int timeout_ms);
-
 // ── Local Vault (LocalStorageEncryptionPolicy.md)
 // Установить корень app data. Вызывать на старте до любых других vault-функций.
 int paranoia_vault_init(CSTR app_data_root);
@@ -585,9 +546,6 @@ int paranoia_set_signed_masking_profile(ParanoiaHandle *h, CSTR signed_json, CST
 // Подписать профиль extended-секретом (панель). JSON конверта или NULL.
 // Освобождать paranoia_free_string.
 char *paranoia_sign_masking_profile(CSTR profile_json, CSTR extended_secret_b64);
-// Скачать подписанный профиль (GET url, опц. Bearer bearer_token=NULL/""),
-// проверить подпись trusted_pubkey_b64 и применить. 0=ok, -1=error.
-int paranoia_fetch_and_apply_signed_profile(ParanoiaHandle *h, CSTR url, CSTR trusted_pubkey_b64, CSTR bearer_token);
 // Задать активный masking-профиль для admin/reg-трафика (глобально). NULL/"" —
 // очистить (admin-трафик пойдёт плоско). 0=ok, -1=error.
 int paranoia_admin_set_masking_profile(CSTR profile_json);
@@ -636,11 +594,6 @@ int paranoia_vault_lockout_seconds(uint64_t *out_secs);
 int paranoia_vault_encrypt_json(CSTR path, const unsigned char *data, size_t len);
 // NULL=ошибка; иначе расшифрованный JSON как UTF-8 C-string (free через paranoia_free_string).
 char *paranoia_vault_decrypt_json(CSTR path);
-
-// Шифрование attachment'ов per-file ключом HKDF(files_key, salt_str, "attachment-v1").
-// salt_str — обычно UUID сообщения. 0=ok, -1=ошибка.
-int paranoia_vault_encrypt_attachment(CSTR salt_str, CSTR src_path, CSTR dst_path);
-int paranoia_vault_decrypt_attachment(CSTR salt_str, CSTR src_path, CSTR dst_path);
 
 #ifdef __cplusplus
 }

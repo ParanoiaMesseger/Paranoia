@@ -66,10 +66,20 @@ async fn do_reg(state: Arc<AppState>, req: RegRequest) -> ApiResponse {
     cfg.users.insert(req.username.clone(), req.pub_key);
     drop(cfg);
 
-    // Persist
-    let cfg = state.config.read().await;
-    if let Err(e) = cfg.save("./configs/Paranoia.json") {
-        warn!("Failed to save config: {e}");
+    // Persist. Путь берём из PARANOIA_CONFIG (тот же helper, что main.rs и
+    // admin-роуты) — иначе при запуске с env регистрация уходит в файл, который
+    // сервер не читает, и теряется после рестарта. Сериализуем под read-локом, а
+    // на диск пишем уже без него (блокирующая запись под локом стопит все
+    // хендлеры на config.read() — 01-freezes п.2).
+    let path = crate::routes::admin::config_path();
+    let data = state.config.read().await.to_pretty_json();
+    match data {
+        Ok(data) => {
+            if let Err(e) = crate::config::Config::write_file(&path, data).await {
+                warn!("Failed to save config: {e}");
+            }
+        }
+        Err(e) => warn!("Failed to serialize config: {e}"),
     }
 
     info!("User '{}' registered", req.username);

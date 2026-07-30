@@ -81,16 +81,18 @@
 
 ```
 GET /arrived?dialogue_id=<id>&partner=<username>
-Authorization: serverid-signed header
+Authorization: serverid-signed header   // base64("username:sig"), подпись над "arrived:get:<me>:<partner>:<dialogue_id>"
 
 Response 200:
 {
   "partner_last_seq": <uint64 | null>,
-  "ts": <unix_timestamp>
+  "own_last_seq":     <uint64>,
+  "ts":               <unix_timestamp>
 }
 ```
 
 - `partner_last_seq: null` — получатель отключил уведомления о прочтении для этого диалога.
+- `own_last_seq` — собственный read-seq запрашивающего (`receipt_state(me)`), обновляется при `pull` на ЛЮБОМ его устройстве. Отдаётся ВСЕГДА (это позиция самого запрашивающего, не утечка), независимо от его `receipts_enabled`. Сервис уведомлений берёт его, чтобы не присылать повторное уведомление о сообщении, уже прочитанном на другом устройстве (см. § 6 и NotificationsPolicy § 2.4).
 - Клиент вызывает этот эндпоинт только когда диалог открыт в UI. В фоне запросы не выполняются.
 
 **PUT — управление настройкой получателем:**
@@ -148,29 +150,31 @@ Response 200: {}
 
 ### 5.1. Схема
 
-```sql
-CREATE TABLE dialogue_last_seq (
-    username          TEXT    NOT NULL,
-    dialogue_id       TEXT    NOT NULL,
-    last_seq          INTEGER NOT NULL DEFAULT 0,
-    receipts_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
-    updated_at        INTEGER NOT NULL,
-    PRIMARY KEY (username, dialogue_id)
-);
+Сервер хранит пакеты и состояние прочтения в RocksDB (не SQL). Состояние прочтения — это запись `ReceiptState`, сериализуемая в JSON, под ключом `(username, dialogue_id)`:
+
+```rust
+struct ReceiptState {
+    last_seq:         u64,   // высшая позиция, которую этот аккаунт уже видел
+    receipts_enabled: bool,  // default true
+    updated_at:       u64,   // unix ts
+}
 ```
 
-**Важно:** таблица не содержит никакой информации о конкретных сообщениях. `last_seq` — просто число. Вывод "какое сообщение прочитано" существует только в клиенте.
+**Важно:** запись не содержит никакой информации о конкретных сообщениях. `last_seq` — просто число. Вывод "какое сообщение прочитано" существует только в клиенте.
 
 ### 5.2. Серверная логика обновления `last_seq`
 
-При каждом успешном `pull`-запросе от `username` по `dialogue_id`:
+`last_seq[username][dialogue_id]` поднимается в двух местах, оба — `update_last_seq`, монотонно (`MAX`) и только при `receipts_enabled = true`:
+
+- при успешном `pull` — до максимального подтянутого `seq` (этот аккаунт прочитал сообщения);
+- при `push` собственного сообщения — до отправленного `seq`. Pull-before-push гарантирует, что отправитель уже прочитал всё до своего `seq`, поэтому отметка корректна. Это и есть основа дедупликации: собственное сообщение не всплывает уведомлением на других устройствах того же аккаунта (см. § 6).
 
 ```
 IF receipts_enabled[username][dialogue_id]:
-    last_seq[username][dialogue_id] = MAX(current, pulled_seq)
+    last_seq[username][dialogue_id] = MAX(current, new_seq)   // new_seq = pulled_seq (pull) | sent_seq (push)
 ```
 
-`last_seq` монотонно возрастает и никогда не уменьшается.
+`last_seq` монотонно возрастает и никогда не уменьшается. При выключенных receipts обновление — no-op (значение заморожено).
 
 ***
 
@@ -178,6 +182,7 @@ IF receipts_enabled[username][dialogue_id]:
 
 - `last_seq` хранится на уровне аккаунта (`username`), не устройства.
 - Если получатель прочёл диалог на устройстве B — `last_seq` обновляется, и отправитель увидит ✓✓ независимо от того, какое устройство получателя выполнило pull.
+- То же значение `last_seq[me]` отдаётся самому аккаунту как `own_last_seq` (см. § 3.3.2) и служит общей «позицией прочтения» между его устройствами: сообщение, прочитанное на устройстве B, не присылает повторное уведомление на устройство A, а собственное отправленное сообщение не всплывает уведомлением на сиблинг-устройствах (см. NotificationsPolicy § 2.4).
 - Настройка `receipts_enabled` также единая для аккаунта per-dialogue. Расширение до per-device — возможная будущая версия.
 
 ***

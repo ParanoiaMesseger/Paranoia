@@ -2,6 +2,7 @@
 
 #include "Paths.hpp"
 #include "NotificationCoordinator.hpp"
+#include "PollModeController.hpp"
 #include "utils/adminStorage.hpp"
 #include "session/Dialog.hpp"
 #include "session/ServerSession.hpp"
@@ -14,6 +15,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QImage>
+#include <QImageReader>
 #include <QPainter>
 #include <QPainterPath>
 #include <QGuiApplication>
@@ -52,6 +54,7 @@
 #include <QSet>
 #include <QUrl>
 #include <algorithm>
+#include <functional>
 
 #if defined(Q_OS_ANDROID)
 #include <QCoreApplication>
@@ -166,6 +169,12 @@ MainBackend::MainBackend(NotificationCoordinator &notifications, QObject *parent
     : QObject(parent), m_notifications(&notifications)
 {
     s_instance = this;
+    m_pollModeController = new PollModeController(this);
+    connect(m_pollModeController, &PollModeController::pollModeChanged,
+            this, &MainBackend::publishServiceSnapshot);
+    // Координатор — владелец жизненного цикла фоновой доставки: сверяется с
+    // режимом при каждом schedulePoll и применяет смену немедленно.
+    m_notifications->setPollModeController(m_pollModeController);
     initVault();
     m_hasStoredClientProfiles = hasStoredClientProfileOnDisk();
     connect(SessionStore::instance(), &SessionStore::activeSessionChanged, this, &MainBackend::loginStateChanged);
@@ -180,9 +189,10 @@ MainBackend::MainBackend(NotificationCoordinator &notifications, QObject *parent
     // Любое изменение списка диалогов / keyring'а / сессий — повод пересобрать
     // snapshot для notifications-сервиса. Подцепляем оба сигнала: dialogsChanged
     // покрывает add/remove/keyring-update, sessionsChanged — login/logout/смену
-    // профиля. publishServiceSnapshot — дешёвый (просто read из RAM + JNI call),
-    // дополнительное дробление по «реально ли seq сдвинулся» — за ChatBackend
-    // (см. вызовы оттуда после successful pull).
+    // профиля. publishServiceSnapshot снимает RAM-данные на GUI, а last_pulled_seq
+    // (SQLCipher) и сборку JSON выполняет на воркере с коалесингом (01#5) — GUI не
+    // встаёт даже при частых сигналах; дополнительное дробление по «реально ли seq
+    // сдвинулся» — за ChatBackend (см. вызовы оттуда после successful pull).
     connect(this, &MainBackend::dialogsChanged, this, &MainBackend::publishServiceSnapshot);
     connect(this, &MainBackend::sessionsChanged, this, &MainBackend::publishServiceSnapshot);
 
@@ -311,6 +321,9 @@ void MainBackend::vaultUnlock(const QString &pin)
 void MainBackend::vaultLock()
 {
     ParanoiaFFI::vault_lock();
+    // Сбросить RAM-кэш манифеста (keystone F): под локом плейнтекст (с аватарами) в
+    // RAM не держим, а следующий unlock перечитает свежий профиль-манифест.
+    Utils::invalidateProfilesManifestCache();
     SessionStore::instance()->setActiveSession({});
     // Расшифрованные превью держатся только в EncryptedImageProvider'е
     // (in-memory). main.cpp подключён к сигналу vaultLocked и вызовет
@@ -335,6 +348,12 @@ void MainBackend::vaultChangePin(const QString &oldPin, const QString &newPin)
 
 void MainBackend::doVaultChangePinAsync(const QString &oldPin, const QString &newPin)
 {
+    // 0) Дождаться фоновой записи dialogs.json всех сессий ДО перешифровки vault:
+    //    иначе async-снимок, зашифрованный старым ключом, мог бы лечь на диск уже
+    //    после rekey — и следующая загрузка не расшифровала бы dialogs.json.
+    for (const auto &s : SessionStore::instance()->allSessions())
+        if (s) s->flushDialogs();
+
     // 1) Закрываем активные сессии — только vector ops + сигналы (быстро).
     //    Сам тяжёлый teardown (WAL checkpoint, paranoia_client_free) переносится
     //    в worker: держим последние strong-refs в shared vector и роняем их там.
@@ -433,6 +452,9 @@ void MainBackend::onVaultUnlocked()
     // (нормальное состояние), и мы НЕ хотим, чтобы оно блокировало
     // последующие легитимные writeFile'ы.
     Utils::resetVaultIoFailure();
+    // Свежий unlock — манифест профилей мог поменяться на диске между сессиями;
+    // сбрасываем кэш, чтобы первый loadProfilesManifest перечитал актуальный (keystone F).
+    Utils::invalidateProfilesManifestCache();
     admin::Admin::initAdmins();
     emit adminStateChanged();
     loadDeviceKey();
@@ -1074,9 +1096,12 @@ void MainBackend::checkTurnServer(const QString &profileId, const QString &turnU
         emit turnServerCheckFinished(profileId, normalized, false, MainBackend::tr("Не удалось разобрать host:port."), -1);
         return;
     }
-    // Заглушка: эмитим «ok с 0ms» — UI покажет «доступен» (по факту проверка
-    // ограничена синтаксисом). TODO: добавить FFI paranoia_turn_probe(host, port).
-    emit turnServerCheckFinished(profileId, normalized, true, MainBackend::tr("сохранён"), 0);
+    // Реального probe достижимости пока нет (нужен FFI paranoia_turn_probe(host,
+    // port)); синтаксис адреса корректен, но доступность НЕ проверялась. Эмитим
+    // нейтральный статус (ok=false, pingMs=-2 — сентинел «не проверялось», в
+    // отличие от -1 у настоящих ошибок разбора выше), чтобы UI не рисовал ложное
+    // «доступен» для любого, в т.ч. несуществующего, адреса.
+    emit turnServerCheckFinished(profileId, normalized, false, MainBackend::tr("не проверялось"), -2);
 }
 
 // ── Dialogs Management ────────────────────────────────────────────────────────
@@ -1165,13 +1190,16 @@ QVariantMap MainBackend::confirmDialogKeyExchange(const QString &peer, const QSt
             QThreadPool::globalInstance()->start([self, session, trimmedPeer, peerServerId, sessionKey]() {
                 if (!self) return;
                 quint64 seq = 1;
+                // хэндл под мгновенным локом → чтение last_pulled_seq без ffiMutex (01#32)
+                std::shared_ptr<ParanoiaFFI> ffi;
                 {
                     QMutexLocker locker(&session->ffiMutex);
-                    if (session->ffi && !session->serverId.isEmpty() && !peerServerId.isEmpty()) {
-                        uint64_t last = 0;
-                        session->ffi->last_pulled_seq(session->serverId, peerServerId, last);
-                        seq = static_cast<quint64>(last) + 1;
-                    }
+                    ffi = session->ffi;
+                }
+                if (ffi && !session->serverId.isEmpty() && !peerServerId.isEmpty()) {
+                    uint64_t last = 0;
+                    ffi->last_pulled_seq(session->serverId, peerServerId, last);
+                    seq = static_cast<quint64>(last) + 1;
                 }
                 QMetaObject::invokeMethod(self, [self, trimmedPeer, peerServerId, sessionKey, seq]() {
                     if (self) self->upsertDialogKeyringEntry(trimmedPeer, peerServerId, sessionKey, seq, false);
@@ -1219,11 +1247,24 @@ QVariantList MainBackend::getDialogs() const
                                   {"avatar", avatarUrl},
                                   {"lastMsg", dlg.lastMsg},
                                   {"hasKey", !dlg.keyring.isEmpty()},
+                                  {"muted", dlg.notificationsMuted},
                                   {"unreadCount", m_notifications->unreadCount(profileId, dlg.peer)},
                                   {"lastActivityMs", static_cast<double>(activityMs)},
                                   {"notificationHint", m_notifications->isNotificationHintFor(profileId, dlg.peer)}});
     }
     return result;
+}
+
+QVariantMap MainBackend::dialogInfo(const QString &peer) const
+{
+    const auto session = SessionStore::instance()->activeSession();
+    if (!session) return {};
+    const Dialog *dlg = session->findDialog(peer);
+    if (!dlg) return {};
+    const QString displayName = dlg->localName.isEmpty() ? dlg->peer : dlg->localName;
+    const QString avatarUrl =
+        dlg->avatar.isEmpty() ? QString() : (QStringLiteral("data:image/png;base64,") + dlg->avatar);
+    return QVariantMap{{"peer", dlg->peer}, {"displayName", displayName}, {"avatar", avatarUrl}};
 }
 
 QVariantList MainBackend::getAdminServers() const
@@ -1559,11 +1600,15 @@ QVariantMap MainBackend::resetMasking()
     auto session = SessionStore::instance()->activeSession();
     if (!session) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Нет активной сессии")}};
     int rc;
+    // хэндл под мгновенным локом → set_masking (локальный конфиг) без ffiMutex,
+    // чтобы GUI-вызов не вставал за аплоадом (01#32); transport внутри с RwLock.
+    std::shared_ptr<ParanoiaFFI> ffi;
     {
         QMutexLocker locker(&session->ffiMutex);
-        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Сессия не готова")}};
-        rc = session->ffi->set_masking_profile(QString());
+        ffi = session->ffi;
     }
+    if (!ffi) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Сессия не готова")}};
+    rc = ffi->set_masking_profile(QString());
     if (rc != 0) return QVariantMap{{"ok", false}, {"error", ParanoiaFFI::last_error()}};
     Utils::writeJsonObjectFile(Paths::profileMaskingState(session->profileId), QJsonObject{});
     m_maskingState.clear();
@@ -1573,41 +1618,61 @@ QVariantMap MainBackend::resetMasking()
     return QVariantMap{{"ok", true}};
 }
 
-QVariantMap MainBackend::applyMaskingFromFile(const QString &filePath, bool allowUnsigned)
+void MainBackend::applyMaskingFromFile(const QString &filePath, bool allowUnsigned)
 {
     auto session = SessionStore::instance()->activeSession();
-    if (!session) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Нет активной сессии")}};
-    const QString localPath = Utils::resolveImportPath(filePath);
-    const QByteArray bytes  = Utils::readAll(localPath);
-    if (bytes.isEmpty()) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Не удалось прочитать файл")}};
-
-    bool isSigned = false;
-    const QString name    = maskingProfileNameFromJson(bytes, &isSigned);
-    const QString json    = QString::fromUtf8(bytes);
-    const QString trusted = activeMaskingConfig().value("trusted").toString();
-
-    if (isSigned && trusted.isEmpty())
-        return QVariantMap{{"ok", false},
-                           {"error", MainBackend::tr("Профиль подписан, но доверенный ключ не задан в профиле подключения")}};
-    if (!isSigned && !allowUnsigned)
-        return QVariantMap{{"ok", false}, {"unsigned", true},
-                           {"error", MainBackend::tr("Профиль без подписи. Подтвердите применение без проверки.")}};
-
-    int rc;
-    {
-        QMutexLocker locker(&session->ffiMutex);
-        if (!session->ffi) return QVariantMap{{"ok", false}, {"error", MainBackend::tr("Сессия не готова")}};
-        rc = isSigned ? session->ffi->set_signed_masking_profile(json, trusted)
-                      : session->ffi->set_masking_profile(json);
+    if (!session) {
+        emit maskingApplyResult(false, false, filePath, {}, MainBackend::tr("Нет активной сессии"));
+        return;
     }
-    if (rc != 0) return QVariantMap{{"ok", false}, {"error", ParanoiaFFI::last_error()}};
+    // trusted-ключ читаем с GUI (activeMaskingConfig смотрит активную сессию); чтение
+    // файла (Android JNI-копия content://) + FFI-применение — на воркере (01#6).
+    const QString profileId = session->profileId;
+    const QString trusted   = activeMaskingConfig().value("trusted").toString();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, session, filePath, allowUnsigned, profileId, trusted]() {
+        const QString localPath = Utils::resolveImportPath(filePath);
+        const QByteArray bytes  = Utils::readAll(localPath);
 
-    // Сбрасываем сохранённый хэш — файловое применение перебивает node-сверку.
-    Utils::writeJsonObjectFile(Paths::profileMaskingState(session->profileId), QJsonObject{});
-    setMaskingState(QStringLiteral("updated"), name);
-    emit maskingApplied(true, isSigned ? MainBackend::tr("Подписанный профиль применён")
-                                       : MainBackend::tr("Профиль применён без проверки подписи"));
-    return QVariantMap{{"ok", true}, {"profileName", name}, {"signed", isSigned}};
+        bool ok = false, needsConfirm = false, isSigned = false;
+        QString name, err;
+        if (bytes.isEmpty()) {
+            err = MainBackend::tr("Не удалось прочитать файл");
+        } else {
+            name = maskingProfileNameFromJson(bytes, &isSigned);
+            if (isSigned && trusted.isEmpty()) {
+                err = MainBackend::tr("Профиль подписан, но доверенный ключ не задан в профиле подключения");
+            } else if (!isSigned && !allowUnsigned) {
+                needsConfirm = true;
+                err          = MainBackend::tr("Профиль без подписи. Подтвердите применение без проверки.");
+            } else {
+                // хэндл под мгновенным локом → set_masking без ffiMutex (01#32).
+                std::shared_ptr<ParanoiaFFI> ffi;
+                {
+                    QMutexLocker locker(&session->ffiMutex);
+                    ffi = session->ffi;
+                }
+                if (!ffi) {
+                    err = MainBackend::tr("Сессия не готова");
+                } else {
+                    const QString json = QString::fromUtf8(bytes);
+                    const int rc       = isSigned ? ffi->set_signed_masking_profile(json, trusted)
+                                                  : ffi->set_masking_profile(json);
+                    if (rc != 0)
+                        err = ParanoiaFFI::last_error();
+                    else
+                        ok = true;
+                }
+            }
+        }
+        // Файловое применение перебивает node-сверку → сбрасываем сохранённый хэш.
+        if (ok) Utils::writeJsonObjectFile(Paths::profileMaskingState(profileId), QJsonObject{});
+        QMetaObject::invokeMethod(self, [self, ok, needsConfirm, filePath, name, err]() {
+            if (!self) return;
+            if (ok) self->setMaskingState(QStringLiteral("updated"), name);
+            emit self->maskingApplyResult(ok, needsConfirm, filePath, name, err);
+        });
+    });
 }
 
 void MainBackend::syncMaskingFromNode()
@@ -1653,11 +1718,14 @@ void MainBackend::syncMaskingFromNode()
         bool isSigned = false;
         const QString name = maskingProfileNameFromJson(body, &isSigned);
         int rc;
+        // хэндл под мгновенным локом → set_masking без ffiMutex (01#32)
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) return;
-            rc = session->ffi->set_signed_masking_profile(QString::fromUtf8(body), trusted);
+            ffi = session->ffi;
         }
+        if (!ffi) return;
+        rc = ffi->set_signed_masking_profile(QString::fromUtf8(body), trusted);
         if (rc != 0) {
             self->setMaskingState(QStringLiteral("error"));
             emit self->maskingApplied(false, MainBackend::tr("Профиль отвергнут: ") + ParanoiaFFI::last_error());
@@ -1689,11 +1757,16 @@ void MainBackend::deleteDialogLocal(const QString &peer)
     QPointer self(this);
     QThreadPool::globalInstance()->start([self, session, peerCopy, serverId, peerServerId, profileId]() {
         if (!self) return;
-        QMutexLocker locker(&session->ffiMutex);
-        if (!session->ffi) return;
+        // хэндл под мгновенным локом → локальное удаление диалога без ffiMutex (01#32)
+        std::shared_ptr<ParanoiaFFI> ffi;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            ffi = session->ffi;
+        }
+        if (!ffi) return;
         int rc   = (!serverId.isEmpty() && !peerServerId.isEmpty())
-                       ? session->ffi->delete_local_dialogue(serverId, peerServerId)
-                       : session->ffi->delete_local_dialogue(session->username, peerCopy);
+                       ? ffi->delete_local_dialogue(serverId, peerServerId)
+                       : ffi->delete_local_dialogue(session->username, peerCopy);
         auto err = ParanoiaFFI::last_error();
         QMetaObject::invokeMethod(self, [self, peerCopy, profileId, rc, err]() {
             if (!self) return;
@@ -1726,15 +1799,20 @@ void MainBackend::clearDialogHistory(const QString &peer)
     QPointer self(this);
     QThreadPool::globalInstance()->start([self, session, peerCopy, serverId, peerServerId, keyringJson]() {
         if (!self) return;
-        QMutexLocker locker(&session->ffiMutex);
-        if (!session->ffi) return;
+        // хэндл под мгновенным локом → удаление всей истории (по range) без ffiMutex (01#32)
+        std::shared_ptr<ParanoiaFFI> ffi;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            ffi = session->ffi;
+        }
+        if (!ffi) return;
         const QString myId   = serverId.isEmpty() ? session->username : serverId;
         const QString peerId = peerServerId.isEmpty() ? peerCopy : peerServerId;
         // u64::MAX как верхняя граница — сервер всё равно проходит только по
         // существующим ключам префикса диалога, а локально метод фильтрует
         // существующие server_seq.
-        int rc      = session->ffi->delete_dialogue_range_keyring(myId, peerId, keyringJson, 0,
-                                                                  std::numeric_limits<quint64>::max());
+        int rc      = ffi->delete_dialogue_range_keyring(myId, peerId, keyringJson, 0,
+                                                         std::numeric_limits<quint64>::max());
         QString err = ParanoiaFFI::last_error();
         QMetaObject::invokeMethod(self, [self, err, peerCopy, rc]() {
             if (!self) return;
@@ -1823,38 +1901,48 @@ namespace
     }
 } // namespace
 
-QVariantList MainBackend::storageBreakdown() const
+void MainBackend::storageBreakdown()
 {
-    const QString root  = Paths::appDataRoot().path();
-    const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    // Рекурсивный обход attachment-cache всех профилей + CacheLocation (stat каждого
+    // файла) — на воркере, не на GUI (01#10). Итог — сигналом storageBreakdownReady;
+    // QML держит спиннер до его прихода.
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self]() {
+        const QString root  = Paths::appDataRoot().path();
+        const QString cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
 
-    qint64 attachments = 0, messages = 0, keys = 0, dicts = 0, cacheSz = 0;
+        qint64 attachments = 0, messages = 0, keys = 0, dicts = 0, cacheSz = 0;
 
-    const QDir profilesDir(root + QStringLiteral("/profiles"));
-    const auto profiles = profilesDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const auto &p : profiles) {
-        const QString pp = profilesDir.filePath(p);
-        attachments += treeSizeBytes(pp + QStringLiteral("/attachment-cache"));
-        for (const auto &dbf : {"/paranoia.db", "/paranoia.db-wal", "/paranoia.db-shm"})
-            messages += treeSizeBytes(pp + QString::fromLatin1(dbf));
-        keys += treeSizeBytes(pp + QStringLiteral("/client.json"));
-        keys += treeSizeBytes(pp + QStringLiteral("/dialogs.json"));
-    }
-    for (const auto &kf : {"/vault.json", "/device_key.json", "/profiles.json", "/pending_registration_key.json", "/admins.crypt"})
-        keys += treeSizeBytes(root + QString::fromLatin1(kf));
-    dicts   = treeSizeBytes(root + QStringLiteral("/dictionaries"));
-    cacheSz = treeSizeBytes(cache);
+        const QDir profilesDir(root + QStringLiteral("/profiles"));
+        const auto profiles = profilesDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const auto &p : profiles) {
+            const QString pp = profilesDir.filePath(p);
+            attachments += treeSizeBytes(pp + QStringLiteral("/attachment-cache"));
+            for (const auto &dbf : {"/paranoia.db", "/paranoia.db-wal", "/paranoia.db-shm"})
+                messages += treeSizeBytes(pp + QString::fromLatin1(dbf));
+            keys += treeSizeBytes(pp + QStringLiteral("/client.json"));
+            keys += treeSizeBytes(pp + QStringLiteral("/dialogs.json"));
+        }
+        for (const auto &kf :
+             {"/vault.json", "/device_key.json", "/profiles.json", "/pending_registration_key.json", "/admins.crypt"})
+            keys += treeSizeBytes(root + QString::fromLatin1(kf));
+        dicts   = treeSizeBytes(root + QStringLiteral("/dictionaries"));
+        cacheSz = treeSizeBytes(cache);
 
-    QVariantList out;
-    auto add = [&out](const QString &label, qint64 bytes, const QString &color) {
-        out.append(QVariantMap{{"label", label}, {"bytes", static_cast<qreal>(bytes)}, {"color", color}});
-    };
-    add(MainBackend::tr("Вложения"), attachments, "#C91122");
-    add(MainBackend::tr("Сообщения"), messages, "#E08A2B");
-    add(MainBackend::tr("Профили и ключи"), keys, "#3FA66A");
-    add(MainBackend::tr("Словари"), dicts, "#3F7FA6");
-    add(MainBackend::tr("Кэш"), cacheSz, "#8A6BB0");
-    return out;
+        QVariantList out;
+        auto add = [&out](const QString &label, qint64 bytes, const QString &color) {
+            out.append(QVariantMap{{"label", label}, {"bytes", static_cast<qreal>(bytes)}, {"color", color}});
+        };
+        add(MainBackend::tr("Вложения"), attachments, "#C91122");
+        add(MainBackend::tr("Сообщения"), messages, "#E08A2B");
+        add(MainBackend::tr("Профили и ключи"), keys, "#3FA66A");
+        add(MainBackend::tr("Словари"), dicts, "#3F7FA6");
+        add(MainBackend::tr("Кэш"), cacheSz, "#8A6BB0");
+
+        QMetaObject::invokeMethod(self, [self, out]() {
+            if (self) emit self->storageBreakdownReady(out);
+        });
+    });
 }
 
 void MainBackend::clearCaches()
@@ -1899,14 +1987,19 @@ void MainBackend::selfDestruct()
         for (const auto &s : sessions) {
             for (const auto &dlg : s->dialogs) {
                 {
-                    QMutexLocker lk(&s->ffiMutex);
-                    if (s->ffi) {
+                    std::shared_ptr<ParanoiaFFI> ffi;
+                    {
+                        QMutexLocker lk(&s->ffiMutex);
+                        ffi = s->ffi;
+                    }
+                    if (ffi) {
                         const QString myId   = s->serverId.isEmpty() ? s->username : s->serverId;
                         const QString peerId = dlg.peerServerId.isEmpty() ? dlg.peer : dlg.peerServerId;
                         // best-effort: офлайн-сервер/ошибку игнорируем — локальный
                         // вайп всё равно отвяжет устройство криптографически.
-                        s->ffi->delete_dialogue_range_keyring(myId, peerId, dlg.keyringJson(), 0,
-                                                              std::numeric_limits<quint64>::max());
+                        // handle без ffiMutex на время сетевого удаления (01#32).
+                        ffi->delete_dialogue_range_keyring(myId, peerId, dlg.keyringJson(), 0,
+                                                           std::numeric_limits<quint64>::max());
                     }
                 }
                 ++done;
@@ -1962,11 +2055,24 @@ namespace
         const bool isContentUri = fileUrl.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
         const QString localPath = Utils::resolveImportPath(fileUrl);
         if (localPath.isEmpty()) return {};
-        QImage img(localPath);
+
+        constexpr int kSide = 64;
+        // Декодируем СРАЗУ в малый размер (01#11): раньше QImage(localPath) грузил
+        // полный битмап (снимок 12 Мп ≈ 48 МБ) только чтобы ужать до 64×64. Читаем
+        // размер из заголовка и через setScaledSize декодируем так, чтобы КОРОТКАЯ
+        // сторона стала kSide (cover) — далее обычный scale/crop почти бесплатны.
+        QImageReader reader(localPath);
+        const QSize orig = reader.size(); // только заголовок, без полного декода
+        if (orig.isValid() && orig.width() > 0 && orig.height() > 0) {
+            const double s = double(kSide) / std::min(orig.width(), orig.height());
+            if (s < 1.0) // ужимаем только если исходник крупнее цели
+                reader.setScaledSize(QSize(qMax(1, qRound(orig.width() * s)),
+                                           qMax(1, qRound(orig.height() * s))));
+        }
+        QImage img = reader.read();
         if (isContentUri) QFile::remove(localPath);
         if (img.isNull()) return {};
 
-        constexpr int kSide = 64;
         const QImage scaled = img.scaled(kSide, kSide, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
         const QImage square = scaled.copy((scaled.width() - kSide) / 2, (scaled.height() - kSide) / 2, kSide, kSide);
         QImage circular(kSide, kSide, QImage::Format_ARGB32_Premultiplied);
@@ -1987,6 +2093,21 @@ namespace
         buf.close();
         return QString::fromLatin1(png.toBase64());
     }
+
+    // Запекание аватара (resolveImportPath JNI-копия + декод + PNG) — на QThreadPool,
+    // результат (base64 PNG или пусто при ошибке) отдаём в onDone на GUI-потоке
+    // (01#11). Владелец b64 применяет его к диалогу/манифесту уже дёшево.
+    void bakeAvatarAsync(QPointer<MainBackend> self, const QString &fileUrl,
+                         std::function<void(const QString &)> onDone)
+    {
+        QThreadPool::globalInstance()->start([self, fileUrl, onDone = std::move(onDone)]() mutable {
+            const QString b64 = bakeCircleAvatarBase64(fileUrl);
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, b64, onDone = std::move(onDone)]() {
+                if (self) onDone(b64);
+            });
+        });
+    }
 }
 
 void MainBackend::setDialogLocalName(const QString &peer, const QString &name)
@@ -2002,20 +2123,33 @@ void MainBackend::setDialogLocalName(const QString &peer, const QString &name)
     emit dialogsChanged();
 }
 
-bool MainBackend::setDialogAvatar(const QString &peer, const QString &fileUrl)
+void MainBackend::setDialogMuted(const QString &peer, bool muted)
 {
     auto session = SessionStore::instance()->activeSession();
-    if (!session) return false;
+    if (!session) return;
     Dialog *dlg = session->findDialog(peer);
-    if (!dlg) return false;
-    // Круг запекается в PNG обычным Image без QML-маски (прежний вариант с
-    // layer.enabled-маской создавал FBO на каждую строку → вешал UI; см. memory).
-    const QString b64 = bakeCircleAvatarBase64(fileUrl);
-    if (b64.isEmpty()) return false;
-    dlg->avatar = b64;
+    if (!dlg || dlg->notificationsMuted == muted) return;
+    dlg->notificationsMuted = muted;
     session->saveDialogs();
     emit dialogsChanged();
-    return true;
+}
+
+void MainBackend::setDialogAvatar(const QString &peer, const QString &fileUrl)
+{
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    if (!session->findDialog(peer)) return; // быстрый guard; диалог повторно найдём в колбэке
+    // Круг запекается в PNG обычным Image без QML-маски (прежний вариант с
+    // layer.enabled-маской создавал FBO на каждую строку → вешал UI; см. memory).
+    // Тяжёлый bake — на воркере (01#11); применение — на GUI, когда готово.
+    bakeAvatarAsync(this, fileUrl, [this, session, peer](const QString &b64) {
+        if (b64.isEmpty()) return;
+        Dialog *dlg = session->findDialog(peer);
+        if (!dlg) return;
+        dlg->avatar = b64;
+        session->saveDialogs();
+        emit dialogsChanged();
+    });
 }
 
 QString MainBackend::dialogAvatar(const QString &peer) const
@@ -2047,14 +2181,20 @@ void MainBackend::setProfileLocalName(const QString &profileId, const QString &n
     emit sessionsChanged();
 }
 
-bool MainBackend::setProfileAvatar(const QString &profileId, const QString &fileUrl)
+void MainBackend::setProfileAvatar(const QString &profileId, const QString &fileUrl)
 {
-    if (profileId.isEmpty()) return false;
-    const QString b64 = bakeCircleAvatarBase64(fileUrl);
-    if (b64.isEmpty()) return false;
-    if (!Utils::updateProfileManifestEntry(profileId, QJsonObject{{"avatar", b64}})) return false;
-    emit sessionsChanged();
-    return true;
+    if (profileId.isEmpty()) {
+        emit profileAvatarResult(profileId, false);
+        return;
+    }
+    // Тяжёлый bake — на воркере (01#11); запись в манифест + результат — на GUI.
+    bakeAvatarAsync(this, fileUrl, [this, profileId](const QString &b64) {
+        bool ok = false;
+        if (!b64.isEmpty())
+            ok = Utils::updateProfileManifestEntry(profileId, QJsonObject{{"avatar", b64}});
+        if (ok) emit sessionsChanged();
+        emit profileAvatarResult(profileId, ok);
+    });
 }
 
 void MainBackend::clearProfileAvatar(const QString &profileId)
@@ -2141,48 +2281,69 @@ QVariantMap MainBackend::changeProfileServer(const QString &profileId, const QSt
     const QString avatar       = oldEntry.value("avatar").toString();
     const QStringList reservesForNew = Utils::normalizedServerUrls(reserves, newServer);
 
-    // 1) Снять сессию — освобождает FFI-handle и закрывает SQLCipher-БД старого
-    //    каталога (иначе перенос/повторное открытие на новом пути небезопасны).
+    // Валидации выше синхронны; всё тяжёлое (WAL-checkpoint при дропе сессии, rename
+    // каталога, серия vault-правок манифеста, перезапись client.json) — на воркер
+    // (01#27). Итог миграции — сигналом profileServerChanged(ok, error): QML по нему
+    // уходит к списку профилей или показывает ошибку.
+    std::shared_ptr<ServerSession> owned = session; // последний ref роняем на воркере (WAL)
     if (wasActive) store->setActiveSession({});
-    store->removeSession(session);
+    store->removeSession(session); // erase из стора дёшево; закрытие БД — при owned.reset()
 
-    // 2) Перенести каталог профиля old → new (диалоги/ключи/БД/вложения целиком).
     const QString oldDir = Paths::profileDir(profileId).absolutePath();
     const QString newDir = Paths::profileDir(newProfileId).absolutePath();
-    if (!QDir().rename(oldDir, newDir)) {
-        // Каталог не тронут → возвращаем профиль как был (релогин на старый адрес).
-        loginClientInternal(oldServer, username, privateKey, reserves, wasActive, false, QJsonObject{});
-        return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось перенести данные профиля."));
-    }
-
-    // 3) Манифест: убрать старую запись, создать новую (с переносом ника/аватара).
-    {
-        QJsonObject manifest = Utils::loadProfilesManifest();
-        QJsonArray kept;
-        for (const auto &v : manifest.value("profiles").toArray())
-            if (v.toObject().value("id").toString() != profileId) kept.append(v);
-        manifest["profiles"] = kept;
-        if (manifest.value("last_profile_id").toString() == profileId)
-            manifest["last_profile_id"] = QString();
-        Utils::writeJsonObjectFile(Paths::profilesManifest(), manifest);
-    }
-    Utils::upsertProfileManifest(newProfileId, newServer, username, wasActive);
-    QJsonObject carry;
-    if (!localName.isEmpty()) carry["localName"] = localName;
-    if (!avatar.isEmpty()) carry["avatar"] = avatar;
-    if (!carry.isEmpty()) Utils::updateProfileManifestEntry(newProfileId, carry);
-
-    // 4) Переписать client.json мигрированного каталога на новый адрес (маскировку
-    //    и прочие метаданные saveClientConfigForProfile сохраняет).
-    const QStringList turn = turnUrlsFromObject(Utils::readJsonObjectFile(Paths::profileClient(newProfileId)));
-    ServerSession::saveClientConfigForProfile(newProfileId, newServer, username, serverId, privateKey,
-                                              reservesForNew, turn);
-
-    // 5) Перелогин на новый адрес: каталог уже на месте → диалоги/ключи подхватятся;
-    //    финальный upsert манифеста сохранит уже записанные ник/аватар.
-    loginClientInternal(newServer, username, privateKey, reservesForNew, wasActive, false, QJsonObject{});
-    emit sessionsChanged();
-    return QVariantMap{{"ok", true}, {"newProfileId", newProfileId}};
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, owned = std::move(owned), oldDir, newDir, profileId, newProfileId, newServer, oldServer, username,
+         serverId, privateKey, localName, avatar, reserves, reservesForNew, wasActive]() mutable {
+            // 1) Дождаться фоновой записи dialogs.json, затем уронить сессию (закрыть
+            //    SQLCipher с WAL-checkpoint) — ДО переноса каталога.
+            if (owned) {
+                owned->flushDialogs();
+                owned.reset();
+            }
+            // 2) Перенести каталог old → new целиком (диалоги/ключи/БД/вложения).
+            const bool renamed = QDir().rename(oldDir, newDir);
+            if (renamed) {
+                // 3) Манифест: убрать старую запись, создать новую (ник/аватар перенести).
+                {
+                    QJsonObject manifest = Utils::loadProfilesManifest();
+                    QJsonArray kept;
+                    for (const auto &v : manifest.value("profiles").toArray())
+                        if (v.toObject().value("id").toString() != profileId) kept.append(v);
+                    manifest["profiles"] = kept;
+                    if (manifest.value("last_profile_id").toString() == profileId)
+                        manifest["last_profile_id"] = QString();
+                    Utils::writeProfilesManifest(manifest);
+                }
+                Utils::upsertProfileManifest(newProfileId, newServer, username, wasActive);
+                QJsonObject carry;
+                if (!localName.isEmpty()) carry["localName"] = localName;
+                if (!avatar.isEmpty()) carry["avatar"] = avatar;
+                if (!carry.isEmpty()) Utils::updateProfileManifestEntry(newProfileId, carry);
+                // 4) Переписать client.json на новый адрес (маскировку и пр. сохраняем).
+                const QStringList turn =
+                    turnUrlsFromObject(Utils::readJsonObjectFile(Paths::profileClient(newProfileId)));
+                ServerSession::saveClientConfigForProfile(newProfileId, newServer, username, serverId, privateKey,
+                                                          reservesForNew, turn);
+            }
+            // 5) На GUI: перелогин (сам уходит в свой воркер) + результат сигналом.
+            QMetaObject::invokeMethod(self, [self, renamed, newServer, oldServer, username, privateKey, reserves,
+                                             reservesForNew, wasActive]() {
+                if (!self) return;
+                if (renamed) {
+                    self->loginClientInternal(newServer, username, privateKey, reservesForNew, wasActive, false,
+                                              QJsonObject{});
+                    emit self->sessionsChanged();
+                    emit self->profileServerChanged(true, QString());
+                } else {
+                    // Каталог не тронут → релогин на старый адрес (восстановление).
+                    self->loginClientInternal(oldServer, username, privateKey, reserves, wasActive, false,
+                                              QJsonObject{});
+                    emit self->profileServerChanged(false, MainBackend::tr("Не удалось перенести данные профиля."));
+                }
+            });
+        });
+    return QVariantMap{{"ok", true}}; // миграция запущена; итог — profileServerChanged
 }
 
 // ── Export / Import ───────────────────────────────────────────────────────────
@@ -2258,58 +2419,93 @@ QVariantMap MainBackend::exportProfile(const QString &profileType, const QString
     if (!includeClient) payload["servers"] = QJsonArray{};
     if (!includeAdmin) payload["admin_servers"] = QJsonArray{};
     const QString payloadJson = QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact));
-    auto envelope             = ParanoiaFFI::ecies_encrypt(receiverPubkeyB64.trimmed(), payloadJson);
-    if (envelope.isEmpty()) {
-        if (ParanoiaFFI::last_error() == "invalid_device_key")
-            return ParanoiaFFI::errorResult(MainBackend::tr("Некорректный публичный ключ принимающего устройства."));
-        return ParanoiaFFI::errorResult(MainBackend::tr("Ошибка шифрования экспорта."));
-    }
-    const QByteArray envelopeBytes = envelope.toUtf8();
-    if (!Utils::writeBytesToTarget(exportTarget, envelopeBytes))
-        return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось записать файл экспорта."));
-    return QVariantMap{
-        {"ok", true},
-        {"path", exportTarget},
-        {"dialogues", exportedDialogues},
-        {"keyEntries", exportedKeyEntries},
-    };
+    // Валидации/сборка payload выше синхронны; ECIES-шифрование и запись (на Android
+    // SAF/JNI через ContentResolver — при облачном провайдере сетевой I/O) — на воркер
+    // (01#29). Итог — сигналом exportFinished; кнопка заблокирована до него.
+    const QString receiverKey = receiverPubkeyB64.trimmed();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, payloadJson, receiverKey, exportTarget, exportedDialogues, exportedKeyEntries]() {
+            QString error;
+            auto envelope = ParanoiaFFI::ecies_encrypt(receiverKey, payloadJson);
+            if (envelope.isEmpty()) {
+                error = ParanoiaFFI::last_error() == "invalid_device_key"
+                            ? MainBackend::tr("Некорректный публичный ключ принимающего устройства.")
+                            : MainBackend::tr("Ошибка шифрования экспорта.");
+            } else if (!Utils::writeBytesToTarget(exportTarget, envelope.toUtf8())) {
+                error = MainBackend::tr("Не удалось записать файл экспорта.");
+            }
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, error, exportTarget, exportedDialogues, exportedKeyEntries]() {
+                if (!self) return;
+                emit self->exportFinished(error.isEmpty(), exportTarget, exportedDialogues, exportedKeyEntries, error);
+            });
+        });
+    return QVariantMap{{"ok", true}}; // экспорт запущен; итог — exportFinished
 }
 
-QVariantMap MainBackend::importProfile(const QString &filePath, bool activate)
+void MainBackend::importProfile(const QString &filePath, bool activate)
 {
-    if (m_devicePrivkey.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Device keypair не инициализирован."));
-    // На Android FileDialog возвращает content:// URI — QFile его не откроет.
-    // resolveImportPath на Android копирует контент в CacheLocation и
-    // возвращает путь к копии; cleanup ниже.
-    const QString normalizedFilePath = Utils::resolveImportPath(filePath);
-    if (normalizedFilePath.isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Не указан путь к файлу."));
-    const bool isContentUri =
-        filePath.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
-    QFile file(normalizedFilePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        if (isContentUri) QFile::remove(normalizedFilePath);
-        return ParanoiaFFI::errorResult(MainBackend::tr("Не удалось открыть файл: ") + normalizedFilePath);
+    if (m_devicePrivkey.isEmpty()) {
+        emit importProfileFinished(ParanoiaFFI::errorResult(MainBackend::tr("Device keypair не инициализирован.")));
+        return;
     }
-    if (file.size() > Utils::MaxExportFileBytes) {
-        file.close();
-        if (isContentUri) QFile::remove(normalizedFilePath);
-        return ParanoiaFFI::errorResult(MainBackend::tr("Файл экспорта слишком большой."));
-    }
-    const QString envelopeJson = QString::fromUtf8(file.readAll());
-    file.close();
-    // Кэш-копия от resolveImportPath больше не нужна — освобождаем место.
-    if (isContentUri) QFile::remove(normalizedFilePath);
-    if (envelopeJson.trimmed().isEmpty()) return ParanoiaFFI::errorResult(MainBackend::tr("Файл пуст."));
-    auto payloadJson = ParanoiaFFI::ecies_decrypt(m_devicePrivkey, envelopeJson);
-    if (payloadJson.isEmpty()) {
-        const QString err = ParanoiaFFI::last_error();
-        if (err == "ecies_decrypt_error")
-            return ParanoiaFFI::errorResult(
-                MainBackend::tr("Не удалось расшифровать файл. Файл зашифрован другим ключом или повреждён."));
-        if (err == "ecies_unsupported_version")
-            return ParanoiaFFI::errorResult(MainBackend::tr("Неподдерживаемая версия формата экспорта."));
-        return ParanoiaFFI::errorResult(MainBackend::tr("Ошибка расшифровки."));
-    }
+    // Phase 1 (воркер): resolveImportPath (на Android — JNI-копия content:// целиком),
+    // чтение файла (до MaxExportFileBytes) и ecies_decrypt (может ждать глобальный
+    // FFI-мьютекс за long-poll'ом) — тяжёлое, вне GUI (01#8). Мердж/запись профилей
+    // (phase 2) остаются на GUI: трогают session/admin-состояние.
+    const QString devicePrivkey = m_devicePrivkey;
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, filePath, activate, devicePrivkey]() {
+        QVariantMap error;
+        QString payloadJson;
+        const QString normalizedFilePath = Utils::resolveImportPath(filePath);
+        const bool isContentUri = filePath.trimmed().startsWith(QStringLiteral("content://"), Qt::CaseInsensitive);
+        if (normalizedFilePath.isEmpty()) {
+            error = ParanoiaFFI::errorResult(MainBackend::tr("Не указан путь к файлу."));
+        } else {
+            QFile file(normalizedFilePath); // закроется деструктором при выходе из блока
+            if (!file.open(QIODevice::ReadOnly)) {
+                error = ParanoiaFFI::errorResult(MainBackend::tr("Не удалось открыть файл: ") + normalizedFilePath);
+            } else if (file.size() > Utils::MaxExportFileBytes) {
+                error = ParanoiaFFI::errorResult(MainBackend::tr("Файл экспорта слишком большой."));
+            } else {
+                const QString envelopeJson = QString::fromUtf8(file.readAll());
+                if (envelopeJson.trimmed().isEmpty()) {
+                    error = ParanoiaFFI::errorResult(MainBackend::tr("Файл пуст."));
+                } else {
+                    auto decrypted = ParanoiaFFI::ecies_decrypt(devicePrivkey, envelopeJson);
+                    if (decrypted.isEmpty()) {
+                        const QString err = ParanoiaFFI::last_error();
+                        error             = ParanoiaFFI::errorResult(
+                            err == "ecies_decrypt_error"
+                                            ? MainBackend::tr(
+                                      "Не удалось расшифровать файл. Файл зашифрован другим ключом или повреждён.")
+                            : err == "ecies_unsupported_version"
+                                            ? MainBackend::tr("Неподдерживаемая версия формата экспорта.")
+                                            : MainBackend::tr("Ошибка расшифровки."));
+                    } else {
+                        payloadJson = decrypted;
+                    }
+                }
+            }
+        }
+        // Кэш-копия от resolveImportPath (content://) больше не нужна.
+        if (isContentUri && !normalizedFilePath.isEmpty()) QFile::remove(normalizedFilePath);
+
+        QMetaObject::invokeMethod(self, [self, error, payloadJson, activate]() {
+            if (!self) return;
+            // Phase 2 (GUI): парс + мердж/запись профилей + активация.
+            if (!error.isEmpty())
+                emit self->importProfileFinished(error);
+            else
+                emit self->importProfileFinished(self->applyImportedPayload(payloadJson, activate));
+        });
+    });
+}
+
+QVariantMap MainBackend::applyImportedPayload(const QString &payloadJson, bool activate)
+{
     QJsonParseError parseError;
     const auto doc = QJsonDocument::fromJson(payloadJson.toUtf8(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject())
@@ -2546,6 +2742,19 @@ QVariantMap MainBackend::importProfile(const QString &filePath, bool activate)
     };
 }
 
+void MainBackend::moveToBackground()
+{
+#if defined(Q_OS_ANDROID)
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid()) return;
+    QJniObject::callStaticMethod<void>(
+        "app/paranoia/client/ParanoiaAndroidUtils", "moveTaskToBack",
+        "(Landroid/content/Context;)V", context.object<jobject>());
+    QJniEnvironment env;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+#endif
+}
+
 QVariantMap MainBackend::takeShareTarget()
 {
     QVariantMap result;
@@ -2749,13 +2958,17 @@ void MainBackend::deleteProfile(const QString &profileId)
     const auto active    = store->activeSession();
     const bool wasActive = active && active->profileId == profileId;
 
-    // 1) Снять in-memory сессию (освобождает handle/WAL).
+    // 1) Снять in-memory сессию из стора (дёшево — erase из вектора). Последний
+    //    strong-ref держим локально и роняем на воркере (3): paranoia_client_free /
+    //    закрытие SQLCipher с WAL-checkpoint не должны морозить GUI (01#9).
+    std::shared_ptr<ServerSession> owned;
     if (auto s = store->sessionForProfile(profileId)) {
+        owned = s;
         if (wasActive) store->setActiveSession({});
         store->removeSession(s);
     }
 
-    // 2) Убрать запись из манифеста профилей; поправить last_profile_id.
+    // 2) Убрать запись из манифеста профилей; поправить last_profile_id. (мелкая запись)
     QJsonObject manifest = Utils::loadProfilesManifest();
     QJsonArray kept;
     for (const auto &v : manifest.value("profiles").toArray())
@@ -2763,15 +2976,31 @@ void MainBackend::deleteProfile(const QString &profileId)
     manifest["profiles"] = kept;
     if (manifest.value("last_profile_id").toString() == profileId)
         manifest["last_profile_id"] = kept.isEmpty() ? QString() : kept.first().toObject().value("id").toString();
-    Utils::writeJsonObjectFile(Paths::profilesManifest(), manifest);
+    Utils::writeProfilesManifest(manifest);
 
-    // 3) Удалить данные профиля с диска (диалоги/ключи/БД/вложения).
-    QDir(Paths::profileDir(profileId).absolutePath()).removeRecursively();
+    // 3) Тяжёлое — на воркер: дождаться фоновой записи dialogs.json, уронить сессию
+    //    (WAL-checkpoint) и рекурсивно снести каталог (attachment-cache — гиги). По
+    //    завершении переспрашиваем флаг наличия профилей: dir-скан теперь точен.
+    const QString dir = Paths::profileDir(profileId).absolutePath();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, owned = std::move(owned), dir]() mutable {
+        if (owned) {
+            owned->flushDialogs();
+            owned.reset(); // WAL-checkpoint здесь, не на GUI
+        }
+        QDir(dir).removeRecursively();
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self]() {
+            if (self) self->setHasStoredClientProfiles(hasStoredClientProfileOnDisk());
+        });
+    });
 
     // 4) Почистить in-memory нотификации профиля.
     m_notifications->clearProfile(profileId);
 
-    // 5) Обновить флаг наличия профилей (логин-экран зависит от него).
+    // 5) Оптимистично обновить флаг наличия профилей (окончательно — по завершении 3).
+    //    Для удаления НЕ последнего профиля этого достаточно; для последнего флаг
+    //    досчитается точным после сноса каталога.
     setHasStoredClientProfiles(hasStoredClientProfileOnDisk());
 
     // 6) Если удалили активный — переключиться на оставшийся, иначе «не залогинен».
@@ -2850,60 +3079,120 @@ void MainBackend::loadDeviceKey()
 
 void MainBackend::publishServiceSnapshot()
 {
-    QJsonArray profiles;
-    const auto sessions = SessionStore::instance()->allSessions();
-    for (const auto &session : sessions) {
+    // В "off" snapshot сервису не шлём: на Android intent доставляется через
+    // startForegroundService и каждая публикация (unlock, смена диалогов)
+    // мигала бы FGS-уведомлением вопреки настройке. Свежий процесс сервиса
+    // узнаёт режим из prefs (persistPollMode); при выходе из "off"
+    // pollModeChanged снова приведёт нас сюда с актуальным snapshot'ом.
+    if (m_pollModeController->pollMode() == QStringLiteral("off"))
+        return;
+    // Сборка snapshot'а раньше читала last_pulled_seq из SQLCipher через FFI В ЦИКЛЕ
+    // по всем диалогам всех сессий — на GUI-потоке, на каждый dialogsChanged/pull
+    // (01#5). Теперь: RAM-данные снимаем здесь (GUI), а FFI-чтения seq и сборку JSON
+    // выполняем на воркере; публикацию (JNI) возвращаем на GUI. Коалесинг: пока
+    // воркер идёт, повторные запросы лишь взводят pending → один повтор по завершении.
+    if (m_snapshotInFlight) {
+        m_snapshotPending = true;
+        return;
+    }
+    m_snapshotInFlight = true;
+    m_snapshotPending  = false;
+
+    // 1) Снимок RAM (без FFI): всё, кроме last_pulled_seq.
+    struct SnapDialog {
+        QString peerServerId;
+        QString masterKeyB64; // последняя запись keyring (для service_call_poll); пусто — нет keyring
+        bool muted = false;   // уведомления по диалогу выключены (Dialog::notificationsMuted)
+    };
+    struct SnapSession {
+        std::shared_ptr<ServerSession> session; // для ffi + ffiMutex + serverId на воркере
+        QString server;
+        QString serverId;
+        QString privateKey;
+        QStringList reserveUrls;
+        QList<SnapDialog> dialogs;
+    };
+    auto snap              = std::make_shared<QList<SnapSession>>();
+    const QString pollMode = m_pollModeController->pollMode();
+    for (const auto &session : SessionStore::instance()->allSessions()) {
         if (!session) continue;
-        if (session->server.isEmpty() || session->private_key.isEmpty()
-            || session->serverId.isEmpty())
+        if (session->server.isEmpty() || session->private_key.isEmpty() || session->serverId.isEmpty())
             continue;
-
-        QJsonArray reserveUrls;
-        for (const QString &u : session->reserveServerUrls) reserveUrls.append(u);
-
-        QJsonArray dialogs;
-        // peerMasterKeys — для фонового опроса входящих ЗВОНКОВ (service_call_poll):
-        // master_key = последняя запись keyring диалога (как в VoipSystem), ключ —
-        // peerServerId (== sender в конвертах звонка).
-        QJsonArray peerMasterKeys;
-        // last_pulled_seq лежит в SQLCipher; берём его пока vault unlocked
-        // и UI ещё держит handle. Сервис будет использовать это значение
-        // как baseline для notify_count.
+        SnapSession ss;
+        ss.session     = session;
+        ss.server      = session->server;
+        ss.serverId    = session->serverId;
+        ss.privateKey  = session->private_key;
+        ss.reserveUrls = session->reserveServerUrls;
         for (const Dialog &d : session->dialogs) {
             if (d.peerServerId.isEmpty()) continue;
-            uint64_t seq = 0;
+            SnapDialog sd;
+            sd.peerServerId = d.peerServerId;
+            sd.muted        = d.notificationsMuted;
+            if (!d.keyring.isEmpty()) sd.masterKeyB64 = QString::fromUtf8(d.keyring.last().key.toBase64());
+            ss.dialogs.append(sd);
+        }
+        if (ss.dialogs.isEmpty()) continue;
+        snap->append(std::move(ss));
+    }
+
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, snap, pollMode]() {
+        // 2) На воркере: last_pulled_seq через FFI (локальный SQLCipher-read; хэндл
+        // копируем ОДИН раз под мгновенным локом, БД сериализуется в store — 01#32) +
+        // сборка JSON. GUI при этом свободен.
+        QJsonArray profiles;
+        for (const auto &ss : std::as_const(*snap)) {
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
-                QMutexLocker lock(&session->ffiMutex);
-                if (session->ffi) {
-                    session->ffi->last_pulled_seq(session->serverId, d.peerServerId, seq);
+                QMutexLocker lock(&ss.session->ffiMutex);
+                ffi = ss.session->ffi;
+            }
+            QJsonArray reserveUrls;
+            for (const QString &u : ss.reserveUrls) reserveUrls.append(u);
+            // peerMasterKeys — для фонового опроса входящих ЗВОНКОВ (service_call_poll):
+            // master_key = последняя запись keyring, ключ — peerServerId (== sender).
+            QJsonArray dialogs, peerMasterKeys;
+            for (const SnapDialog &sd : ss.dialogs) {
+                uint64_t seq = 0;
+                if (ffi) ffi->last_pulled_seq(ss.serverId, sd.peerServerId, seq);
+                QJsonObject dialog;
+                dialog["partnerServerId"] = sd.peerServerId;
+                dialog["seq"]             = qint64(seq);
+                if (sd.muted) dialog["muted"] = true;
+                dialogs.append(dialog);
+                if (!sd.masterKeyB64.isEmpty()) {
+                    QJsonObject pk;
+                    pk["peer"]           = sd.peerServerId;
+                    pk["master_key_b64"] = sd.masterKeyB64;
+                    peerMasterKeys.append(pk);
                 }
             }
-            QJsonObject dialog;
-            dialog["partnerServerId"] = d.peerServerId;
-            dialog["seq"]             = qint64(seq);
-            dialogs.append(dialog);
-
-            if (!d.keyring.isEmpty()) {
-                QJsonObject pk;
-                pk["peer"]           = d.peerServerId;
-                pk["master_key_b64"] = QString::fromUtf8(d.keyring.last().key.toBase64());
-                peerMasterKeys.append(pk);
-            }
+            if (dialogs.isEmpty()) continue;
+            QJsonObject profile;
+            profile["server"]         = ss.server;
+            profile["reserveUrls"]    = reserveUrls;
+            profile["signingKeyB64"]  = ss.privateKey;
+            profile["senderServerId"] = ss.serverId;
+            profile["dialogs"]        = dialogs;
+            profile["peerMasterKeys"] = peerMasterKeys;
+            profiles.append(profile);
         }
-        if (dialogs.isEmpty()) continue;
+        QJsonObject root;
+        root["profiles"] = profiles;
+        root["pollMode"] = pollMode;
+        const QString json = QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
 
-        QJsonObject profile;
-        profile["server"]         = session->server;
-        profile["reserveUrls"]    = reserveUrls;
-        profile["signingKeyB64"]  = session->private_key;
-        profile["senderServerId"] = session->serverId;
-        profile["dialogs"]        = dialogs;
-        profile["peerMasterKeys"] = peerMasterKeys;
-        profiles.append(profile);
-    }
-    QJsonObject root;
-    root["profiles"] = profiles;
-    const QString json =
-        QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact));
-    PlatformNotifications::publishServiceSnapshot(json);
+        // 3) Публикацию (JNI) — обратно на GUI, как и раньше; + обработка коалесинга.
+        QMetaObject::invokeMethod(self, [self, json]() {
+            if (!self) return;
+            self->m_snapshotInFlight = false;
+            const bool rerun         = self->m_snapshotPending;
+            self->m_snapshotPending  = false;
+            // Если пока собирали, режим переключили в "off" — не публикуем (FGS-флик).
+            if (self->m_pollModeController->pollMode() != QStringLiteral("off"))
+                PlatformNotifications::publishServiceSnapshot(json);
+            if (rerun) self->publishServiceSnapshot();
+        });
+    });
 }

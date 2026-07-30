@@ -38,9 +38,6 @@ namespace paranoia::voip
     ///   3. `attachAudio()` — стартует захват микрофона; теперь звук идёт в эфир.
     ///   4. `stop()` — корректно сворачивает всё.
     ///
-    /// Удобная обёртка `start(...)` объединяет prepare+setPeer+attachAudio для
-    /// случая, когда peer известен заранее (например, при тесте).
-    ///
     /// Все state-методы безопасны для вызова из главного потока Qt; callback'и
     /// FFI приходят в фоновых Tokio-потоках и переключаются на главный через
     /// `QMetaObject::invokeMethod`.
@@ -179,9 +176,6 @@ namespace paranoia::voip
         /// peer'а или явной просьбы удалённой стороны).
         Q_INVOKABLE void requestKeyframe();
 
-        /// Удобная объединённая обёртка prepare + setPeer + attachAudio.
-        Q_INVOKABLE bool start(const QString &localBind, const QString &peerAddr, const QString &masterKeyB64,
-                               const QString &sessionIdB64, int role /*0=initiator,1=responder*/);
         Q_INVOKABLE void stop();
 
     signals:

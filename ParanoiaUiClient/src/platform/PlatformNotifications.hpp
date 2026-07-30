@@ -24,7 +24,6 @@ namespace PlatformNotifications
     // уведомления, накопленные карточки в шторке должны исчезнуть.
     void clearAccumulatedNotifications();
     NotificationTarget takeOpenTargetFromNotification();
-    QString takeOpenPeerFromNotification();
     // Handoff входящего звонка из фона (#6): сохранить расшифрованный конверт оффера
     // (iOS — in-process, в NSUserDefaults; Android сохраняет сам сервис) и забрать
     // его при открытии приложения, чтобы скормить в CallSignaling.injectEnvelope.
@@ -52,7 +51,10 @@ namespace PlatformNotifications
     /// строго в RAM (никакой persistence) — на каждый запуск процесса
     /// snapshot нужно пушить заново. На non-Android платформах no-op.
     void publishServiceSnapshot(const QString &snapshotJson);
-    /// Очистить snapshot в сервисе (logout). Следующий poll увидит «нет целей»
-    /// и сервис остановится. На non-Android no-op.
-    void clearServiceSnapshot();
+    /// Персистнуть режим фонового опроса ("normal" | "battery_saving" | "off")
+    /// в prefs Android-процесса :notifications, чтобы свежий процесс сервиса
+    /// помнил режим без живого UI. ТОЛЬКО персист: живому сервису режим доезжает
+    /// со snapshot'ом, а стартом/остановкой фоновой доставки управляет
+    /// NotificationCoordinator. На non-Android no-op.
+    void persistPollMode(const QString &mode);
 }

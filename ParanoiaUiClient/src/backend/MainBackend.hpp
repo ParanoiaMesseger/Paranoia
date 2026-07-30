@@ -7,6 +7,7 @@
 #include <QUrl>
 
 class NotificationCoordinator;
+class PollModeController;
 class ServerSession;
 
 class MainBackend : public QObject
@@ -106,6 +107,9 @@ public:
                                                      bool updateExisting);
     Q_INVOKABLE void removeDialog(const QString &peer);
     Q_INVOKABLE QVariantList getDialogs() const;
+    /// Точечная инфа одного пира {peer, displayName, avatar} — для _refreshPeerInfo
+    /// без ремаршалинга всего списка на каждый dialogsChanged (02#14).
+    Q_INVOKABLE QVariantMap dialogInfo(const QString &peer) const;
     Q_INVOKABLE QVariantList getAdminServers() const;
 
     // ── Корпоративный API: синхронизация связки сотрудника ──────────────────
@@ -142,8 +146,9 @@ public:
     /// Применить профиль маскировки из файла. Если профиль подписан и есть
     /// доверенный ключ — проверяется подпись; иначе при allowUnsigned
     /// применяется без подписи (для частного развёртывания, с предупреждением).
-    /// Возвращает {ok, error, profileName, signed}.
-    Q_INVOKABLE QVariantMap applyMaskingFromFile(const QString &filePath, bool allowUnsigned);
+    /// Асинхронно (воркер, 01#6): чтение файла (на Android — JNI-копия content://)
+    /// и FFI-применение вне GUI. Итог — сигналом maskingApplyResult.
+    Q_INVOKABLE void applyMaskingFromFile(const QString &filePath, bool allowUnsigned);
     /// Вернуть встроенную маску (очистить профиль). {ok}.
     Q_INVOKABLE QVariantMap resetMasking();
 
@@ -158,8 +163,9 @@ public:
     // ── Настройки профиля (локальные: ник/аватар в манифесте) ──
     /// Ник профиля — локальный алиас, показывается в пикере вместо server_id.
     Q_INVOKABLE void setProfileLocalName(const QString &profileId, const QString &name);
-    /// Аватар профиля из файла/URI (квадрат 64×64, круг запекается в PNG).
-    Q_INVOKABLE bool setProfileAvatar(const QString &profileId, const QString &fileUrl);
+    /// Аватар профиля из файла/URI (квадрат 64×64, круг запекается в PNG). Запекание
+    /// асинхронное (воркер, 01#11); итог — сигналом profileAvatarResult(profileId, ok).
+    Q_INVOKABLE void setProfileAvatar(const QString &profileId, const QString &fileUrl);
     Q_INVOKABLE void clearProfileAvatar(const QString &profileId);
     /// Поля для экрана настроек профиля (server/serverId/username/ник/аватар/резерв).
     Q_INVOKABLE QVariantMap getProfileInfo(const QString &profileId) const;
@@ -182,7 +188,9 @@ public:
     // ── Управление данными / самоликвидация ──────────────────────────────────
     /// Разбивка занятого места по категориям для диаграммы: список
     /// {label, bytes, color}. Считает реальные размеры на диске.
-    Q_INVOKABLE QVariantList storageBreakdown() const;
+    /// Асинхронно (воркер, 01#10) считает разбивку хранилища; итог — сигналом
+    /// storageBreakdownReady(list из {label,bytes,color}). QML держит спиннер.
+    Q_INVOKABLE void storageBreakdown();
     /// Очистить регенерируемый кэш (кэш вложений профилей + временные файлы
     /// видео/голоса/Qt) БЕЗ удаления сообщений/ключей/профилей. Асинхронно;
     /// по завершении — cachesCleared.
@@ -200,10 +208,14 @@ public:
     Q_INVOKABLE void setDialogLocalName(const QString &peer, const QString &name);
     /// Задать локальный аватар диалога из файла (file:// или content://):
     /// масштаб до квадрата 64×64 (кроп по центру), PNG base64 в зашифрованном
-    /// dialogs (в vault). Возвращает true при успехе.
-    Q_INVOKABLE bool setDialogAvatar(const QString &peer, const QString &fileUrl);
+    /// dialogs (в vault). Запекание асинхронное (воркер, 01#11); по готовности
+    /// применяется к диалогу и эмитится dialogsChanged.
+    Q_INVOKABLE void setDialogAvatar(const QString &peer, const QString &fileUrl);
     /// Убрать локальный аватар (вернуть букву).
     Q_INVOKABLE void clearDialogAvatar(const QString &peer);
+    /// Выключить/включить системные уведомления по диалогу. Диалог остаётся в
+    /// списке, бейдж непрочитанного считается как обычно. Локально.
+    Q_INVOKABLE void setDialogMuted(const QString &peer, bool muted);
     /// Аватар диалога как data-URL (`data:image/png;base64,…`) для прямого
     /// присвоения в `Image.source`, либо пустая строка если аватара нет.
     /// Нужен экрану звонка (там нет модели диалога — берём по peer).
@@ -215,7 +227,10 @@ public:
     /// и логинится, даже если уже есть активный профиль (поток регистрации/
     /// онбординга — «войти этим профилем»). activate=false — прежнее поведение
     /// (активирует только если активного профиля ещё нет; для импорта в настройках).
-    Q_INVOKABLE QVariantMap importProfile(const QString &filePath, bool activate = false);
+    /// Асинхронно (01#8): тяжёлые чтение файла (Android JNI-копия content://) и
+    /// ecies_decrypt (может ждать глобальный FFI-мьютекс за long-poll'ом) — на воркере;
+    /// мердж/запись профилей — на GUI. Итог — сигналом importProfileFinished.
+    Q_INVOKABLE void importProfile(const QString &filePath, bool activate = false);
     Q_INVOKABLE QVariantMap deleteExportFile(const QString &filePath);
 
     /// Конвертировать QML-овский url (например, FileDialog.selectedFile) в
@@ -231,12 +246,18 @@ public:
     // После вызова данные у платформы очищаются (одна попытка применить).
     Q_INVOKABLE QVariantMap takeShareTarget();
 
+    // Свернуть приложение в фон (Android: moveTaskToBack — как Home). На корневой
+    // странице «назад» зовёт это вместо закрытия окна: закрытие на Android рвёт
+    // Qt-teardown и даёт белый экран/зависание. На других ОС — no-op.
+    Q_INVOKABLE void moveToBackground();
+
     // Singleton-accessor для JNI bridge'а (см.
     // Java_app_paranoia_client_ParanoiaActivity_nativeShareTargetReady).
     // Java вызывает после storeShareTarget, чтобы QML гарантированно
     // подобрал share-данные, даже если onActiveChanged не сработал
     // (был уже foreground).
     static MainBackend *instance() { return s_instance; }
+    PollModeController *pollModeController() const { return m_pollModeController; }
 
 public slots:
     /// Пересобрать polling-snapshot для notifications-сервиса.
@@ -253,6 +274,19 @@ signals:
     void loginStateChanged();
     void deviceKeyChanged();
     void adminStateChanged();
+    /// Результат асинхронной установки аватара профиля (01#11): ok=false — ошибка
+    /// декода/записи. QML показывает feedback по этому сигналу вместо возврата.
+    void profileAvatarResult(const QString &profileId, bool ok);
+    /// Готова разбивка хранилища (01#10): список {label, bytes, color}.
+    void storageBreakdownReady(const QVariantList &breakdown);
+    /// Итог асинхронной смены адреса профиля (01#27): ok — миграция+перелогин
+    /// запущены (QML уходит к списку); иначе error (каталог восстановлен на старом).
+    void profileServerChanged(bool ok, const QString &error);
+    /// Итог асинхронного экспорта профиля (01#29): путь + счётчики диалогов/ключей.
+    void exportFinished(bool ok, const QString &path, int dialogues, int keyEntries, const QString &error);
+    /// Итог асинхронного импорта профиля (01#8): {ok, error, importedDialogues,
+    /// importedKeyEntries, importedProfiles, importedAdminServers, skippedEntries, conflicts}.
+    void importProfileFinished(const QVariantMap &result);
     void loginError(const QString &msg);
     void userRegistered();
     void registerUserError(const QString &msg);
@@ -302,17 +336,32 @@ signals:
     void connectionStateChanged();
     /// Результат применения/сверки маскировки. ok, сообщение для UI.
     void maskingApplied(bool ok, const QString &message);
+    /// Результат асинхронного applyMaskingFromFile (01#6): needsUnsignedConfirm —
+    /// профиль без подписи, нужно подтверждение (sourcePath — для повторного вызова
+    /// с allowUnsigned). ok — применён; иначе error.
+    void maskingApplyResult(bool ok, bool needsUnsignedConfirm, const QString &sourcePath,
+                            const QString &profileName, const QString &error);
 
 private:
     static MainBackend *s_instance;
     NotificationCoordinator *m_notifications = nullptr;
+    PollModeController *m_pollModeController = nullptr;
     class QNetworkAccessManager *m_net = nullptr; // ленивая инициализация для Корп-API
     QString m_devicePrivkey;
     bool m_hasStoredClientProfiles = false;
+    // Коалесинг фоновой сборки snapshot'а сервиса (01#5): сборка идёт на воркере,
+    // а publishServiceSnapshot дёргается пачками (dialogsChanged/pulledNewMessages).
+    // in-flight → следующий запрос лишь взводит pending; по завершении один повтор.
+    // Доступ только с GUI-потока (слот + GUI-завершение воркера).
+    bool m_snapshotInFlight = false;
+    bool m_snapshotPending  = false;
     QString m_maskingState;
     QString m_connectionState = QStringLiteral("online");
     QString m_maskingProfileName;
     void setHasStoredClientProfiles(bool hasProfiles);
+    // GUI-фаза импорта (01#8): парс расшифрованного payload + мердж/запись профилей
+    // + активация. Трогает session/admin-состояние → только GUI-поток.
+    QVariantMap applyImportedPayload(const QString &payloadJson, bool activate);
     void setMaskingState(const QString &state, const QString &profileName = {});
     /// masking-конфиг активного профиля из client.json:
     /// {profileId, tariff, url, bearer, trusted}. Пусто — нет активной сессии.

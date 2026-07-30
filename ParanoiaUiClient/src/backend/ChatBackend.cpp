@@ -15,6 +15,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QGuiApplication>
 #include <QInputMethod>
 #include <QMimeDatabase>
@@ -142,6 +143,20 @@ namespace
             QStringLiteral("attachment-%1.bin").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
     }
 
+    // Приватный кэш расшифрованных файлов для «открыть внешним приложением».
+    // На Android — files-каталог (AppDataLocation): он покрыт FileProvider'ом,
+    // в отличие от CacheLocation.
+    QString openCacheDir()
+    {
+#if defined(Q_OS_ANDROID)
+        return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+               + QStringLiteral("/paranoia_open");
+#else
+        return QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+               + QStringLiteral("/paranoia_open");
+#endif
+    }
+
     QString safeAttachmentName(const QString &name)
     {
         QString value = name.trimmed();
@@ -219,41 +234,46 @@ namespace
         return reactions;
     }
 
+    // idToIndex: id → индекс в cache (O(1) выход на целевое сообщение). РАНЬШЕ функция
+    // линейно сканировала весь cache на КАЖДУЮ реакцию (+ toMap на каждый элемент) —
+    // O(R·N) на входе в диалог с историей, где много реакций (репро Иванова упоминал
+    // «реакции»); часть того же dead-фриза, что и дедуп в appendMessages.
     void applyReactionToCache(QVariantList &cache, const QVariantMap &reaction, const QString &myId,
-                              const QString &myUsername, const QMap<QString, QString> &peerIdToUsername)
+                              const QString &myUsername, const QMap<QString, QString> &peerIdToUsername,
+                              const QHash<QString, int> &idToIndex)
     {
         const QString targetId = reaction.value(QStringLiteral("target_id")).toString();
         const QString emoji    = reaction.value(QStringLiteral("emoji")).toString();
         const QString sender   = reaction.value(QStringLiteral("sender")).toString();
         if (targetId.isEmpty() || emoji.isEmpty() || sender.isEmpty()) return;
 
-        for (auto &messageValue : cache) {
-            QVariantMap message = messageValue.toMap();
-            if (message.value(QStringLiteral("id")).toString() != targetId) continue;
+        const auto it = idToIndex.constFind(targetId);
+        if (it == idToIndex.constEnd()) return;
+        const int idx = it.value();
+        if (idx < 0 || idx >= cache.size()) return;
 
-            QVariantList events = message.value(QStringLiteral("reaction_events")).toList();
-            bool replaced       = false;
-            for (auto &eventValue : events) {
-                QVariantMap event = eventValue.toMap();
-                if (event.value(QStringLiteral("sender")).toString() != sender) continue;
-                event[QStringLiteral("emoji")] = emoji;
-                eventValue                     = event;
-                replaced                       = true;
-                break;
-            }
-            if (!replaced) {
-                events.append(QVariantMap{
-                    {QStringLiteral("sender"), sender},
-                    {QStringLiteral("emoji"), emoji},
-                });
-            }
-            const QVariantList reactionsList           = reactionsForEvents(events, myId, myUsername, peerIdToUsername);
-            message[QStringLiteral("reaction_events")] = events;
-            message[QStringLiteral("reactions_json")]  = QString::fromUtf8(
-                QJsonDocument(QJsonArray::fromVariantList(reactionsList)).toJson(QJsonDocument::Compact));
-            messageValue = message;
-            return;
+        QVariantMap message = cache.at(idx).toMap();
+        QVariantList events = message.value(QStringLiteral("reaction_events")).toList();
+        bool replaced       = false;
+        for (auto &eventValue : events) {
+            QVariantMap event = eventValue.toMap();
+            if (event.value(QStringLiteral("sender")).toString() != sender) continue;
+            event[QStringLiteral("emoji")] = emoji;
+            eventValue                     = event;
+            replaced                       = true;
+            break;
         }
+        if (!replaced) {
+            events.append(QVariantMap{
+                {QStringLiteral("sender"), sender},
+                {QStringLiteral("emoji"), emoji},
+            });
+        }
+        const QVariantList reactionsList           = reactionsForEvents(events, myId, myUsername, peerIdToUsername);
+        message[QStringLiteral("reaction_events")] = events;
+        message[QStringLiteral("reactions_json")]  = QString::fromUtf8(
+            QJsonDocument(QJsonArray::fromVariantList(reactionsList)).toJson(QJsonDocument::Compact));
+        cache[idx] = message;
     }
 
 #if defined(Q_OS_ANDROID)
@@ -338,15 +358,44 @@ namespace
         clearPendingAndroidException();
         return result.isValid() ? result.toString() : QString();
     }
+
+    // Открыть локальный файл системным выбором приложения (Java-хелпер:
+    // FileProvider-URI + ACTION_VIEW через chooser).
+    void androidOpenFileWithChooser(const QString &path, const QString &mimeType)
+    {
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return;
+        const QJniObject jPath = QJniObject::fromString(path);
+        const QJniObject jMime = QJniObject::fromString(mimeType);
+        QJniObject::callStaticMethod<void>(
+            "app/paranoia/client/ParanoiaAndroidUtils", "openFileWithChooser",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V", context.object<jobject>(),
+            jPath.object<jstring>(), jMime.object<jstring>());
+        clearPendingAndroidException();
+    }
 #else
     void requestAndroidFileAccessIfNeeded() {}
 #endif
+
+    void openFileWithSystemChooser(const QString &path, const QString &mime)
+    {
+#if defined(Q_OS_ANDROID)
+        androidOpenFileWithChooser(path, mime);
+#else
+        Q_UNUSED(mime);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+#endif
+    }
 
     bool applicationIsActive() { return QGuiApplication::applicationState() == Qt::ApplicationActive; }
 }
 
 ChatBackend::ChatBackend(QObject *parent) : QObject(parent)
 {
+    // Стартовая зачистка plaintext-кэшей (playback/open): при kill процесса
+    // Component.onDestruction в QML не выполняется, а расшифрованное не должно
+    // залёживаться (на Android open-кэш ещё и в зоне auto-backup).
+    clearPlaybackCache();
     m_activePollTimer = new QTimer(this);
     m_activePollTimer->setSingleShot(true);
     connect(m_activePollTimer, &QTimer::timeout, this, &ChatBackend::onActivePollTimer);
@@ -475,15 +524,19 @@ void ChatBackend::deleteTopic(const QString &topicName)
         if (!self) return;
         int rc = -1;
         QString err;
+        // хэндл под мгновенным локом → удаление темы (сервер+локально) без ffiMutex,
+        // не пишет outgoing seq (01#32).
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                err = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                rc                   = session->ffi->delete_topic_keyring(serverId, peerId, keyringJson, topic);
-                if (rc < 0) err = ParanoiaFFI::last_error();
-            }
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            err = "client_not_ready";
+        } else {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            rc                   = ffi->delete_topic_keyring(serverId, peerId, keyringJson, topic);
+            if (rc < 0) err = ParanoiaFFI::last_error();
         }
         QMetaObject::invokeMethod(self, [self, peer, topic, rc, err]() {
             if (!self) return;
@@ -673,22 +726,26 @@ void ChatBackend::dispatchOutbox(const QString &clientToken)
         if (!self) return;
         QString json;
         QString err;
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                err = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                // Активная тема на хендле — под тем же ffiMutex, что и отправка
-                // (атомарно): with_keyring_dialogue применит её к диалогу.
-                session->ffi->set_active_topic(topic);
-                if (hasReply)
-                    json = session->ffi->send_text_reply_json_keyring(serverId, peerId, keyringJson, text, replyToId,
-                                                                      replySender, replySummary);
-                else
-                    json = session->ffi->send_text_json_keyring(serverId, peerId, keyringJson, text);
-                if (json.isEmpty()) err = ParanoiaFFI::last_error();
-            }
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            err = "client_not_ready";
+        } else {
+            // sendMutex сериализует исходящие: set_active_topic→send атомарно + порядок
+            // seq. ffiMutex держим лишь на копию `ffi` (выше) → чтения/приём идут во
+            // время аплоада, не встают за общим локом (01#32).
+            QMutexLocker sendLock(&session->sendMutex);
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            ffi->set_active_topic(topic);
+            if (hasReply)
+                json = ffi->send_text_reply_json_keyring(serverId, peerId, keyringJson, text, replyToId,
+                                                         replySender, replySummary);
+            else
+                json = ffi->send_text_json_keyring(serverId, peerId, keyringJson, text);
+            if (json.isEmpty()) err = ParanoiaFFI::last_error();
         }
         if (json.isEmpty()) {
             QMetaObject::invokeMethod(self, [self, peer, err, clientToken]() {
@@ -781,20 +838,24 @@ void ChatBackend::sendReaction(const QString &targetId, const QString &emoji)
             if (!self) return;
             QString json;
             QString err;
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&session->ffiMutex);
-                if (!session->ffi) {
-                    err = "client_not_ready";
-                } else {
-                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                    // Реакции — вне тем (резолвятся по target_id). Сбрасываем
-                    // активную тему хендла, чтобы не унаследовать чужую от
-                    // предыдущей отправки.
-                    session->ffi->set_active_topic(QString());
-                    json = session->ffi->send_reaction_json_keyring(serverId, peerId, keyringJson, trimmedTarget,
-                                                                    trimmedEmoji);
-                    if (json.isEmpty()) err = ParanoiaFFI::last_error();
-                }
+                ffi = session->ffi;
+            }
+            if (!ffi) {
+                err = "client_not_ready";
+            } else {
+                // sendMutex: set_active_topic→send атомарно, аплоад без ffiMutex (01#32).
+                QMutexLocker sendLock(&session->sendMutex);
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                // Реакции — вне тем (резолвятся по target_id). Сбрасываем
+                // активную тему хендла, чтобы не унаследовать чужую от
+                // предыдущей отправки.
+                ffi->set_active_topic(QString());
+                json = ffi->send_reaction_json_keyring(serverId, peerId, keyringJson, trimmedTarget,
+                                                       trimmedEmoji);
+                if (json.isEmpty()) err = ParanoiaFFI::last_error();
             }
             if (json.isEmpty()) {
                 QMetaObject::invokeMethod(self, [self, err, sendKey]() {
@@ -926,22 +987,27 @@ void ChatBackend::sendFile(const QString &fileUrlOrPath)
         // ChatBackend-thread.
         std::unique_ptr<ProgressCtx> ctx(new ProgressCtx{self.data(), sendKey});
 
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!err.isEmpty()) {
-                // keep classified file error from Android/content resolver path
-            } else if (!session->ffi) {
-                err = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                session->ffi->set_active_topic(topic);   // вложение в активную тему
-                // Авто-выбор канала по размеру (история / эфемерно / отказ) —
-                // порог и лимиты резолвит lib (см. send_file_auto).
-                json = session->ffi->send_file_auto_json_keyring_with_progress(
-                    serverId, peerId, keyringJson, sendPath, sendMime,
-                    &paranoia_chat_progress_trampoline, ctx.get());
-                if (json.isEmpty()) err = ParanoiaFFI::last_error();
-            }
+            ffi = session->ffi;
+        }
+        if (!err.isEmpty()) {
+            // keep classified file error from Android/content resolver path
+        } else if (!ffi) {
+            err = "client_not_ready";
+        } else {
+            // sendMutex: set_active_topic→send атомарно + порядок seq; аплоад БЕЗ
+            // ffiMutex → чтения/приём/история идут параллельно (корень конвоя 01#32).
+            QMutexLocker sendLock(&session->sendMutex);
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            ffi->set_active_topic(topic);   // вложение в активную тему
+            // Авто-выбор канала по размеру (история / эфемерно / отказ) —
+            // порог и лимиты резолвит lib (см. send_file_auto).
+            json = ffi->send_file_auto_json_keyring_with_progress(
+                serverId, peerId, keyringJson, sendPath, sendMime,
+                &paranoia_chat_progress_trampoline, ctx.get());
+            if (json.isEmpty()) err = ParanoiaFFI::last_error();
         }
         // Чистим временный prep-файл отправки (транскод видео paranoia_vid /
         // запись голоса paranoia_voice) — он уже отправлен, plaintext не нужен.
@@ -1056,17 +1122,20 @@ void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QStri
         [self, session, peer, serverId, peerId, keyringJson, groupId, caption, photos, topic]() {
             if (!self) return;
             // 1. Заголовок группы (подпись + group_id) — отдельным сообщением.
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&session->ffiMutex);
-                if (session->ffi) {
-                    session->ffi->set_active_topic(topic);
-                    const QString hj = session->ffi->send_photo_group_json_keyring(serverId, peerId, keyringJson,
-                                                                                   groupId, caption);
-                    if (!hj.isEmpty()) {
-                        QMetaObject::invokeMethod(self, [self, peer, hj]() {
-                            if (self) self->appendMessages(peer, self->parseMessages(hj));
-                        });
-                    }
+                ffi = session->ffi;
+            }
+            if (ffi) {
+                QMutexLocker sendLock(&session->sendMutex);
+                ffi->set_active_topic(topic);
+                const QString hj = ffi->send_photo_group_json_keyring(serverId, peerId, keyringJson,
+                                                                      groupId, caption);
+                if (!hj.isEmpty()) {
+                    QMetaObject::invokeMethod(self, [self, peer, hj]() {
+                        if (self) self->appendMessages(peer, self->parseMessages(hj));
+                    });
                 }
             }
             // 2. Каждое фото — последовательно (порядок мозаики), с прогрессом по
@@ -1094,19 +1163,22 @@ void ChatBackend::sendPhotoGroup(const QStringList &fileUrlsOrPaths, const QStri
                     });
                 }
                 std::unique_ptr<ProgressCtx> ctx(new ProgressCtx{self.data(), gp.key});
+                std::shared_ptr<ParanoiaFFI> ffi;
                 {
                     QMutexLocker locker(&session->ffiMutex);
-                    if (!err.isEmpty()) {
-                        // keep classified error
-                    } else if (!session->ffi) {
-                        err = QStringLiteral("client_not_ready");
-                    } else {
-                        session->ffi->set_active_topic(topic);
-                        json = session->ffi->send_photo_grouped_file_json_keyring_with_progress(
-                            serverId, peerId, keyringJson, path, gp.mime, groupId,
-                            &paranoia_chat_progress_trampoline, ctx.get());
-                        if (json.isEmpty()) err = ParanoiaFFI::last_error();
-                    }
+                    ffi = session->ffi;
+                }
+                if (!err.isEmpty()) {
+                    // keep classified error
+                } else if (!ffi) {
+                    err = QStringLiteral("client_not_ready");
+                } else {
+                    QMutexLocker sendLock(&session->sendMutex);
+                    ffi->set_active_topic(topic);
+                    json = ffi->send_photo_grouped_file_json_keyring_with_progress(
+                        serverId, peerId, keyringJson, path, gp.mime, groupId,
+                        &paranoia_chat_progress_trampoline, ctx.get());
+                    if (json.isEmpty()) err = ParanoiaFFI::last_error();
                 }
                 if (json.isEmpty()) {
                     QMetaObject::invokeMethod(self, [self, err]() {
@@ -1186,15 +1258,18 @@ void ChatBackend::saveAttachment(const QString &messageId, const QString &target
         if (!self) return;
         int rc = -1;
         QString err;
+        // хэндл под мгновенным локом → скачивание/дешифр вложения без ffiMutex (01#32)
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                err = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                rc = session->ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, path);
-                if (rc != 0) err = ParanoiaFFI::last_error();
-            }
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            err = "client_not_ready";
+        } else {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            rc = ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, path);
+            if (rc != 0) err = ParanoiaFFI::last_error();
         }
 #if defined(Q_OS_ANDROID)
         if (rc == 0 && targetIsContent) {
@@ -1300,15 +1375,18 @@ void ChatBackend::saveAttachmentToDefault(const QString &messageId)
         if (!self) return;
         int rc = -1;
         QString err;
+        // хэндл под мгновенным локом → скачивание/дешифр вложения без ffiMutex (01#32)
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                err = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                rc = session->ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, tmpPath);
-                if (rc != 0) err = ParanoiaFFI::last_error();
-            }
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            err = "client_not_ready";
+        } else {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            rc = ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, tmpPath);
+            if (rc != 0) err = ParanoiaFFI::last_error();
         }
         QString savedPath;
         if (rc == 0) savedPath = androidSaveToMediaStore(tmpPath, filename, mime, isImg);
@@ -1351,15 +1429,18 @@ void ChatBackend::saveAttachmentToDefault(const QString &messageId)
             if (!self) return;
             int rc = -1;
             QString err;
+            // хэндл под мгновенным локом → скачивание/дешифр вложения без ffiMutex (01#32)
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&session->ffiMutex);
-                if (!session->ffi) {
-                    err = "client_not_ready";
-                } else {
-                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                    rc = session->ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, tmpPath);
-                    if (rc != 0) err = ParanoiaFFI::last_error();
-                }
+                ffi = session->ffi;
+            }
+            if (!ffi) {
+                err = "client_not_ready";
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                rc = ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, tmpPath);
+                if (rc != 0) err = ParanoiaFFI::last_error();
             }
             QMetaObject::invokeMethod(self, [self, peer, messageId, filename, tmpPath, rc, err, isVid, media]() {
                 if (!self) return;
@@ -1394,6 +1475,84 @@ void ChatBackend::saveAttachmentToDefault(const QString &messageId)
     QDir().mkpath(dir);
     saveAttachment(messageId, dir);
 #endif
+}
+
+void ChatBackend::openAttachmentExternally(const QString &messageId)
+{
+    if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
+    auto session = SessionStore::instance()->activeSession();
+    const auto *dlg = session ? session->findDialog(m_activePeer) : nullptr;
+    if (!dlg) {
+        // QML уже показал спиннер — завершаем, чтобы он не залип.
+        emit attachmentOpened(messageId);
+        return;
+    }
+    // Имя/mime из кэша: настоящее расширение нужно системе для подбора приложения.
+    QString filename = QStringLiteral("attachment.bin");
+    QString mime;
+    for (const auto &cached : m_messageCache.value(m_activePeer)) {
+        const QVariantMap msg = cached.toMap();
+        if (msg.value(QStringLiteral("id")).toString() != messageId) continue;
+        mime             = msg.value(QStringLiteral("mime_type")).toString();
+        const QString fn = msg.value(QStringLiteral("filename")).toString();
+        if (!fn.isEmpty()) filename = fn;
+        break;
+    }
+    filename = safeAttachmentName(filename);
+
+    // Детерминированный путь (по образцу playback-кэша): повторное открытие
+    // уже расшифрованного файла — мгновенно, без FFI.
+    QString safeId = messageId;
+    safeId.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_.-]")), QStringLiteral("_"));
+    const QString outDir = openCacheDir() + QChar('/') + safeId;
+    QDir().mkpath(outDir);
+    const QString outPath = outDir + QChar('/') + filename;
+    if (QFileInfo(outPath).size() > 0) {
+        openFileWithSystemChooser(outPath, mime);
+        emit attachmentOpened(messageId);
+        return;
+    }
+
+    const QString requestKey = m_activePeer + QChar('\n') + messageId + QStringLiteral("\nopen");
+    if (m_previewInFlightIds.contains(requestKey)) return;
+    m_previewInFlightIds.insert(requestKey);
+
+    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start(
+        [self, session, peer, serverId, peerServerId, keyringJson, messageId, requestKey, outPath, mime]() {
+            if (!self) return;
+            int rc = -1;
+            QString err;
+            // хэндл под мгновенным локом → скачивание/дешифр вложения без ffiMutex (01#32)
+            std::shared_ptr<ParanoiaFFI> ffi;
+            {
+                QMutexLocker locker(&session->ffiMutex);
+                ffi = session->ffi;
+            }
+            if (!ffi) {
+                err = QStringLiteral("client_not_ready");
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                rc = ffi->save_attachment_keyring(serverId, peerId, keyringJson, messageId, outPath);
+                if (rc != 0) err = ParanoiaFFI::last_error();
+            }
+            QMetaObject::invokeMethod(self, [self, requestKey, messageId, outPath, mime, rc, err]() {
+                if (!self) return;
+                self->m_previewInFlightIds.remove(requestKey);
+                if (rc == 0) {
+                    openFileWithSystemChooser(outPath, mime);
+                    emit self->attachmentOpened(messageId);
+                } else {
+                    QFile::remove(outPath);
+                    emit self->receiveError(ChatBackend::tr("Не удалось открыть файл: ")
+                                            + userFacingAttachmentError(err));
+                }
+            });
+        });
 }
 
 void ChatBackend::emitCachedMessages()
@@ -1444,15 +1603,18 @@ void ChatBackend::ensureImagePreview(const QString &messageId)
             if (!self) return;
             QByteArray bytes;
             QString err;
+            // хэндл под мгновенным локом → загрузка/дешифр байт превью без ffiMutex (01#32)
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&session->ffiMutex);
-                if (!session->ffi) {
-                    err = QStringLiteral("client_not_ready");
-                } else {
-                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                    bytes = session->ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
-                    if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
-                }
+                ffi = session->ffi;
+            }
+            if (!ffi) {
+                err = QStringLiteral("client_not_ready");
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                bytes = ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
+                if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
             }
             // Декод+даунскейл на воркер-потоке (не на GUI): не блокируем UI.
             // Видео → декодируем кадр-постер из mp4; фото → даунскейл картинки.
@@ -1598,6 +1760,7 @@ void ChatBackend::clearPlaybackCache()
     const QString playDir =
         QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/paranoia_play");
     QDir(playDir).removeRecursively();
+    QDir(openCacheDir()).removeRecursively();
 }
 
 void ChatBackend::cacheVideoForPlayback(const QString &messageId)
@@ -1640,15 +1803,18 @@ void ChatBackend::cacheVideoForPlayback(const QString &messageId)
             if (!self) return;
             QByteArray bytes;
             QString err;
+            // хэндл под мгновенным локом → загрузка/дешифр байт видео без ffiMutex (01#32)
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&session->ffiMutex);
-                if (!session->ffi) {
-                    err = QStringLiteral("client_not_ready");
-                } else {
-                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                    bytes = session->ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
-                    if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
-                }
+                ffi = session->ffi;
+            }
+            if (!ffi) {
+                err = QStringLiteral("client_not_ready");
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                bytes = ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
+                if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
             }
             bool wrote = false;
             if (err.isEmpty() && !bytes.isEmpty()) {
@@ -1694,19 +1860,23 @@ void ChatBackend::deleteMessagesUntil(quint64 cutSeq)
         int localRc  = -1;
         int serverRc = -1;
         QString err;
+        // хэндл под мгновенным локом → локальное+серверное удаление истории до seq
+        // без ffiMutex; удаляет по range, не пишет outgoing seq (01#32).
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                err = "client_not_ready";
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            err = "client_not_ready";
+        } else {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            localRc              = ffi->delete_local_until_keyring(serverId, peerId, keyringJson, cutSeq);
+            if (localRc != 0) {
+                err = ParanoiaFFI::last_error();
             } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                localRc              = session->ffi->delete_local_until_keyring(serverId, peerId, keyringJson, cutSeq);
-                if (localRc != 0) {
-                    err = ParanoiaFFI::last_error();
-                } else {
-                    serverRc = session->ffi->determinate_keyring(serverId, peerId, keyringJson, cutSeq);
-                    if (serverRc != 0) err = ParanoiaFFI::last_error();
-                }
+                serverRc = ffi->determinate_keyring(serverId, peerId, keyringJson, cutSeq);
+                if (serverRc != 0) err = ParanoiaFFI::last_error();
             }
         }
         QMetaObject::invokeMethod(self, [self, peer, cutSeq, localRc, serverRc, err]() {
@@ -1813,20 +1983,24 @@ void ChatBackend::deleteMessages(const QStringList &messageIds)
         if (!self) return;
         QString err;
         int failed = 0;
+        // хэндл под мгновенным локом → удаление диапазонов без ffiMutex; удаляет по
+        // range, не пишет outgoing seq (01#32).
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                err = "client_not_ready";
-                failed = ranges.size();
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                for (const auto &r : ranges) {
-                    const int rc =
-                        session->ffi->delete_dialogue_range_keyring(serverId, peerId, keyringJson, r.from, r.to);
-                    if (rc != 0) {
-                        ++failed;
-                        if (err.isEmpty()) err = ParanoiaFFI::last_error();
-                    }
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            err = "client_not_ready";
+            failed = ranges.size();
+        } else {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            for (const auto &r : ranges) {
+                const int rc =
+                    ffi->delete_dialogue_range_keyring(serverId, peerId, keyringJson, r.from, r.to);
+                if (rc != 0) {
+                    ++failed;
+                    if (err.isEmpty()) err = ParanoiaFFI::last_error();
                 }
             }
         }
@@ -1856,53 +2030,6 @@ void ChatBackend::deleteMessages(const QStringList &messageIds)
     });
 }
 
-void ChatBackend::removeAttachmentChunksFromServer(const QString &messageId)
-{
-    if (m_activePeer.isEmpty() || messageId.isEmpty()) return;
-    auto session = SessionStore::instance()->activeSession();
-    if (!session) return;
-    const auto *dlg = session->findDialog(m_activePeer);
-    if (!dlg) return;
-
-    quint64 bodyFrom = 0;
-    quint64 bodyTo   = 0;
-    for (const auto &cached : m_messageCache.value(m_activePeer)) {
-        const QVariantMap msg = cached.toMap();
-        if (msg.value("id").toString() != messageId) continue;
-        bodyFrom = msg.value("body_from_seq").toULongLong();
-        bodyTo   = msg.value("body_to_seq").toULongLong();
-        break;
-    }
-    if (bodyFrom == 0 || bodyTo < bodyFrom) return;
-
-    const QString peer         = m_activePeer;
-    const QString serverId     = session->serverId;
-    const QString peerServerId = dlg->peerServerId;
-    const QString keyringJson  = dlg->keyringJson();
-    QPointer self(this);
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, bodyFrom, bodyTo]() {
-        if (!self) return;
-        int rc      = -1;
-        QString err;
-        {
-            QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                err = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                rc                   = session->ffi->remove_server_range_keyring(serverId, peerId, keyringJson,
-                                                                                 bodyFrom, bodyTo);
-                if (rc != 0) err = ParanoiaFFI::last_error();
-            }
-        }
-        QMetaObject::invokeMethod(self, [self, rc, err]() {
-            if (!self) return;
-            if (rc != 0 && err != "server_unavailable")
-                emit self->serverHistoryError(ChatBackend::tr("Не удалось удалить файл с сервера: ") + err);
-        });
-    });
-}
-
 void ChatBackend::setReadReceiptsEnabled(bool enabled)
 {
     if (m_activePeer.isEmpty()) return;
@@ -1928,16 +2055,20 @@ void ChatBackend::setReadReceiptsEnabled(bool enabled)
             if (!self) return;
             int rc = -1;
             QString err;
+            // хэндл под мгновенным локом → выставить флаг read-receipts без ffiMutex,
+            // не пишет outgoing seq сообщений (01#32).
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&session->ffiMutex);
-                if (!session->ffi) {
-                    err = "client_not_ready";
-                } else {
-                    const QString myId   = serverId.isEmpty() ? session->username : serverId;
-                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                    rc                   = session->ffi->arrived_put_keyring(myId, peerId, keyringJson, enabled);
-                    if (rc != 0) err = ParanoiaFFI::last_error();
-                }
+                ffi = session->ffi;
+            }
+            if (!ffi) {
+                err = "client_not_ready";
+            } else {
+                const QString myId   = serverId.isEmpty() ? session->username : serverId;
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                rc                   = ffi->arrived_put_keyring(myId, peerId, keyringJson, enabled);
+                if (rc != 0) err = ParanoiaFFI::last_error();
             }
             if (rc == 0 || !self) return;
             QMetaObject::invokeMethod(self, [self, session, peer, previous, err]() {
@@ -1970,22 +2101,31 @@ void ChatBackend::fetchMessages()
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
     const QString profileId    = session->profileId;
+    // Контекст резолва имён снимаем СЕЙЧАС, на GUI-потоке (читает session->dialogs);
+    // сам парс пойдёт на воркере с этим снимком — без гонки за список диалогов (01#13).
+    const ParseContext ctx = currentParseContext();
     QPointer self(this);
     m_receiveInFlight = true;
     beginMessagesLoading();
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, profileId]() {
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, profileId, ctx]() {
         if (!self) return;
         QString json;
         QString lastErr;
+        // Хэндл копируем под мгновенным локом, сам сетевой receive — БЕЗ ffiMutex
+        // (хэндл Send+Sync, БД сериализуется внутри store): иначе приём вставал бы
+        // в очередь за многоминутным аплоадом (01#32). Порядок с исходящими не
+        // нужен — receive двигает ВХОДЯЩИЙ last_pulled, не outgoing seq.
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
-                lastErr = "client_not_ready";
-            } else {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                json                 = session->ffi->receive_keyring(serverId, peerId, keyringJson);
-                lastErr              = ParanoiaFFI::last_error();
-            }
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            lastErr = "client_not_ready";
+        } else {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            json                 = ffi->receive_keyring(serverId, peerId, keyringJson);
+            lastErr              = ParanoiaFFI::last_error();
         }
         if (json.isEmpty()) {
             QMetaObject::invokeMethod(self, [self, lastErr]() {
@@ -2003,13 +2143,15 @@ void ChatBackend::fetchMessages()
             });
             return;
         }
-        QMetaObject::invokeMethod(self, [self, json, peer, profileId, lastErr]() {
+        if (!self) return;
+        // Парсим тяжёлый JSON здесь, на воркере (01#13) — на GUI уходит готовый список.
+        const QVariantList messages = self->parseMessages(json, ctx);
+        QMetaObject::invokeMethod(self, [self, messages, peer, profileId, lastErr]() {
             if (!self) return;
             self->m_receiveInFlight = false;
             self->endMessagesLoading();
             if (lastErr.startsWith("decryption_failed:"))
                 emit self->receiveError(ChatBackend::tr("Ошибка расшифровки: неверный ключ диалога или повреждённые данные."));
-            const QVariantList messages = self->parseMessages(json);
             const bool appActive        = applicationIsActive();
             if (peer == self->m_activePeer) {
                 self->appendMessages(peer, messages);
@@ -2063,21 +2205,29 @@ void ChatBackend::prefetchAllDialogs()
     if (tasks.isEmpty()) return;
 
     const QString profileId = session->profileId;
+    // Снимок контекста имён с GUI-потока: парс каждого receive идёт на воркере с ним,
+    // без кросс-поточного чтения session->dialogs (01#13; раньше parseMessages читал
+    // dialogs прямо на воркере — латентная гонка, теперь снята).
+    const ParseContext ctx = currentParseContext();
     QPointer self(this);
-    QThreadPool::globalInstance()->start([self, session, serverId, profileId, tasks]() {
+    QThreadPool::globalInstance()->start([self, session, serverId, profileId, tasks, ctx]() {
         if (!self) return;
         bool anyAdvanced = false;
         QList<QPair<QString, QVariantList>> appended;
+        // Хэндл копируем один раз под мгновенным локом; сами receive в цикле — БЕЗ
+        // ffiMutex (Send+Sync, БД сериализуется внутри store). Раньше десятки
+        // receive шли под общим локом и морозили отправку/историю (01#32).
+        std::shared_ptr<ParanoiaFFI> ffi;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            ffi = session->ffi;
+        }
         for (const PeerTask &t : tasks) {
-            QString json;
-            {
-                QMutexLocker locker(&session->ffiMutex);
-                if (!session->ffi) break;
-                json = session->ffi->receive_keyring(serverId, t.peerId, t.keyringJson);
-            }
+            if (!ffi) break;
+            QString json = ffi->receive_keyring(serverId, t.peerId, t.keyringJson);
             if (json.isEmpty()) continue;
             if (!self) return;
-            const QVariantList messages = self->parseMessages(json);
+            const QVariantList messages = self->parseMessages(json, ctx);
             if (messages.isEmpty()) continue;
             anyAdvanced = true;
             appended.append({t.peer, messages});
@@ -2267,6 +2417,7 @@ void ChatBackend::onDialogRemoved(const QString &peer)
 {
     m_messageCache.remove(peer);
     m_seenIds.remove(peer);
+    m_appliedReactionIds.remove(peer);
     if (m_activePeer == peer) {
         m_activePeer.clear();
         m_activePollTimer->stop();
@@ -2278,6 +2429,7 @@ void ChatBackend::onSessionReset()
 {
     m_messageCache.clear();
     m_seenIds.clear();
+    m_appliedReactionIds.clear();
     m_activePeer.clear();
     m_activePollTimer->stop();
     m_receiveInFlight          = false;
@@ -2409,19 +2561,23 @@ void ChatBackend::refreshArrivedStatus()
         uint64_t changed = 0;
         bool failed      = false;
         QString error;
+        // хэндл под мгновенным локом → чтение статуса доставки/прочтения без ffiMutex,
+        // не пишет outgoing seq (01#32).
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (!session->ffi) {
+            ffi = session->ffi;
+        }
+        if (!ffi) {
+            failed = true;
+            error  = "client_not_ready";
+        } else {
+            const QString myId   = serverId.isEmpty() ? session->username : serverId;
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            const int rc         = ffi->arrived_get_keyring(myId, peerId, keyringJson, changed);
+            if (rc != 0) {
                 failed = true;
-                error  = "client_not_ready";
-            } else {
-                const QString myId   = serverId.isEmpty() ? session->username : serverId;
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                const int rc         = session->ffi->arrived_get_keyring(myId, peerId, keyringJson, changed);
-                if (rc != 0) {
-                    failed = true;
-                    error  = ParanoiaFFI::last_error();
-                }
+                error  = ParanoiaFFI::last_error();
             }
         }
         QMetaObject::invokeMethod(self, [self, peer, changed, failed, error]() {
@@ -2455,15 +2611,18 @@ void ChatBackend::resumePendingTransfers()
     QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson]() {
         if (!self) return;
         QString json;
-        // resume пушит пакеты (как обычная отправка) → держим ffiMutex на время
-        // вызова (handle !Send, операции на нём сериализуются). list_outbound
-        // дёшев, когда журнал пуст → сетевой работы нет, лок отпускается сразу.
+        // resume ПУШИТ пакеты (как обычная отправка) → под sendMutex, чтобы порядок
+        // seq не разъехался с параллельными send_* (handle Send+Sync — см. c2c2fe5;
+        // ffiMutex держим лишь на копию ffi, аплоад идёт без него — 01#32).
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (session->ffi) {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                json = session->ffi->resume_pending_transfers_keyring(serverId, peerId, keyringJson);
-            }
+            ffi = session->ffi;
+        }
+        if (ffi) {
+            QMutexLocker sendLock(&session->sendMutex);
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            json = ffi->resume_pending_transfers_keyring(serverId, peerId, keyringJson);
         }
         QMetaObject::invokeMethod(self, [self, peer, json]() {
             if (!self) return;
@@ -2514,24 +2673,43 @@ void ChatBackend::loadHistory(const QString &peer, bool clearCache)
     const QString serverId     = session->serverId;
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
+    // Контекст резолва имён — с GUI-потока (session->dialogs); парс уйдёт на воркер (01#13).
+    const ParseContext ctx = currentParseContext();
     QPointer self(this);
     beginMessagesLoading();
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, clearCache]() {
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, clearCache, ctx]() {
         if (!self) return;
         QString json;
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (session->ffi) {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                json                 = session->ffi->history_keyring(serverId, peerId, keyringJson, 500);
-            }
+            ffi = session->ffi;
         }
-        QMetaObject::invokeMethod(self, [self, peer, json, clearCache]() {
+        if (ffi) {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            // Лимит окна загрузки истории. Был 500 — но чипы тем и их содержимое
+            // строятся ТОЛЬКО из загруженных сообщений (см. _rescanTopics в
+            // ChatPage), поэтому тема, все сообщения которой старше последних 500,
+            // выпадала из чип-бара целиком (репро Иванова: ParanoiaMaxBridge в
+            // диалоге >500 сообщений). Поднимаем окно, чтобы такие темы не терялись.
+            // history_keyring — локальное чтение+дешифр SQLCipher на воркер-потоке
+            // БЕЗ общего ffiMutex (хэндл Send+Sync, conn: Mutex внутри store) — не
+            // встаёт за аплоадом; GUI не блокируется, лента показывает окно
+            // _windowCount(50). Полный масштаб (темы независимо от окна истории +
+            // адресная догрузка) — отдельной задачей через FFI list_topics /
+            // list_topic_messages.
+            json                 = ffi->history_keyring(serverId, peerId, keyringJson, 2000);
+        }
+        if (!self) return;
+        // Тяжёлый парс — на воркере (01#13). fetched отличает «FFI не готов/ошибка»
+        // (json пуст → кэш НЕ трогаем) от «пустой истории» (валидный []).
+        const bool fetched          = !json.isEmpty();
+        const QVariantList messages = fetched ? self->parseMessages(json, ctx) : QVariantList();
+        QMetaObject::invokeMethod(self, [self, peer, messages, fetched, clearCache]() {
             if (!self) return;
             self->endMessagesLoading();
             if (peer != self->m_activePeer) return;
-            if (json.isEmpty()) return;
-            const QVariantList messages = self->parseMessages(json);
+            if (!fetched) return;
             if (!clearCache) {
                 // Инкрементальный refresh (read-receipts/arrived, готовность превью,
                 // сохранение вложения): МЕРЖ свежей истории в кэш БЕЗ очистки —
@@ -2559,16 +2737,41 @@ void ChatBackend::loadHistory(const QString &peer, bool clearCache)
                                         {QStringLiteral("reactions_json"), rj}});
                 }
             }
+            // Гонка loadHistory/fetchMessages НА ВХОДЕ в диалог (openChat зовёт оба
+            // параллельно). При ОГРОМНОЙ истории history_keyring дешифрует тысячи
+            // сообщений — на медленном устройстве это СЕКУНДЫ, и loadHistory проигрывает
+            // 1-сообщенческому сетевому receive: fetchMessages успевает добавить свежее
+            // ВХОДЯЩЕЕ в кэш, а history-снимок его не застал → clearCache-пересборка
+            // стёрла бы его, и сообщение «появлялось только после перезахода» (репро
+            // Иванова: наша история огромная → loadHistory всегда медленный → детерминизм;
+            // на маленькой истории Tecno loadHistory быстрый и выигрывает — потому не
+            // воспроизводилось). Держим те, чей server-seq строго новее самого свежего из
+            // history, и возвращаем после пересборки (та же философия, что reactionSnapshot).
+            quint64 histMaxSeq = 0;
+            for (const auto &m : messages) {
+                const quint64 s = m.toMap().value(QStringLiteral("seq")).toULongLong();
+                if (s > histMaxSeq) histMaxSeq = s;
+            }
+            QVariantList liveNewerThanHistory;
+            for (const auto &m : std::as_const(self->m_messageCache[peer])) {
+                bool hasSeq     = false;
+                const quint64 s = m.toMap().value(QStringLiteral("seq")).toULongLong(&hasSeq);
+                if (hasSeq && s > histMaxSeq) liveNewerThanHistory.append(m);
+            }
             self->m_messageCache[peer].clear();
             self->m_seenIds[peer].clear();
             self->m_appliedReactionIds[peer].clear();
             if (messages.isEmpty()) {
+                // История пуста, но параллельный receive мог уже подтянуть живое — не
+                // теряем его (иначе тот же «только после перезахода»).
+                if (!liveNewerThanHistory.isEmpty()) self->appendMessages(peer, liveNewerThanHistory);
                 self->reinjectOutbox(peer);   // вернуть недоставленные после очистки кэша
                 emit self->messagesReceived(peer, self->m_messageCache[peer]);
                 emit self->dialogsChanged();
                 return;
             }
             self->appendMessages(peer, messages);
+            if (!liveNewerThanHistory.isEmpty()) self->appendMessages(peer, liveNewerThanHistory);
             // Восстановить live-реакции для сообщений, у которых history их не вернул.
             if (!reactionSnapshot.isEmpty()) {
                 for (auto &v : self->m_messageCache[peer]) {
@@ -2602,22 +2805,29 @@ void ChatBackend::loadAllForAttachments(const QString &peer)
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();
     QPointer self(this);
-    // Большой лимит = «вся история» (стор отдаёт ORDER BY ts DESC LIMIT n). Тяжёлый
-    // дешифр идёт на воркер-потоке под ffiMutex — GUI не блокируется. Кэш чата НЕ
-    // трогаем: это разовая выборка только под экран «Вложения».
-    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson]() {
+    // Стор отдаёт ORDER BY ts DESC LIMIT n → лимит берёт НОВЕЙШИЕ n. Прежний
+    // «вся история» (1000000) на огромных диалогах разово материализовал десятки
+    // тысяч QVariantMap (+ JSON-строка + JS-копия в QML) — пиковый триггер OOM
+    // на мобильных. Тяжёлый дешифр идёт на воркер-потоке БЕЗ общего ffiMutex
+    // (хэндл Send+Sync, conn: Mutex внутри store) — не встаёт за аплоадом, GUI
+    // не блокируется. Кэш чата НЕ трогаем: разовая выборка под экран «Вложения».
+    const ParseContext ctx = currentParseContext(); // снимок с GUI; парс — на воркере (01#13)
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, ctx]() {
         if (!self) return;
         QString json;
+        std::shared_ptr<ParanoiaFFI> ffi;
         {
             QMutexLocker locker(&session->ffiMutex);
-            if (session->ffi) {
-                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                json                 = session->ffi->history_keyring(serverId, peerId, keyringJson, 1000000);
-            }
+            ffi = session->ffi;
         }
-        QMetaObject::invokeMethod(self, [self, peer, json]() {
+        if (ffi) {
+            const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+            json                 = ffi->history_keyring(serverId, peerId, keyringJson, 10000);
+        }
+        if (!self) return;
+        const QVariantList messages = json.isEmpty() ? QVariantList() : self->parseMessages(json, ctx);
+        QMetaObject::invokeMethod(self, [self, peer, messages]() {
             if (!self) return;
-            const QVariantList messages = json.isEmpty() ? QVariantList() : self->parseMessages(json);
             emit self->attachmentsHistoryLoaded(peer, messages);
         });
     });
@@ -2649,15 +2859,18 @@ void ChatBackend::ensureGalleryPreview(const QString &peer, const QString &messa
             if (!self) return;
             QByteArray bytes;
             QString err;
+            // хэндл под мгновенным локом → загрузка/дешифр байт превью без ffiMutex (01#32)
+            std::shared_ptr<ParanoiaFFI> ffi;
             {
                 QMutexLocker locker(&session->ffiMutex);
-                if (!session->ffi) {
-                    err = QStringLiteral("client_not_ready");
-                } else {
-                    const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
-                    bytes = session->ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
-                    if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
-                }
+                ffi = session->ffi;
+            }
+            if (!ffi) {
+                err = QStringLiteral("client_not_ready");
+            } else {
+                const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+                bytes = ffi->cache_attachment_bytes_keyring(serverId, peerId, keyringJson, messageId);
+                if (bytes.isEmpty()) err = ParanoiaFFI::last_error();
             }
             // Картинка → даунскейл; не-картинка (видео-mp4) → кадр-постер.
             QByteArray previewBytes;
@@ -2701,6 +2914,34 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
             if (!d.peer.isEmpty()) peerIdToUsername.insert(d.peer, d.peer);
         }
     }
+    // Индексы существующего кэша → дедуп/обновление за O(1). РАНЬШЕ на КАЖДОЕ входящее
+    // сообщение шёл std::ranges::find_if по всему кэшу, причём с toMap()-КОПИЕЙ карты на
+    // каждый сравниваемый элемент — это O(N²) с миллионами аллокаций. На входе в диалог
+    // с огромной историей (окно history_keyring до 2000) GUI-поток вставал НА СЕКУНДЫ
+    // (dead-фриз «диалог не прогружен», репро Иванова). Это НЕ производительность
+    // устройства, а алгоритм: Huawei тоже фризил. Один проход строит id/seq/pending-text
+    // индексы, дальше поиск O(1) → весь appendMessages становится линейным.
+    QHash<QString, int> idToIndex;
+    QHash<quint64, int> seqToIndex;
+    QHash<QString, int> pendingTextToIndex;   // текст → индекс оптимистичной pending:txt:
+    idToIndex.reserve(cache.size());
+    seqToIndex.reserve(cache.size());
+    for (int i = 0; i < cache.size(); ++i) {
+        const QVariantMap cm = cache.at(i).toMap();
+        const QString cid    = cm.value(QStringLiteral("id")).toString();
+        if (!cid.isEmpty()) {
+            idToIndex.insert(cid, i);
+            if (cid.startsWith(QStringLiteral("pending:txt:"))) {
+                const QString ctext = cm.value(QStringLiteral("text")).toString();
+                if (!ctext.isEmpty()) pendingTextToIndex.insert(ctext, i);
+            }
+        }
+        bool cHasSeq       = false;
+        const quint64 cseq = cm.value(QStringLiteral("seq")).toULongLong(&cHasSeq);
+        // seq==0 = ещё не назначенный (оптимистичное) — не ключ дедупа (иначе два
+        // разных неотправленных схлопнулись бы в одно). Матчатся по id/тексту.
+        if (cHasSeq && cseq != 0) seqToIndex.insert(cseq, i);
+    }
     for (const auto &msg : messages) {
         const QVariantMap map = msg.toMap();
         const QString id      = map["id"].toString();
@@ -2712,57 +2953,76 @@ void ChatBackend::appendMessages(const QString &peer, const QVariantList &messag
         }
         bool hasSeq       = false;
         const quint64 seq = map["seq"].toULongLong(&hasSeq);
-        auto found        = cache.end();
+        int foundIdx      = -1;
         if (!id.isEmpty()) {
-            found = std::ranges::find_if(
-                cache, [&id](const QVariant &cached) { return cached.toMap().value("id").toString() == id; });
+            const auto it = idToIndex.constFind(id);
+            if (it != idToIndex.constEnd()) foundIdx = it.value();
         }
-        if (found == cache.end() && hasSeq) {
-            found = std::ranges::find_if(cache, [seq](const QVariant &cached) {
-                bool cachedHasSeq       = false;
-                const quint64 cachedSeq = cached.toMap().value("seq").toULongLong(&cachedHasSeq);
-                return cachedHasSeq && cachedSeq == seq;
-            });
+        if (foundIdx < 0 && hasSeq && seq != 0) {
+            const auto it = seqToIndex.constFind(seq);
+            if (it != seqToIndex.constEnd()) foundIdx = it.value();
         }
         // Гонка poll/commit: committed (с сервера, БЕЗ client_token) может прийти РАНЬШЕ,
         // чем dispatchOutbox заменит оптимистичную. Без матча он вставился бы как НОВОЕ
         // сообщение → у QML «двойная» анимация появления + скачок ключа (ct:→id:). Поэтому
-        // committed своего исходящего текста сопоставляем с pending-оптимистичной по тексту:
-        // берём её как found → заменяем in-place, ниже переносим client_token (ключ строки
+        // committed своего исходящего текста сопоставляем с pending-оптимистичной по тексту
+        // (индекс pendingTextToIndex, O(1)); ниже переносим client_token (ключ строки
         // стабилен sending→committed, анимация одна).
-        if (found == cache.end() && !myId.isEmpty()
+        if (foundIdx < 0 && !myId.isEmpty()
             && map.value(QStringLiteral("kind")).toString() == QStringLiteral("text")
             && map.value(QStringLiteral("sender")).toString() == myId) {
             const QString txt = map.value(QStringLiteral("text")).toString();
-            found             = std::ranges::find_if(cache, [&txt](const QVariant &cached) {
-                const QVariantMap c = cached.toMap();
-                return c.value(QStringLiteral("id")).toString().startsWith(QStringLiteral("pending:txt:"))
-                    && c.value(QStringLiteral("text")).toString() == txt;
-            });
+            const auto it     = pendingTextToIndex.constFind(txt);
+            if (it != pendingTextToIndex.constEnd()) foundIdx = it.value();
         }
-        if (found != cache.end()) {
+        if (foundIdx >= 0) {
             QVariantMap updated        = map;
-            const QVariantMap existing = found->toMap();
+            const QVariantMap existing = cache.at(foundIdx).toMap();
             if (existing.contains(QStringLiteral("reaction_events")))
                 updated[QStringLiteral("reaction_events")] = existing.value(QStringLiteral("reaction_events"));
             if (existing.contains(QStringLiteral("reactions_json")))
                 updated[QStringLiteral("reactions_json")] = existing.value(QStringLiteral("reactions_json"));
-            // Сохраняем стабильный ключ строки оптимистичной отправки: серверные
-            // обновления (fetchMessages) приходят без client_token — без переноса ключ
-            // в QML сменился бы (ct:→id:) и сообщение «перевсплыло» бы заново.
             if (!updated.contains(QStringLiteral("client_token")) && existing.contains(QStringLiteral("client_token")))
                 updated[QStringLiteral("client_token")] = existing.value(QStringLiteral("client_token"));
-            *found = updated;
+            cache[foundIdx] = updated;
+            // Индексы держим согласованными: committed мог сменить id (pending/ct → real)
+            // и/или проставить seq — иначе следующий его дубль не найдётся за O(1).
+            if (!id.isEmpty()) idToIndex.insert(id, foundIdx);
+            if (hasSeq && seq != 0) seqToIndex.insert(seq, foundIdx);
         } else {
-            if (!id.isEmpty()) seen.insert(id);
+            const int newIdx = cache.size();
+            if (!id.isEmpty()) { seen.insert(id); idToIndex.insert(id, newIdx); }
+            if (hasSeq && seq != 0) seqToIndex.insert(seq, newIdx);
             cache.append(msg);
         }
     }
-    std::sort(cache.begin(), cache.end(), [](const QVariant &lhs, const QVariant &rhs) {
-        return lhs.toMap()["ts"].toLongLong() < rhs.toMap()["ts"].toLongLong();
-    });
+    // Реакции применяем ДО сортировки, пока idToIndex ещё отражает индексы cache (сорт
+    // ниже переупорядочит) — O(1) на реакцию. Порядок с сортировкой не связан (реакция
+    // меняет reaction_events/json, не ts).
     for (const auto &reaction : reactions)
-        applyReactionToCache(cache, reaction.toMap(), myId, myUsername, peerIdToUsername);
+        applyReactionToCache(cache, reaction.toMap(), myId, myUsername, peerIdToUsername, idToIndex);
+    // Сортировка по ts с ДЕКОРАЦИЕЙ: ts извлекаем ОДИН раз на сообщение, а не toMap()
+    // на каждое сравнение (иначе O(N log N) лишних аллокаций — тоже кусалось на огромной
+    // истории). stable_sort фиксирует порядок сообщений с равным ts (нет «переплясок»).
+    {
+        QList<QPair<qint64, QVariant>> deco;
+        deco.reserve(cache.size());
+        for (const auto &v : cache)
+            deco.append({ v.toMap().value(QStringLiteral("ts")).toLongLong(), v });
+        std::stable_sort(deco.begin(), deco.end(),
+                         [](const QPair<qint64, QVariant> &a, const QPair<qint64, QVariant> &b) {
+                             return a.first < b.first;
+                         });
+        for (int i = 0; i < deco.size(); ++i) cache[i] = deco.at(i).second;
+    }
+    // Потолок кэша на диалог. Окно загрузки истории и так 2000 (history_keyring):
+    // всё старше при переоткрытии диалога не возвращается. Без потолка кэш рос
+    // безгранично (входящие сутками + prefetch всех диалогов) → OOM при долгой
+    // работе. Режем СТАРЕЙШИЕ (голова отсортированного по ts кэша) — свежие и
+    // оптимистичные pending в хвосте не задеваются.
+    constexpr int kMaxCachedPerPeer = 2000;
+    if (cache.size() > kMaxCachedPerPeer)
+        cache.erase(cache.begin(), cache.end() - kMaxCachedPerPeer);
     if (session && !cache.isEmpty()) {
         auto &dialogs = session->dialogs;
         if (const auto found = std::ranges::find_if(dialogs, [&](const Dialog &d) { return d.peer == peer; });
@@ -2797,18 +3057,33 @@ void ChatBackend::endMessagesLoading()
     if (wasLoading && !messagesLoading()) emit messagesLoadingChanged();
 }
 
-QVariantList ChatBackend::parseMessages(const QString &json) const
+ChatBackend::ParseContext ChatBackend::currentParseContext() const
 {
+    // ВНИМАНИЕ: читает session->dialogs — звать только с GUI-потока (владельца
+    // списка). Снятый ctx передаётся в parseMessages на воркере.
+    ParseContext ctx;
     const auto session = SessionStore::instance()->activeSession();
-    const QString myId = session ? (session->serverId.isEmpty() ? session->username : session->serverId) : QString();
-    const QString myUsername = session ? session->username : QString();
-    QMap<QString, QString> peerIdToUsername;
+    ctx.myId       = session ? (session->serverId.isEmpty() ? session->username : session->serverId) : QString();
+    ctx.myUsername = session ? session->username : QString();
     if (session) {
         for (const auto &d : session->dialogs) {
-            if (!d.peerServerId.isEmpty()) peerIdToUsername.insert(d.peerServerId, d.peer);
-            if (!d.peer.isEmpty()) peerIdToUsername.insert(d.peer, d.peer);
+            if (!d.peerServerId.isEmpty()) ctx.peerIdToUsername.insert(d.peerServerId, d.peer);
+            if (!d.peer.isEmpty()) ctx.peerIdToUsername.insert(d.peer, d.peer);
         }
     }
+    return ctx;
+}
+
+QVariantList ChatBackend::parseMessages(const QString &json) const
+{
+    return parseMessages(json, currentParseContext());
+}
+
+QVariantList ChatBackend::parseMessages(const QString &json, const ParseContext &ctx) const
+{
+    const QString &myId          = ctx.myId;
+    const QString &myUsername    = ctx.myUsername;
+    const auto    &peerIdToUsername = ctx.peerIdToUsername;
     const auto displayNameForSender = [&](const QString &sender, bool selfAsYou) {
         if (sender.isEmpty()) return QString();
         if ((!myId.isEmpty() && sender == myId) || (!myUsername.isEmpty() && sender == myUsername))

@@ -15,6 +15,8 @@ ColumnLayout {
     signal profileImported()
 
     property string importFilePath: ""
+    // true, пока идёт асинхронный импорт этой панели (01#8) — фильтр общего сигнала.
+    property bool importing: false
 
     ParaFileDialog {
         id: importOpenDialog
@@ -23,9 +25,20 @@ ColumnLayout {
         nameFilters: [qsTr("Paranoia export (*.json)"), qsTr("JSON (*.json)"), qsTr("Все файлы (*)")]
         onAccepted: {
             panel.importFilePath = Backend.urlToLocalPath(selectedFile)
-            importFeedback.text = ""
             deleteFileBanner.visible = false
-            const res = Backend.importProfile(panel.importFilePath.trim())
+            // Импорт асинхронный (01#8) — итог в onImportProfileFinished.
+            panel.importing = true
+            importFeedback.text = qsTr("Импорт…")
+            Backend.importProfile(panel.importFilePath.trim())
+        }
+    }
+
+    Connections {
+        target: Backend
+        // Реагируем только если импорт запустила ЭТА панель (сигнал общий).
+        function onImportProfileFinished(res) {
+            if (!panel.importing) return
+            panel.importing = false
             if (res.ok) {
                 importFeedback.text =
                     qsTr("✓ Импорт выполнен. Диалогов: %1, ключей: %2, профилей: %3, admin-серверов: %4")

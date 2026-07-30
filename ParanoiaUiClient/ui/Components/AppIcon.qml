@@ -862,5 +862,54 @@ Canvas {
             ctx.beginPath(); ctx.moveTo(14, 5); ctx.lineTo(19, 5); ctx.lineTo(19, 10); ctx.stroke()
             return
         }
+
+        if (name === "sun") {
+            // Солнце: ЗАЛИТЫЙ диск + 8 лучей — «светлая тема».
+            const cx = 12, cy = 12
+            ctx.beginPath(); ctx.arc(cx, cy, 4.6, 0, Math.PI * 2); ctx.fill()
+            for (var s = 0; s < 8; ++s) {
+                const ang = s * Math.PI / 4
+                const co = Math.cos(ang), si = Math.sin(ang)
+                ctx.beginPath()
+                ctx.moveTo(cx + 6.6 * co, cy + 6.6 * si)
+                ctx.lineTo(cx + 9.2 * co, cy + 9.2 * si)
+                ctx.stroke()
+            }
+            return
+        }
+
+        if (name === "bellOff") {
+            // Перечёркнутый колокольчик — уведомления диалога отключены.
+            ctx.beginPath()
+            ctx.moveTo(18, 8)
+            ctx.bezierCurveTo(18, 4.7, 15.3, 2, 12, 2)
+            ctx.bezierCurveTo(8.7, 2, 6, 4.7, 6, 8)
+            ctx.bezierCurveTo(6, 15, 3, 17, 3, 17)
+            ctx.lineTo(21, 17)
+            ctx.bezierCurveTo(21, 17, 18, 15, 18, 8)
+            ctx.closePath()
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(13.7, 21)
+            ctx.bezierCurveTo(13.4, 21.6, 12.7, 22, 12, 22)
+            ctx.bezierCurveTo(11.3, 22, 10.6, 21.6, 10.3, 21)
+            ctx.stroke()
+            ctx.beginPath()
+            ctx.moveTo(4, 4)
+            ctx.lineTo(20, 20)
+            ctx.stroke()
+            return
+        }
+
+        if (name === "moon") {
+            // ЗАЛИТЫЙ полумесяц — «тёмная тема». Большой диск минус смещённый
+            // диск (clip через 'destination-out') → плотная луна, не контурная «C».
+            ctx.save()
+            ctx.beginPath(); ctx.arc(12.5, 12, 8.2, 0, Math.PI * 2); ctx.fill()
+            ctx.globalCompositeOperation = "destination-out"
+            ctx.beginPath(); ctx.arc(16.2, 9.6, 7.4, 0, Math.PI * 2); ctx.fill()
+            ctx.restore()
+            return
+        }
     }
 }

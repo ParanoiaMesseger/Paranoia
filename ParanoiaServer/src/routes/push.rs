@@ -25,6 +25,9 @@ pub async fn handle(State(state): State<Arc<AppState>>, Json(body): Json<Value>)
     let req = match state.cover.unwrap_push(&body) {
         Ok(r) => r,
         Err(e) => {
+            // warn! был во всех остальных роутах, но не в push (дрейф копипасты,
+            // 03#63) — «Bad cover» на /push не попадал в логи. Выравниваем.
+            warn!("Bad cover in push: {e}");
             return Json(json!({
                 "ok": false,
                 "status": "error",
@@ -75,29 +78,42 @@ async fn do_push(state: &Arc<AppState>, req: PushRequest) -> ApiResponse {
     }
 
     let dialogue_id = crypto::make_dialogue_id(&req.sender, &req.recver);
-    match state.store.push(&dialogue_id, req.seq, &payload_bytes) {
-        Ok(_) => {
+    // Запись пакета и подъём last_seq — блокирующие операции RocksDB (под нагрузкой
+    // write-stall/компакция). Уводим на spawn_blocking, чтобы синхронный put не
+    // вставал на tokio-воркере горячего роута /push (01#3). notify() остаётся async
+    // и вызывается ПОСЛЕ подъёма last_seq (порядок «bump→wake» сохранён внутри
+    // закрытия) — это детерминированно закрывает гонку push→pull для других устройств
+    // того же аккаунта.
+    let push_result = {
+        let state = Arc::clone(state);
+        let did = dialogue_id.clone();
+        let sender = req.sender.clone();
+        let seq = req.seq;
+        tokio::task::spawn_blocking(move || {
+            state.store.push(&did, seq, &payload_bytes)?;
             // Поднять собственный last_seq отправителя до отправленного seq. Pull-
             // before-push (MultiDevicePolicy) гарантирует, что отправитель уже
             // подтянул всё до этого seq, поэтому отметка корректна и для статуса
-            // прочтения у партнёра. Делаем это ДО пробуждения ожидающих /notify,
-            // чтобы другие устройства того же аккаунта не посчитали своё сообщение
-            // новым (детерминированно закрывает гонку push→pull). Уважает opt-out
-            // receipts: при выключенных уведомлениях о прочтении last_seq заморожен
-            // (update_last_seq — no-op), и дедуп своих уведомлений для этого диалога
-            // не действует — приемлемый редкий край.
-            if let Err(e) = state
-                .store
-                .update_last_seq(&req.sender, &dialogue_id, req.seq)
-            {
+            // прочтения у партнёра. Уважает opt-out receipts: при выключенных
+            // уведомлениях о прочтении last_seq заморожен (update_last_seq — no-op),
+            // и дедуп своих уведомлений для этого диалога не действует — приемлемый
+            // редкий край.
+            if let Err(e) = state.store.update_last_seq(&sender, &did, seq) {
                 warn!("push: failed to bump sender last_seq: {e}");
             }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+    };
+    match push_result {
+        Ok(Ok(())) => {
             // Разбудить long-poll `/notify`, ждущих этот диалог (если такие есть).
             // По dialogue_id будятся обе стороны — каждая пересчитает свои новые.
             state.dialogue_notify.notify(&dialogue_id).await;
             ok("OK".into())
         }
-        Err(e) => fail(format!("{e}")),
+        Ok(Err(e)) => fail(format!("{e}")),
+        Err(e) => fail(format!("join error: {e}")),
     }
 }
 

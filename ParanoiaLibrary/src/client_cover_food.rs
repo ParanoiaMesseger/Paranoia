@@ -178,13 +178,14 @@ impl ClientCover for FoodDeliveryClientCover {
         if body["ok"].as_bool().unwrap_or(false) {
             return Ok(());
         }
-        let msg = body["message"].as_str().unwrap_or("").to_ascii_lowercase();
+        let raw = body["message"].as_str().unwrap_or("");
+        let msg = raw.to_ascii_lowercase();
         Err(anyhow!(if msg.contains("duplicate") {
-            "duplicate_seq"
+            "duplicate_seq".to_string()
         } else if msg.contains("invalid seq") || msg.contains("expected seq") {
-            "invalid_seq"
+            "invalid_seq".to_string()
         } else {
-            "Push failed: {msg}"
+            format!("Push failed: {raw}")
         }))
     }
 

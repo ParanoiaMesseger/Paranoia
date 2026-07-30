@@ -20,16 +20,10 @@ Rectangle {
     function _refreshPeerInfo() {
         root.selfName = Backend.activeProfileDisplayName()
         root.selfAvatar = Backend.activeProfileAvatar()
-        const list = Backend.getDialogs()
-        for (var i = 0; i < list.length; ++i) {
-            if (list[i].peer === root.peer) {
-                root.displayName = list[i].displayName || root.peer
-                root.avatar = list[i].avatar || ""
-                return
-            }
-        }
-        root.displayName = root.peer
-        root.avatar = ""
+        // Точечно один пир (02#14) — без ремаршалинга всего списка диалогов.
+        const info = Backend.dialogInfo(root.peer)
+        root.displayName = info.displayName || root.peer
+        root.avatar = info.avatar || ""
     }
     Connections {
         target: Backend
@@ -299,6 +293,13 @@ Rectangle {
         Chat.saveAttachmentToDefault(messageId)
     }
 
+    // Уже скачанный файл открываем системным выбором приложения; нескачанный
+    // идёт через openSaveDialog как раньше.
+    function openAttachment(messageId) {
+        root.downloadingAttachmentId = messageId
+        Chat.openAttachmentExternally(messageId)
+    }
+
     // Собрать все уже загруженные (с готовым превью) фото-вложения диалога —
     // для листания в просмотрщике. Порядок — как в ленте. Учитывает и одиночные
     // image-сообщения, и плитки внутри мозаик (photo_group свёрнут composeMessages).
@@ -543,7 +544,15 @@ Rectangle {
             if (groups[pgid]) {
                 // Группа уже видна (часть фото committed) — дорисовываем хвост из ещё
                 // не отправленных плиток (по порядку).
-                if (committed >= total) { delete root.pendingGroups[pgid]; continue }
+                if (committed >= total) {
+                    // Группа полностью committed — вместе с ней чистим её ключи
+                    // прогресса (иначе uploadProgress копится бессрочно).
+                    var upDone = Object.assign({}, root.uploadProgress)
+                    for (var q = 0; q < pg.photos.length; ++q) delete upDone[pg.photos[q].key]
+                    root.uploadProgress = upDone
+                    delete root.pendingGroups[pgid]
+                    continue
+                }
                 for (var t = committed; t < total; ++t)
                     groups[pgid].photos.push({ id: "", source: pg.photos[t].source,
                                                name: pg.photos[t].name, key: pg.photos[t].key,
@@ -966,6 +975,12 @@ Rectangle {
     property var _topicMaxIncoming: ({})   // имя → max seq среди ВХОДЯЩИХ
     property var _topicSeenSeq: ({})       // имя → до какого seq «просмотрено»
     property bool _topicSeenInit: false
+    // Предрассчитанные корзины сообщений по темам: имя_темы → [сообщения], "" →
+    // «Главная». Считаются ОДИН раз на смену набора сообщений (_scannedRef), а не на
+    // каждое переключение темы. Делает selectTopic O(окно) вместо O(всех сообщений)
+    // — иначе фриз рос с числом сообщений в теме (3 полных прохода на переключение).
+    property var _topicBuckets: ({})
+    property var _scannedRef: null         // ссылка на последний просканированный массив
     // Однократное восстановление последнего выбранного фильтра темы при входе в
     // диалог (Dialog::lastTopic). Взводится на свежем входе, гасится в
     // updateMessageModel после применения. Дефолт первого входа — «Все».
@@ -982,7 +997,54 @@ Rectangle {
         return out
     }
 
-    // Отфильтровать сообщения по активному фильтру темы.
+    // ОДИН проход по набору сообщений: имена тем + корзины по темам + max seq
+    // входящих. Вызывается только при смене набора (_scannedRef), не на переключении
+    // фильтра. После него filterByTopic/бейджи — O(1)/O(тем), не O(всех сообщений).
+    function _rescanTopics(messages) {
+        const names = []
+        const seenName = ({})
+        const buckets = ({})
+        const maxIn = ({})
+        const maxTs = ({})
+        for (let i = 0; i < messages.length; ++i) {
+            const m = messages[i]
+            const t = m.topic_name || ""
+            // корзина (включая "" = «Главная»)
+            let b = buckets[t]
+            if (b === undefined) { b = []; buckets[t] = b }
+            b.push(m)
+            // имена тем (без «Главной»), порядок появления
+            if (t !== "" && seenName[t] === undefined) { seenName[t] = true; names.push(t) }
+            // max seq входящих по теме (для бейджей непрочитанного)
+            if (t !== "" && !m.isMe) {
+                const s = m.seq || 0
+                if (s > (maxIn[t] || 0)) maxIn[t] = s
+            }
+            // U5: макс. ts по теме (любой отправитель) — для сортировки чипов по свежести
+            if (t !== "") {
+                const ts = m.ts || 0
+                if (ts > (maxTs[t] || 0)) maxTs[t] = ts
+            }
+        }
+        // U5: темы — по убыванию времени последнего сообщения (свежая активность
+        // левее). «Все»/«Главная» закреплены в модели чипов отдельно. Свежесть
+        // приблизительна, если последнее сообщение темы за окном загрузки, но
+        // свежая активность всегда в окне (ORDER BY ts DESC) → для «куда пришло» точно.
+        names.sort(function(a, b) { return (maxTs[b] || 0) - (maxTs[a] || 0) })
+        root._topicNames = names
+        root._topicBuckets = buckets
+        root._topicMaxIncoming = maxIn
+    }
+
+    // Окно сообщений активного фильтра из предрассчитанных корзин — O(1) выбор.
+    function _bucketFor(f) {
+        if (f === root._topicAll) return root._allMessages
+        const key = (f === root._topicMain) ? "" : f
+        return root._topicBuckets[key] || []
+    }
+
+    // Отфильтровать сообщения по активному фильтру темы (полный проход — оставлен
+    // для совместимости/разовых вызовов; горячий путь использует _bucketFor).
     function filterByTopic(messages) {
         const f = root.topicFilter
         if (f === root._topicAll) return messages
@@ -1045,14 +1107,50 @@ Rectangle {
         // «Все» (дефолт) храним как пусто — чтобы не засорять dialogs.json.
         Chat.setLastTopic(root.peer, filter === root._topicAll ? "" : filter)
         root._windowCount = root._windowDefault
+        root._switchRebuild = true   // полная пересборка с приземлением к низу
         root.updateMessageModel(root._allMessages)
-        listView.positionViewAtIndex(0, ListView.End)   // к низу (новейшее)
+        // Приземление к низу делает populateChunked (через _switchRebuild) — дёшево, на
+        // свежей модели (settleBottomCheap, без forceLayout). Тяжёлый
+        // positionViewAtIndex(0, End) УБРАН: он форсил синхронный шейпинг текста всех
+        // делегатов диапазона (~268мс на десктопе ⇒ ~3с на Android — корень фриза).
     }
 
+    // Упорядоченный список фильтров тем — В ТОМ ЖЕ порядке, что и чипы:
+    // «Все», «Главная», затем именованные (по свежести, U5) + pending первым.
+    // Используется свайпом по ленте для перехода к соседней теме.
+    function topicOrder() {
+        const order = [root._topicAll, root._topicMain]
+        const names = root._topicNames.slice()
+        if (root._pendingNewTopic !== "" && names.indexOf(root._pendingNewTopic) < 0)
+            names.unshift(root._pendingNewTopic)
+        for (let i = 0; i < names.length; ++i) order.push(names[i])
+        return order
+    }
+
+
     function updateMessageModel(messages) {
+        // Полный проход по сообщениям (имена тем, корзины, бейджи) — ТОЛЬКО когда
+        // набор реально сменился (живой апдейт/загрузка). Чистое переключение темы
+        // передаёт тот же массив (_allMessages) → пропускаем O(N)-сканы, работаем по
+        // предрассчитанным корзинам. Это и убирает «фриз растёт с числом сообщений».
+        const sameSet = (messages === root._scannedRef)
         root._allMessages = messages
-        root._topicNames = root.computeTopicNames(messages)
-        root.recomputeTopicUnread(messages)
+        if (!sameSet) {
+            root._scannedRef = messages
+            root._rescanTopics(messages)              // _topicNames/_topicBuckets/_topicMaxIncoming
+            if (!root._topicSeenInit) {
+                // Первый показ диалога — всё уже «просмотрено».
+                const seen = ({})
+                for (const k in root._topicMaxIncoming) seen[k] = root._topicMaxIncoming[k]
+                root._topicSeenSeq = seen
+                root._topicSeenInit = true
+            } else {
+                root.markActiveTopicSeen()
+            }
+        } else {
+            // Переключение фильтра на неизменном наборе — гасим бейдж активной темы.
+            root.markActiveTopicSeen()
+        }
         // Только что созданная тема материализовалась (появились сообщения) → она
         // уже в _topicNames, pending-пометка больше не нужна.
         if (root._pendingNewTopic !== "" && root._topicNames.indexOf(root._pendingNewTopic) >= 0)
@@ -1082,7 +1180,9 @@ Rectangle {
             && root._topicNames.indexOf(root.topicFilter) < 0) {
             root.topicFilter = root._topicAll
         }
-        const filtered = root.filterByTopic(messages)
+        // Окно активной темы — из предрассчитанных корзин (O(1) выбор + O(окно) срез),
+        // без полного прохода filterByTopic.
+        const filtered = root._bucketFor(root.topicFilter)
         const start = Math.max(0, filtered.length - root._windowCount)
         const slice = start > 0 ? filtered.slice(start) : filtered
         // Разворачиваем: index 0 = новейшее (для BottomToTop-ленты).
@@ -1120,10 +1220,76 @@ Rectangle {
     // не нужен); false = пришлось полностью пересобрать (вход в новый диалог) → вызывающий
     // восстановит позицию.
     property bool _popNewest: false
+
+    // ── Прогрессивное наполнение модели при ПОЛНОЙ пересборке (смена темы / вход в
+    // диалог) ──────────────────────────────────────────────────────────────────
+    // Раньше no-overlap-ветка делала clear()+append всех ~50 строк синхронно → ListView
+    // инстанцировал все видимые тяжёлые rich-text/код/фото делегаты в одном кадре =
+    // видимый фриз GUI-потока при свайпе тем. Теперь: первый экран кладём сразу,
+    // остальное — пачками по тикам таймера. В ИНВЕРТ-ленте (BottomToTop) дозаливаемые
+    // (более старые) сообщения уходят ВВЕРХ за вьюпорт → их делегаты не создаются, пока
+    // не доскроллишь, поэтому дозалив почти бесплатен и поток не блокируется.
+    property var _pendingRows: []
+    property int _pendingPos: 0
+    // Взводится selectTopic перед updateMessageModel → reconcileModel делает полную
+    // пересборку (clear+chunked, приземление к низу) вместо инкрементальной сверки.
+    property bool _switchRebuild: false
+    readonly property int _chunkFirst: 3    // первый экран — синхронно (меньше = ниже пик)
+    // Доложить остаток окна синхронно одним проходом. Дёшево: более старые сообщения
+    // уходят за верхний край инверт-ленты → их делегаты не инкубируются, пока не
+    // доскроллишь. Вызывается через Qt.callLater из populateChunked (гарантия полноты),
+    // а также по жесту прокрутки/в конце слайд-анимации тем (страховка).
+    function _flushPendingRows() {
+        if (root._pendingRows.length === 0) return
+        const rows = root._pendingRows
+        for (let i = root._pendingPos; i < rows.length; ++i) msgModel.append(rows[i])
+        root._pendingRows = []; root._pendingPos = 0
+    }
+    function populateChunked(windowed) {
+        root._pendingRows = []; root._pendingPos = 0
+        msgModel.clear()
+        const first = Math.min(windowed.length, root._chunkFirst)
+        for (let i = 0; i < first; ++i) msgModel.append(windowed[i])
+        // К низу (новейшее) БЕЗ форс-раскладки: просто двигаем contentY за нижнюю
+        // границу — ListView сам зажмёт к максимуму (дно), а видимые делегаты
+        // инкубируются лениво на следующем кадре (НЕ синхронный шейпинг текста = НЕ
+        // фриз). Это и приземляет к низу при «прокрутил вверх → сменил тему», и не
+        // повторяет дорогой positionViewAtIndex/forceLayout. Доводка — bottomPinTimer.
+        root.settleBottomCheap()
+        if (windowed.length > first) {
+            root._pendingRows = windowed
+            root._pendingPos = first
+            // Остаток окна (более СТАРЫЕ сообщения — за верхним краем инверт-ленты, их
+            // делегаты НЕ инкубируются, пока не доскроллишь) докладываем гарантированно
+            // на СЛЕДУЮЩЕМ тике, одним синхронным проходом. Первый экран уже показан
+            // (мгновенный отклик), а дозалив за кадром дёшев (только модель, без рендера).
+            // РАНЬШЕ остаток лили repeat-таймером — он не доходил до конца при смене темы
+            // (selectTopic, и свайпом, и тапом): без последующих стрим-событий некому было
+            // до-флашнуть → в теме оставались только первые _chunkFirst (жалоба Иванова
+            // «грузит не полностью»). Прямой вход «работал» лишь потому, что дозагрузка
+            // непрочитанных слала ещё onMessagesReceived → reconcile → _flushPendingRows.
+            // Естественная ленивая инкубация при прокрутке сохраняет «появление по одному».
+            Qt.callLater(root._flushPendingRows)
+        }
+    }
+
     function reconcileModel(windowed) {
+        // Гарантируем полную модель перед любым решением/сверкой (если чанк дозаливался).
+        root._flushPendingRows()
         const n = windowed.length
         const prevCount = msgModel.count
         if (n === 0) { if (prevCount > 0) msgModel.clear(); return false }
+
+        // Смена темы/фильтра — ВСЕГДА полная пересборка (clear+chunked). Это:
+        //  • гарантирует приземление к низу (новейшее) без тяжёлого positionViewAtIndex
+        //    (он форсил синхронную раскладку всех делегатов = фриз ~3с на Android);
+        //  • инверт-лента сама держит index 0 у низа после clear → отдельный «скролл к
+        //    низу» не нужен. Живой апдейт (новое сообщение) идёт инкрементально ниже.
+        if (root._switchRebuild) {
+            root._switchRebuild = false
+            root.populateChunked(windowed)
+            return false
+        }
 
         // Карта ключей нового окна (key → индекс).
         const newKeys = ({})
@@ -1136,8 +1302,7 @@ Rectangle {
                 if (newKeys[messageKey(msgModel.get(i))] !== undefined) { overlap = true; break }
             }
             if (!overlap) {
-                msgModel.clear()
-                for (let i = 0; i < n; ++i) msgModel.append(windowed[i])
+                root.populateChunked(windowed)
                 return false
             }
         }
@@ -1173,7 +1338,8 @@ Rectangle {
         // апдейте (не на первичном наполнении: prevCount === 0). Драйвер — ОДНА root-
         // анимация _revealValue 0→1 для делегата с ключом _revealKey. Исходящие — пилюля,
         // входящие — дешифровка текста (см. делегат).
-        if (insertedNewest && prevCount > 0 && Date.now() >= root._animSuppressUntil) {
+        if (insertedNewest && prevCount > 0 && Date.now() >= root._animSuppressUntil
+            && Qt.application.state === Qt.ApplicationActive) {
             // Dedup-страховка: commit оптимистичной отправки может из-за гонки poll/commit
             // прийти как ОТДЕЛЬНАЯ вставка (если client_token не сматчился) → анимация
             // перезапускалась бы («дважды»). Тот же текст+направление за <4с — не
@@ -1208,6 +1374,13 @@ Rectangle {
     // До этого момента (мс, Date.now) анимация появления подавлена — ставится при ВХОДЕ
     // в диалог, чтобы пачка непрочитанных не ломала раскладку дешифровкой (см. wasEmpty).
     property double _animSuppressUntil: 0
+    // До этого момента (мс) любое ЖИВОЕ сообщение, пришедшее сразу после входа в диалог,
+    // ПРИНУДИТЕЛЬНО докручивается к низу (stick=true), даже если stickToBottom успел
+    // слететь в false на неустоявшихся высотах делегатов медленного устройства. Без
+    // этого первое пришедшее через ~1с после входа сообщение (fetchMessages) оставалось
+    // ЗА экраном и «появлялось только после перезахода» (репро Иванова на Huawei; на
+    // быстром Tecno высоты успевали досчитаться и stick оставался true).
+    property double _entrySettleUntil: 0
 
     // Снимает флаг «всплытия» после старта add-transition, чтобы последующие вставки
     // (пагинация старых, рендер при скролле) не анимировались.
@@ -1247,6 +1420,25 @@ Rectangle {
             out += g.charAt(r % gl)
         }
         return out
+    }
+
+    // Пересечение фон↔передний план ломает reveal-дешифровку: Android паузит
+    // animation-driver, и если новое сообщение прилетает на резюме, revealDriver
+    // застревает на промежуточном _revealValue (<1) — scramble-оверлей замирает
+    // «мусором» (напр. «Alpha only» → «AlЖ$=») до скролла, который лишь оживляет
+    // render-loop и доигрывает кадры. Поэтому на ЛЮБОМ переходе состояния приложения
+    // принудительно завершаем текущий reveal (снимаем застрявший оверлей), а на
+    // возврате в Active ещё и подавляем анимацию на короткое окно — сообщения,
+    // флашнутые reconcile'ом сразу на резюме, просто появляются готовым текстом.
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            revealDriver.stop()
+            root._revealValue = 1.0
+            root._revealKey = ""
+            if (Qt.application.state === Qt.ApplicationActive)
+                root._animSuppressUntil = Date.now() + 1500
+        }
     }
 
     // Раскрыть ещё страницу старых сообщений (когда долистал до визуального верха).
@@ -1308,6 +1500,44 @@ Rectangle {
         // петля #39), гард stickToBottom: юзер листнул вверх — прекращаем.
         root._pinTicks = 0
         bottomPinTimer.restart()
+    }
+
+    // Дешёвое приземление к низу БЕЗ forceLayout: двигаем contentY к оценочной нижней
+    // границе. Видимые делегаты инкубируются ЛЕНИВО (на след. кадрах), а не синхронным
+    // шейпингом текста в этом же кадре → НЕ фриз. Для входа в диалог / смены темы, где
+    // важна отзывчивость (тяжёлые код/rich-text делегаты). settleToBottom (forceLayout)
+    // оставляем для точечных «к низу» (новое сообщение, кнопка «вниз»), где разовый
+    // точный доводчик допустим.
+    function pinBottomCheap() {
+        if (!listView || msgModel.count === 0) return
+        listView.contentY = Math.max(listView.originY,
+                                     listView.originY + listView.contentHeight - listView.height)
+    }
+    property int _cheapPinTicks: 0
+    Timer {
+        id: cheapPinTimer
+        interval: 32; repeat: true
+        onTriggered: {
+            if (listView && listView.stickToBottom) root.pinBottomCheap()
+            root._cheapPinTicks++
+            if (root._cheapPinTicks >= 8 || !listView || !listView.stickToBottom) stop()
+        }
+    }
+    // Лёгкое оседание к низу: доводим contentY по мере уточнения оценочной contentHeight
+    // (делегаты досчитываются), БЕЗ forceLayout.
+    function settleBottomCheap() {
+        if (!listView) return
+        listView.stickToBottom = true
+        // НЕ пиним contentY СИНХРОННО здесь. Замер на огромном диалоге (профилирование
+        // на десктопе): set(listView.contentY) сразу после clear+append форсит
+        // СИНХРОННЫЙ шейпинг видимых тяжёлых RichText-делегатов — 26–72мс за 3 делегата
+        // на десктопе ⇒ ~0.3–1.4с на телефоне, НА КАЖДЫЙ свайп темы. При быстрых свайпах
+        // с «Главной» на вкладку это копилось в «dead-фриз» (репро Иванова). Делегаты и
+        // так шейпятся на рендере; к низу доводит cheapPinTimer АСИНХРОННО, а его
+        // restart() схлопывает череду свайпов в ОДИН финальный settle (промежуточные
+        // темы не шейпятся вовсе). Первый тик таймера — 32мс, дно не «прыгает».
+        root._cheapPinTicks = 0
+        cheapPinTimer.restart()
     }
 
     property int _pinTicks: 0
@@ -1408,6 +1638,15 @@ Rectangle {
         return false
     }
 
+    // Листание тем колесом от C++-роутера (см. Timer с setTopicBarRect выше).
+    Connections {
+        target: WheelRouter
+        function onTopicStep(dir) {
+            if (!root.visible || textViewer.visible) return   // только видимый чат, не под ридером
+            messageListPane.commitTopicSwipe(dir)
+        }
+    }
+
     Connections {
         target: Chat
         function onMessagesReceived(peer, messages) {
@@ -1428,6 +1667,7 @@ Rectangle {
                 // пузырей). Они просто появляются; дешифровка остаётся для сообщений,
                 // пришедших в УЖЕ открытый диалог. (repro Иванова: вход с новыми → наложение.)
                 root._animSuppressUntil = Date.now() + 1500
+                root._entrySettleUntil  = Date.now() + 4000
             }
             // Следовать низу на входе в диалог И на всех догрузках, пока юзер сам не
             // пролистнул вверх (тогда stickToBottom станет false на его жесте). Раньше
@@ -1435,18 +1675,33 @@ Rectangle {
             // доехать до низа (высоты делегатов досчитываются позже), вторая догрузка
             // видела «не в конце» → уходила в anchor-restore и фиксировала СЕРЕДИНУ →
             // диалог открывался не внизу (#39).
-            const stick = wasEmpty || listView.stickToBottom
+            // stick=true и в окно оседания после входа: свежее сообщение, прилетевшее
+            // через ~1с после открытия, обязано доехать к низу, даже если stickToBottom
+            // ложно слетел на неустоявшихся высотах (иначе «видно только после перезахода»).
+            const stick = wasEmpty || listView.stickToBottom || (Date.now() < root._entrySettleUntil)
             const anchor = stick ? null : root.visibleMessageAnchor()
             const previousContentY = listView.contentY
+            // На входе в диалог (wasEmpty) — ЛЁГКОЕ оседание к низу (без forceLayout:
+            // тяжёлые делегаты не шейпятся синхронно во время анимации входа = нет
+            // застревания анимации). Точный settleToBottom — для follow за новым
+            // сообщением в уже открытом диалоге.
+            if (wasEmpty) root._switchRebuild = true
+            // В ОКНО оседания после входа тоже берём ДЕШЁВЫЙ settleBottomCheap (двигает
+            // contentY по оценке), а НЕ settleToBottom→positionViewAtIndex(0): на огромной
+            // ленте, когда список ещё не у низа (высоты не осели), positionViewAtIndex
+            // синхронно шейпит делегаты по пути = dead-фриз (репро Иванова: свайп тем на
+            // непрогруженном тяжёлом диалоге). Дешёвый пин докручивает так же, без шейпинга.
+            const settleFn = (wasEmpty || Date.now() < root._entrySettleUntil)
+                             ? root.settleBottomCheap : root.settleToBottom
             if (root.updateMessageModel(messages)) {
-                if (stick) Qt.callLater(function() { if (listView) root.settleToBottom() })
+                if (stick) Qt.callLater(function() { if (listView) settleFn() })
                 if (root.searchActive) root.recomputeSearchMatches()
                 return
             }
             Qt.callLater(function() {
                 if (!listView) return // страница могла быть разрушена до отложенного вызова
                 if (stick) {
-                    root.settleToBottom()
+                    settleFn()
                     return
                 }
 
@@ -1567,6 +1822,9 @@ Rectangle {
             errorText.text = qsTr("Файл сохранён")
             errorBar.visible = true
             errorTimer.restart()
+        }
+        function onAttachmentOpened(messageId) {
+            root.downloadingAttachmentId = ""
         }
         function onServerHistoryCleared(peer) {
             if (peer !== root.peer) return
@@ -2845,6 +3103,45 @@ Rectangle {
             flickableDirection: Flickable.HorizontalFlick
             boundsBehavior: Flickable.StopAtBounds
 
+            // Активный чип всегда виден: при смене темы (тапом ИЛИ свайпом) плавно
+            // подкручиваем чип-бар, чтобы выбранная тема была в кадре.
+            Behavior on contentX { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+            function ensureActiveVisible() {
+                for (let i = 0; i < topicRow.children.length; ++i) {
+                    const c = topicRow.children[i]
+                    if (!c || c.active !== true) continue
+                    const left = c.x
+                    const right = c.x + c.width
+                    const maxX = Math.max(0, topicRow.width - width)
+                    if (right > contentX + width) contentX = Math.min(maxX, right - width + 12)
+                    else if (left < contentX) contentX = Math.max(0, left - 12)
+                    return
+                }
+            }
+            Connections {
+                target: root
+                function onTopicFilterChanged() { Qt.callLater(topicBar.ensureActiveVisible) }
+            }
+
+            // Колесо мыши на баре тем ЛИСТАЕТ ТЕМЫ (десктоп, просьба Иванова): вниз —
+            // следующая, вверх — предыдущая. Один шаг на «щелчок»; пока идёт слайд-
+            // анимация прошлого переключения — колесо игнорируем (иначе пролистывало бы
+            // пачкой). Активный чип доскроллит ensureActiveVisible (onTopicFilterChanged).
+            // Горизонтальный .x (тачпад) оставляем Flickable'у — им можно и просто листать бар.
+            // Листание тем КОЛЕСОМ ловит C++ WheelRouter (фильтр на qApp): QML
+            // WheelHandler не получает hi-res/pixelDelta-колесо — Flickable съедает его
+            // раньше (репро Иванова на Wayland/libinput: обработчик не срабатывал вовсе).
+            // Отсюда лишь ПУБЛИКУЕМ экранный прямоугольник полоски тем; жест ловит фильтр.
+            Timer {
+                interval: 300; repeat: true; triggeredOnStart: true
+                running: root.visible && topicBar.visible && topicBar._hasTopics
+                onTriggered: {
+                    var p = topicBar.mapToGlobal(0, 0)
+                    WheelRouter.setTopicBarRect(Qt.rect(p.x, p.y, topicBar.width, topicBar.height))
+                }
+                onRunningChanged: if (!running) WheelRouter.setTopicBarRect(Qt.rect(0, 0, 0, 0))
+            }
+
             Row {
                 id: topicRow
                 height: 40
@@ -2857,9 +3154,10 @@ Rectangle {
                         const base = [{ f: root._topicAll, label: qsTr("Все") },
                                       { f: root._topicMain, label: qsTr("Главная") }]
                         const names = root._topicNames.slice()
-                        // Только что созданная тема ещё без сообщений — показываем её чип.
+                        // Только что созданная тема ещё без сообщений (нет ts для
+                        // сортировки) — показываем её чип ПЕРВОЙ среди именованных (U5).
                         if (root._pendingNewTopic !== "" && names.indexOf(root._pendingNewTopic) < 0)
-                            names.push(root._pendingNewTopic)
+                            names.unshift(root._pendingNewTopic)
                         for (let i = 0; i < names.length; ++i)
                             base.push({ f: names[i], label: names[i] })
                         return base
@@ -2876,6 +3174,9 @@ Rectangle {
                         color: active ? Theme.accent : Theme.bgCard
                         border.color: active ? Theme.accent : Theme.border
                         border.width: 1
+                        // Плавная подсветка при смене активной темы.
+                        Behavior on color { ColorAnimation { duration: 160 } }
+                        Behavior on border.color { ColorAnimation { duration: 160 } }
 
                         Text {
                             id: chipLabel
@@ -2884,6 +3185,7 @@ Rectangle {
                             color: chip.active ? "#FFFFFF" : Theme.textPrimary
                             font.pixelSize: 13
                             font.bold: chip.active
+                            Behavior on color { ColorAnimation { duration: 160 } }
                         }
                         // Бейдж непрочитанного: тема горит, если в неё пришло входящее,
                         // пока активен другой фильтр.
@@ -2920,9 +3222,84 @@ Rectangle {
             Layout.fillHeight: true
             clip: true
 
+            // Свайп между темами со «следованием за пальцем» и слайд-анимацией смены.
+            // Лента (listView.x) тянется за пальцем (демпфировано) → жест отзывчив
+            // сразу. При отпускании, если порог/скорость достигнуты — слайд: текущая
+            // лента уезжает за край, ПОД ПРИКРЫТИЕМ (контент за экраном) меняется модель
+            // (микрофриз пересборки reconcileModel не виден), новая лента въезжает с
+            // другой стороны. Иначе — пружинит обратно. xAxis-only → не мешает
+            // вертикальной прокрутке; выкл. в режиме выделения и во время самой анимации.
+            DragHandler {
+                id: topicSwipe
+                target: null
+                // U4: пока открыт полноэкранный ридер (z:1000) — свайп тем выключен,
+                // чтобы протёкший жест не сменил тему под окном.
+                enabled: topicBar._hasTopics && !root.selectionMode && !topicSlide.running && !textViewer.visible
+                xAxis.enabled: true
+                yAxis.enabled: false
+                // Явный МАЛЫЙ порог активации. Дефолт (−1) = QStyleHints.startDragDistance,
+                // а он на Android крупный (масштабируется DPI) → жест «просыпался» только
+                // после большого протаскивания, и приходилось свайпать пол-экрана (жалоба
+                // Иванова). Фиксированные 8px активируют свайп сразу; xAxis-only + порог
+                // коммита ниже не дают вертикальной прокрутке случайно сменить тему.
+                dragThreshold: 8
+                property real _vx: 0
+                onCentroidChanged: _vx = centroid.velocity.x
+                onTranslationChanged: if (active) listView.x = activeTranslation.x * 0.6
+                onActiveChanged: {
+                    if (active) return
+                    const dx = activeTranslation.x
+                    const fast = Math.abs(_vx) > 200
+                    if (dx <= -18 || (fast && _vx < 0)) messageListPane.commitTopicSwipe(1)
+                    else if (dx >= 18 || (fast && _vx > 0)) messageListPane.commitTopicSwipe(-1)
+                    else messageListPane.snapBack()
+                    _vx = 0
+                }
+            }
+
+            // Слайд-смена темы. dir +1 — следующая (уезжает влево), -1 — предыдущая.
+            SequentialAnimation {
+                id: topicSlide
+                property int dir: 0
+                property string target: ""
+                NumberAnimation {
+                    target: listView; property: "x"
+                    to: topicSlide.dir > 0 ? -messageListPane.width : messageListPane.width
+                    duration: 120; easing.type: Easing.InCubic
+                }
+                ScriptAction { script: root.selectTopic(topicSlide.target) }
+                PropertyAction {
+                    target: listView; property: "x"
+                    value: topicSlide.dir > 0 ? messageListPane.width : -messageListPane.width
+                }
+                NumberAnimation {
+                    target: listView; property: "x"
+                    to: 0; duration: 180; easing.type: Easing.OutCubic
+                }
+                // Гарантия полноты для свайп-входа: слайд-анимация выше могла подтормозить
+                // прогрессивный дозалив — по её завершении докладываем весь остаток окна
+                // синхронно (он за верхним краем, делегаты не инкубируются = дёшево).
+                ScriptAction { script: root._flushPendingRows() }
+            }
+            NumberAnimation {
+                id: topicSnap; target: listView; property: "x"
+                to: 0; duration: 160; easing.type: Easing.OutCubic
+            }
+            function commitTopicSwipe(dir) {
+                const order = root.topicOrder()
+                let idx = order.indexOf(root.topicFilter); if (idx < 0) idx = 0
+                const next = idx + dir
+                if (next < 0 || next >= order.length) { messageListPane.snapBack(); return }
+                topicSlide.dir = dir
+                topicSlide.target = order[next]
+                topicSlide.restart()
+            }
+            function snapBack() { topicSnap.restart() }
+
             ListView {
                 id: listView
-                anchors.fill: parent
+                width: parent.width
+                height: parent.height
                 clip: true
                 spacing: 4
                 // ИНВЕРТИРОВАННАЯ лента (как во всех чат-клиентах). Новейшее сообщение —
@@ -2942,11 +3319,14 @@ Rectangle {
 
                 model: ListModel { id: msgModel }
 
-                // Пред-реализуем ~2 экрана соседних делегатов. У тяжёлых rich-text/код-
-                // сообщений высота нестабильна (минимальная до реализации, реальная после);
-                // больший cacheBuffer держит соседей уже измеренными → оценка contentHeight
-                // далеко от низа меньше «прыгает», уходит самопрокрутка на 1-2 сообщения.
-                cacheBuffer: Math.round(Math.max(height, 600) * 2)
+                // cacheBuffer держит баланс: больше — плавнее скролл и стабильнее оценка
+                // contentHeight, НО на смене темы/входе ListView СИНХРОННО инкубирует все
+                // делегаты в этом радиусе, а у rich-text/код-сообщений раскладка
+                // QTextDocument дорогая (шейпинг текста на GUI-потоке) → радиус 2 экрана
+                // давал инкубацию ~40 тяжёлых делегатов за один кадр = фриз ~1.6с (профайл).
+                // Полэкрана хватает для плавного скролла; дно инверт-ленты анкерится index 0
+                // независимо от буфера, доводка — cheapPinTimer.
+                cacheBuffer: Math.round(Math.max(height, 600) * 0.25)
 
                 ScrollBar.vertical: AppScrollBar {}
 
@@ -2987,8 +3367,21 @@ Rectangle {
                 // к низу один раз, если стояли там.
                 property bool stickToBottom: true
                 onHeightChanged: if (stickToBottom) Qt.callLater(root.pinToBottom)
-                onMovementEnded: stickToBottom = root.isListAtEnd()
-                onDraggingChanged: if (!dragging) stickToBottom = root.isListAtEnd()
+                // Страховка полноты: как только пользователь тронул ленту — доложить весь
+                // остаток окна синхронно (он за верхним краем, делегаты не инкубируются =
+                // дёшево). Гарантирует, что к моменту прокрутки вверх все сообщения уже в
+                // модели, даже если прогрессивный дозалив не успел/прервался.
+                onMovementStarted: root._flushPendingRows()
+                // Не понижаем stickToBottom, пока идёт ПРОГРАММНОЕ оседание к низу
+                // (pin-таймеры входа/follow): на медленном устройстве высоты делегатов
+                // ещё не досчитаны, contentHeight растёт, и isListAtEnd() ложно вернул бы
+                // false прямо во время pin → stick слетал бы, pin вставал, а живое
+                // сообщение не докручивалось. Ручной скролл ловится onDraggingChanged.
+                onMovementEnded: if (!cheapPinTimer.running && !bottomPinTimer.running) stickToBottom = root.isListAtEnd()
+                onDraggingChanged: {
+                    if (dragging) root._flushPendingRows()
+                    else stickToBottom = root.isListAtEnd()
+                }
                 // Долистал до визуального ВЕРХА = конец инверт-модели (старейшее), по Y
                 // это atYBeginning → раскрыть ещё страницу старых сообщений (#39).
                 onAtYBeginningChanged: if (atYBeginning && !root._loadingOlder) root.loadOlderMessages()
@@ -3535,7 +3928,7 @@ Rectangle {
                             anchors.top: parent.top
                             anchors.right: parent.right
                             anchors.margins: 8
-                            radius: Theme.radiusSm
+                            radius: height / 2
                             color: previewSaveArea.containsMouse ? Theme.bgCard : "#CC0B0F14"
                             border.width: 1
                             border.color: Theme.border
@@ -3692,7 +4085,9 @@ Rectangle {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 enabled: !isDownloading
-                                onClicked: root.openSaveDialog(model.id, attachmentName)
+                                onClicked: model.downloaded
+                                           ? root.openAttachment(model.id)
+                                           : root.openSaveDialog(model.id, attachmentName)
                             }
                         }
 
@@ -5009,7 +5404,7 @@ Rectangle {
             spacing: 16
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: qsTr("Удалить файл с сервера?")
+                text: qsTr("Удалить файл из чата?")
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontLg
                 font.family: Theme.fontFamily
@@ -5017,7 +5412,7 @@ Rectangle {
             }
             Text {
                 Layout.fillWidth: true
-                text: qsTr("Файл скачан и сохранён локально. Если он больше не нужен на сервере — можно его убрать. Сообщение в чате останется.")
+                text: qsTr("Файл скачан и сохранён локально. Если он больше не нужен в чате — можно удалить его вместе с сообщением: с сервера, из этого чата и у собеседника при следующей синхронизации.")
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSm
                 font.family: Theme.fontFamily
@@ -5041,7 +5436,7 @@ Rectangle {
                     onClicked: {
                         const id = deleteServerCopyPrompt.targetMessageId
                         deleteServerCopyPrompt.close()
-                        if (id.length > 0) Chat.removeAttachmentChunksFromServer(id)
+                        if (id.length > 0) root.startShredder([id], root.expandDeleteIds([id]))
                     }
                 }
                 ParaButton {
@@ -5107,4 +5502,5 @@ Rectangle {
             }
         }
     }
+
 }

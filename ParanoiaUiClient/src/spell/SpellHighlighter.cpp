@@ -26,18 +26,24 @@ namespace
 class SpellSyntaxHighlighter final : public QSyntaxHighlighter
 {
 public:
-    explicit SpellSyntaxHighlighter(QTextDocument *document) : QSyntaxHighlighter(document) {}
+    explicit SpellSyntaxHighlighter(QTextDocument *document) : QSyntaxHighlighter(document)
+    {
+        // Словари грузятся в фоне (01#20) → как только готовы, перекрашиваем документ.
+        QObject::connect(&m_checker, &SpellChecker::availableChanged, this, [this]() { rehighlight(); });
+    }
 
     void setEnabled(bool enabled)
     {
         if (m_enabled == enabled) return;
         m_enabled = enabled;
+        if (m_enabled) m_checker.ensureLoaded(); // грузим словари лениво — только когда включено
         rehighlight();
     }
 
     void setLocale(const QString &locale)
     {
         m_checker.setLocale(locale);
+        if (m_enabled) m_checker.ensureLoaded();
         rehighlight();
     }
 
@@ -47,6 +53,9 @@ public:
 
     bool isMisspelled(const QString &word) const { return !m_checker.checkWord(word); }
 
+    // Проброс сигнала готовности словарей наверх (SpellHighlighter → QML).
+    SpellChecker &checker() { return m_checker; }
+
 protected:
     void highlightBlock(const QString &text) override
     {
@@ -54,7 +63,11 @@ protected:
         // поэтому видимое подчёркивание рисует QML-оверлей (см. misspelledRanges +
         // Canvas в ChatPage). Здесь формат всё же ставим — на случай платформ, где
         // он рендерится, и чтобы документ нёс корректную разметку; вреда нет.
-        if (!m_enabled || !m_checker.available()) return;
+        if (!m_enabled) return;
+        if (!m_checker.available()) {
+            m_checker.ensureLoaded(); // первая реальная проверка — стартуем фоновую загрузку
+            return;                   // готовность придёт availableChanged → rehighlight
+        }
 
         QTextCharFormat errorFormat;
         errorFormat.setUnderlineStyle(QTextCharFormat::WaveUnderline);
@@ -177,8 +190,13 @@ void SpellHighlighter::rebuildHighlighter()
     if (m_textDocument && m_textDocument->textDocument()) {
         m_highlighter = new SpellSyntaxHighlighter(m_textDocument->textDocument());
         connect(m_highlighter, &QObject::destroyed, this, [this]() { m_highlighter = nullptr; });
+        // Готовность словарей приходит асинхронно (фоновая загрузка 01#20) → пробрасываем
+        // наверх, чтобы QML перерисовал подчёркивания (onAvailableChanged в ChatPage).
+        connect(&m_highlighter->checker(), &SpellChecker::availableChanged, this,
+                [this]() { emit availableChanged(); });
         m_highlighter->setEnabled(m_enabled);
         m_highlighter->setLocale(m_locale);
+        if (m_enabled) m_highlighter->checker().ensureLoaded();
     }
     if (wasAvailable != available()) emit availableChanged();
 }

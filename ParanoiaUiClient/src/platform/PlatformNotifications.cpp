@@ -219,8 +219,6 @@ namespace PlatformNotifications
         return target;
     }
 
-    QString takeOpenPeerFromNotification() { return takeOpenTargetFromNotification().peer; }
-
     void storePendingCallOffer(const QString &envelopeJson)
     {
 #if defined(OS_IOS)
@@ -324,10 +322,18 @@ namespace PlatformNotifications
 #endif
     }
 
-    void clearServiceSnapshot()
+    void persistPollMode(const QString &mode)
     {
 #if defined(OS_ANDROID)
-        callAndroidService("clearSnapshot");
+        const QJniObject context = androidContext();
+        if (!context.isValid()) return;
+        const QJniObject jMode = QJniObject::fromString(mode);
+        QJniObject::callStaticMethod<void>(
+            "app/paranoia/client/ParanoiaForegroundService", "persistPollMode",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            context.object<jobject>(), jMode.object<jstring>());
+#else
+        Q_UNUSED(mode)
 #endif
     }
 }

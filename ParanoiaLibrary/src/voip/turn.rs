@@ -19,7 +19,13 @@ use sha1::Sha1;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub const STUN_HEADER_LEN: usize = 20;
-pub const MAGIC_COOKIE: u32 = 0x2112_A442;
+// Единый источник magic cookie — соседний stun.rs того же voip-модуля (03#65),
+// чтобы RFC-константа не дублировалась внутри одного крейта. Реэкспорт сохраняет
+// путь `turn::MAGIC_COOKIE` для внешних потребителей. XOR-кодек адресов в turn.rs
+// оставлен своим намеренно: он общий (любой атрибут, encode+decode), тогда как
+// stun.rs парсит только XOR-MAPPED-ADDRESS — формы разные, слияние дало бы риск
+// без выгоды на стабильной RFC-математике.
+pub use super::stun::MAGIC_COOKIE;
 
 // ── Method и Class ─────────────────────────────────────────────────────
 

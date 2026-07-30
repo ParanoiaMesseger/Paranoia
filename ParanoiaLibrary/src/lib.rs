@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod admin_api;
+mod atomic_io;
 pub mod client_cover;
 pub mod client_cover_food;
 pub mod client_cover_schema;
@@ -137,28 +138,6 @@ impl ParanoiaClient {
         self.transport
             .set_cover(Arc::new(SchemaClientCover::new(Arc::new(profile))));
         Ok(())
-    }
-
-    /// Скачать подписанный профиль с ноды (`GET url`, опц. Bearer), проверить
-    /// подпись доверенным ключом и применить. Замыкает канал «подписанный API»:
-    /// клиент периодически вызывает это и мгновенно меняет маскировку.
-    pub async fn fetch_and_apply_signed_profile(
-        &self,
-        url: &str,
-        trusted_pubkey_b64: &str,
-        bearer_token: Option<&str>,
-    ) -> Result<()> {
-        let client = reqwest::Client::new();
-        let mut req = client.get(url);
-        if let Some(token) = bearer_token.filter(|t| !t.is_empty()) {
-            req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
-        }
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("fetch profile: HTTP {}", resp.status());
-        }
-        let signed_json = resp.text().await?;
-        self.set_signed_masking_profile(&signed_json, trusted_pubkey_b64)
     }
 
     pub fn config(&self) -> &ClientConfig {

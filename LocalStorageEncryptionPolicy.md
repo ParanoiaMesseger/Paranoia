@@ -6,7 +6,9 @@
 
 Настоящая политика определяет требования к шифрованию данных, хранящихся локально на устройстве пользователя в приложении Paranoia Messenger. Политика распространяется на все компоненты локального хранилища:
 
+- состояние vault'а (`vault.json` — соль и verifier-блоб, см. раздел 4.2 и 5.1);
 - конфигурационные файлы (`device_key.json`, `client.json`, `profiles.json`);
+- корпоративный keyring (`corp.json`), если профиль корпоративный;
 - файлы диалогов (`dialogs.json`);
 - базу данных SQLite (`paranoia.db` и сопутствующие файлы WAL/SHM);
 - кэш вложений (`attachment-cache/*`).
@@ -111,7 +113,7 @@ PIN
 [nonce: 12 байт] || [ciphertext + Poly1305 tag: N+16 байт]
 ```
 
-**Верификация входа:** после расшифровки выполняется JSON-парсинг и проверка поля `"v"` (версия схемы). Ошибка парсинга или отсутствие поля `"v"` = неверный PIN. Отдельный хеш пароля не хранится.
+**Верификация входа:** в `vault.json` хранится verifier-блоб — известный plaintext (`{"v":1,"verifier":"paranoia-vault-v1"}`), запечатанный `json_key`. При вводе PIN деривируется `json_key` и выполняется AEAD-расшифровка этого блоба: успех = верный PIN, провал тега Poly1305 = неверный PIN. Отдельный хеш пароля не хранится.
 
 **Почему ChaCha20-Poly1305:**
 - Stream cipher — нет padding oracle уязвимостей
@@ -186,7 +188,7 @@ file_key = HKDF(files_key, salt=attachment_uuid_bytes, info="attachment-v1")
 1. Пользователь вводит PIN
 2. `Argon2id(PIN, salt)` → `master_key` (в RAM)
 3. HKDF → `json_key`, `db_key`, `files_key`
-4. Расшифровка `client.json` → JSON-парсинг → проверка поля `"v"`
+4. AEAD-расшифровка verifier-блоба из `vault.json` через `json_key` (успех = верный PIN)
 5. Успех: открытие SQLite с `db_key`, сессия активна
 6. Неудача: инкремент счётчика, задержка по политике блокировки
 
@@ -241,8 +243,8 @@ file_key = HKDF(files_key, salt=attachment_uuid_bytes, info="attachment-v1")
 |---|---|
 | Argon2id | `argon2` 0.5+ |
 | ChaCha20-Poly1305 | `chacha20poly1305` 0.10+ |
-| HKDF | `hkdf` + `sha2` 0.12+ |
-| SQLCipher | `rusqlite` (feature `bundled-sqlcipher`) 0.31+ |
+| HKDF | `hkdf` 0.12 + `sha2` 0.10 |
+| SQLCipher | `rusqlite` (feature `bundled-sqlcipher`) 0.39+ |
 | Обнуление памяти | `zeroize` 1.7+ |
 | CSPRNG | `rand` (feature `getrandom`) 0.8+ |
 

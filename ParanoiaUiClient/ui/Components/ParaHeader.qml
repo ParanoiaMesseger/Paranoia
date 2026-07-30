@@ -41,7 +41,7 @@ Rectangle {
             Rectangle {
                 anchors.centerIn: parent
                 width:  36; height: 36
-                radius: Theme.radiusSm
+                radius: height / 2
                 color:  backArea.containsMouse ? Theme.bgCard : "transparent"
                 border.width: backArea.containsMouse ? 1 : 0
                 border.color: Theme.border

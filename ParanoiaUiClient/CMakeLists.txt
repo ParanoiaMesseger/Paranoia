@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ParanoiaUiClient VERSION 0.2.20 LANGUAGES C CXX)
+project(ParanoiaUiClient VERSION 0.2.21 LANGUAGES C CXX)
 
 set(PARANOIA_PLATFORM "")
 set(PARANOIA_IS_MOBILE 0)
@@ -489,6 +489,10 @@ qt_add_qml_module(Paranoia
     src/backend/NotificationCoordinator.cpp
     src/backend/VersionInfoBackend.hpp
     src/backend/VersionInfoBackend.cpp
+    src/backend/LanguageController.hpp
+    src/backend/LanguageController.cpp
+    src/backend/PollModeController.hpp
+    src/backend/PollModeController.cpp
     src/backend/ChatBackend.hpp
     src/backend/ChatBackend.cpp
     src/backend/ActiveChatNotifier.hpp
@@ -528,6 +532,16 @@ qt_add_qml_module(Paranoia
     src/utils/Logging.hpp
     src/utils/KeyInjector.cpp
     src/utils/KeyInjector.hpp
+    src/utils/WheelRouter.cpp
+    src/utils/WheelRouter.hpp
+    src/utils/profiling/FrameProfiler.hpp
+    src/utils/profiling/FrameProfiler.cpp
+    src/utils/profiling/MainThreadWatchdog.hpp
+    src/utils/profiling/MainThreadWatchdog.cpp
+    src/utils/profiling/ProfilingHarness.hpp
+    src/utils/profiling/ProfilingHarness.cpp
+    src/spell/SpellDictionaryPool.hpp
+    src/spell/SpellDictionaryPool.cpp
     src/spell/SpellChecker.hpp
     src/spell/SpellChecker.cpp
     src/spell/SpellHighlighter.hpp
@@ -563,6 +577,7 @@ qt_add_qml_module(Paranoia
     ui/Components/PhotoMosaic.qml
     ui/Components/ReplyPreview.qml
     ui/Components/Toggle.qml
+    ui/Components/SegmentedToggle.qml
     ${PARANOIA_OPTIONAL_QML_FILES}
     ui/Components/QrCodeBox.qml
     ui/Components/ProgressStep.qml
@@ -581,6 +596,7 @@ qt_add_qml_module(Paranoia
     ui/Pages/RegisterUserPage.qml
     ui/Pages/AddReserveDomainPage.qml
     ui/Pages/ProfileSettingsPage.qml
+    ui/Pages/SettingsPage.qml
     ui/Pages/MaskingPage.qml
     ui/Pages/VersionInfoPage.qml
     ui/Pages/DataManagementPage.qml
@@ -601,6 +617,7 @@ target_compile_definitions(Paranoia
     PARANOIA_DEFAULT_STUN_SERVER="${PARANOIA_DEFAULT_STUN_SERVER}"
     PARANOIA_DESKTOP_TRAY=${PARANOIA_IS_DESKTOP}
     PARANOIA_BETA_LOGGING=${PARANOIA_BETA_LOGGING}
+    PARANOIA_PROFILING
     "OS_${PARANOIA_PLATFORM}"
 )
 

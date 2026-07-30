@@ -148,7 +148,7 @@ namespace paranoia::voip
         void setState(const QString &s);
         void resetCallState();
 
-        /// Сериализовать payload и вызвать `paranoia_call_signal_send`.
+        /// Сериализовать payload и вызвать callSignalSendAsync.
         bool sendSignal(int kind, const QJsonObject &payload);
         QString peerUserIdFor(const QString &peer) const;
         QString displayPeerFor(const QString &userId) const;

@@ -59,16 +59,27 @@ Rectangle {
     Connections {
         target: Backend
         function onSessionsChanged() { root.refresh() }
+        // Аватар запекается асинхронно (01#11) — результат приходит сюда.
+        function onProfileAvatarResult(profileId, ok) {
+            if (profileId !== root.profileId) return
+            root.feedbackError = !ok
+            root.feedbackText = ok ? qsTr("Аватар обновлён") : qsTr("Не удалось установить аватар")
+        }
+        // Итог асинхронной смены адреса профиля (01#27).
+        function onProfileServerChanged(ok, error) {
+            if (ok) {
+                root.back() // profileId изменился — назад к списку профилей
+            } else {
+                root.feedbackError = true
+                root.feedbackText = error || qsTr("Не удалось сменить адрес")
+            }
+        }
     }
     Connections {
         target: Chat
         function onAvatarPhotoPicked(peer, uri) {
             if (peer !== "profile:" + root.profileId) return
-            if (Backend.setProfileAvatar(root.profileId, uri)) {
-                root.feedbackError = false; root.feedbackText = qsTr("Аватар обновлён")
-            } else {
-                root.feedbackError = true;  root.feedbackText = qsTr("Не удалось установить аватар")
-            }
+            Backend.setProfileAvatar(root.profileId, uri) // итог — onProfileAvatarResult
         }
     }
 
@@ -240,7 +251,7 @@ Rectangle {
                     }
                     Rectangle {
                         Layout.preferredWidth: 32; Layout.preferredHeight: 32
-                        radius: Theme.radiusMd
+                        radius: 16
                         color: copyIdArea.containsMouse ? Theme.bgButton : Theme.bgSecondary
                         border.width: 1; border.color: Theme.border
                         AppIcon { anchors.centerIn: parent; width: 16; height: 16; name: "copy"; iconColor: Theme.textSecondary }
@@ -325,13 +336,13 @@ Rectangle {
                     onClicked: {
                         const res = Backend.changeProfileServer(root.profileId, serverInput.text.trim())
                         changeServerPopup.close()
-                        if (res && res.ok) {
-                            // profileId изменился — возвращаемся к списку профилей.
-                            root.back()
-                        } else {
+                        if (!res || !res.ok) {
+                            // Синхронная ошибка валидации.
                             root.feedbackError = true
                             root.feedbackText = (res && res.error) ? res.error : qsTr("Не удалось сменить адрес")
                         }
+                        // res.unchanged — адрес тот же, ничего не делаем.
+                        // Иначе миграция идёт асинхронно (01#27) → итог в onProfileServerChanged.
                     }
                 }
             }
@@ -344,12 +355,6 @@ Rectangle {
         title: qsTr("Выберите аватар")
         mode: "open"
         nameFilters: [qsTr("Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)"), qsTr("Все файлы (*)")]
-        onAccepted: {
-            if (Backend.setProfileAvatar(root.profileId, selectedFile.toString())) {
-                root.feedbackError = false; root.feedbackText = qsTr("Аватар обновлён")
-            } else {
-                root.feedbackError = true;  root.feedbackText = qsTr("Не удалось установить аватар")
-            }
-        }
+        onAccepted: Backend.setProfileAvatar(root.profileId, selectedFile.toString()) // итог — onProfileAvatarResult
     }
 }

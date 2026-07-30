@@ -10,6 +10,7 @@
 #include <QCryptographicHash>
 #include <QFuture>
 #include <QThread>
+#include <QTimer>
 
 InstallServerBackend::InstallServerBackend(QObject *parent) : QObject{parent}, ssh(nullptr) {}
 
@@ -108,21 +109,28 @@ void InstallServerBackend::on_scriptFinished(int exitCode)
         } break;
         case StepStartServer: ssh->runScriptByPath(":/StartServer.sh"); break;
         case StepVerifyServer: {
-            QThread::usleep(1000);
-            QString url = m_domain;
-            if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
-            admin::Admin{url, private_admin_key}
-                .regUser("admin", public_admin_key)
-                .then(this, [this, url](QFuture<bool> future) {
-                    const bool res = future.resultCount() > 0 && future.resultAt(0);
-                    if (res) {
-                        admin::Admin::admins.push_back({url, private_admin_key});
-                        admin::Admin::saveAdmins();
-                        on_scriptFinished(0);
-                    } else {
-                        installError(currentStep, "Error on check server.");
-                    }
-                });
+            // Даём только что запущенному systemd-сервису время подняться и начать
+            // слушать порт, прежде чем регистрировать admin. Раньше здесь стоял
+            // QThread::usleep(1000) — это 1 мс (usleep принимает микросекунды), т.е.
+            // паузы фактически не было и regUser часто уходил раньше старта сервиса
+            // («Error on check server»). Асинхронная задержка вместо sleep на GUI;
+            // this как контекст отменяет таймер, если backend разрушится раньше.
+            QTimer::singleShot(2500, this, [this]() {
+                QString url = m_domain;
+                if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+                admin::Admin{url, private_admin_key}
+                    .regUser("admin", public_admin_key)
+                    .then(this, [this, url](QFuture<bool> future) {
+                        const bool res = future.resultCount() > 0 && future.resultAt(0);
+                        if (res) {
+                            admin::Admin::admins.push_back({url, private_admin_key});
+                            admin::Admin::saveAdmins();
+                            on_scriptFinished(0);
+                        } else {
+                            installError(currentStep, "Error on check server.");
+                        }
+                    });
+            });
         } break;
         case StepRegisterServer: {
             auto [clientPriv, clientPub] = ParanoiaFFI::generate_keypair();
