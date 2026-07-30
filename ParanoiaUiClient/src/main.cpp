@@ -32,18 +32,22 @@
 #include "utils/adminStorage.hpp"
 #include "utils/ClipboardUtils.hpp"
 #include "utils/KeyInjector.hpp"
+#include "utils/WheelRouter.hpp"
 #include "backend/ChatBackend.hpp"
 #include "backend/EncryptedImageProvider.hpp"
 #include "backend/EmojiImageProvider.hpp"
 #include "backend/MainBackend.hpp"
 #include "backend/NotificationCoordinator.hpp"
 #include "backend/VersionInfoBackend.hpp"
+#include "backend/LanguageController.hpp"
+#include "backend/PollModeController.hpp"
 #include "platform/PlatformNotifications.hpp"
 #include "session/SessionStore.hpp"
 #include "spell/SpellChecker.hpp"
 #if defined(DESKTOP_OS)
 #include "backend/NativeFileDialog.hpp"
 #endif
+#include "utils/profiling/ProfilingHarness.hpp"
 #if defined(PARANOIA_IOS)
 #include "platform/IosFileExport.hpp"
 #endif
@@ -148,10 +152,11 @@ int main(int argc, char *argv[])
     // сам перебирает en_US → en). Если .qm нет или строка не переведена —
     // fallback на исходную русскую строку, т.е. текущее поведение без регрессии.
     // translator живёт до конца main(), что переживает app.exec().
-    static QTranslator appTranslator;
-    if (appTranslator.load(QLocale(), QStringLiteral("Paranoia"),
-                           QStringLiteral("_"), QStringLiteral(":/i18n")))
-        app.installTranslator(&appTranslator);
+    // Язык интерфейса выбирается пользователем (или из системной локали по
+    // умолчанию) — см. LanguageController, выставляется как контекст I18n ниже и
+    // умеет горячо переключаться через engine.retranslate().
+    LanguageController languageController;
+    languageController.applyInitial();
 
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -244,10 +249,21 @@ int main(int argc, char *argv[])
 
     KeyInjector keyInjector;
     engine.rootContext()->setContextProperty("KeyInjector", &keyInjector);
+    // Роутер колеса мыши: перехватывает колёсные события на уровне приложения
+    // (QML WheelHandler не получает hi-res/pixelDelta-колесо из-за Flickable).
+    WheelRouter wheelRouter;
+    engine.rootContext()->setContextProperty("WheelRouter", &wheelRouter);
     engine.rootContext()->setContextProperty("Backend", &backend);
     engine.rootContext()->setContextProperty("Chat", &chatBackend);
     engine.rootContext()->setContextProperty("Notifications", &notifications);
     engine.rootContext()->setContextProperty("VersionInfo", &versionInfoBackend);
+    languageController.setEngine(&engine);
+    engine.rootContext()->setContextProperty("I18n", &languageController);
+    engine.rootContext()->setContextProperty("PollMode", backend.pollModeController());
+    // Подписи режимов опроса — tr() на стороне C++: биндинг availablePollModes
+    // не содержит qsTr и сам по retranslate() не пересчитается, дёргаем NOTIFY.
+    QObject::connect(&languageController, &LanguageController::languageChanged,
+                     backend.pollModeController(), &PollModeController::availablePollModesChanged);
 #if defined(DESKTOP_OS)
     // Нативный системный файловый диалог (QtWidgets QFileDialog) — QML-обёртки Qt
     // на macOS 26 не выводят панель на экран. См. NativeFileDialog.hpp / ParaFileDialog.qml.
@@ -299,5 +315,8 @@ int main(int argc, char *argv[])
                      &DesktopTray::notificationAvailable);
     QObject::connect(&notifications, &NotificationCoordinator::notificationsCleared, &desktopTray,
                      &DesktopTray::clearAccumulatedNotifications);
+    // Профайлинг-харнес: спит по умолчанию, активируется env PARANOIA_PROFILE=1
+    // (сторож GUI-потока снимает стек на столле >250мс — диагностика dead-фризов).
+    paranoia::profiling::installIfRequested(&app, &engine);
     return app.exec();
 }

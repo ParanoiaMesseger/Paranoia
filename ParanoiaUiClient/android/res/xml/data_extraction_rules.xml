@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+. То же, что backup_rules.xml: plaintext open-кэш не бэкапится и не
+     переносится на другое устройство. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="paranoia_open/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="paranoia_open/" />
+    </device-transfer>
+</data-extraction-rules>

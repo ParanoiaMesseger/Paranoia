@@ -26,6 +26,15 @@ namespace Utils
         bool g_vaultIoFailed = false;
         QString g_vaultIoReason;
 
+        // RAM-кэш расшифрованного profiles.json (keystone F, 02#5/02#25): убирает
+        // повторный vault-декрипт манифеста на каждый profileManifestEntry/getSessionList
+        // (манифест несёт base64-аватары ВСЕХ профилей — декрипт дорогой). Write-through:
+        // мутирующие API пишут диск И обновляют кэш под тем же локом. Инвалидируется на
+        // vault lock/unlock. Единственный писатель profiles.json — UI-процесс.
+        QMutex g_manifestMutex;
+        QJsonObject g_manifestCache;
+        bool g_manifestCacheValid = false;
+
         void markVaultIoFailure(const QString &reason)
         {
             QMutexLocker lock(&g_vaultIoMutex);
@@ -143,9 +152,31 @@ namespace Utils
 
     QJsonObject loadProfilesManifest()
     {
-        auto manifest = readJsonObjectFile(Paths::profilesManifest());
-        if (!manifest.value("profiles").isArray()) manifest["profiles"] = QJsonArray{};
-        return manifest;
+        QMutexLocker lock(&g_manifestMutex);
+        if (!g_manifestCacheValid) {
+            // Промах: читаем+декриптуем с диска (редко — только после инвалидации).
+            QJsonObject manifest = readJsonObjectFile(Paths::profilesManifest());
+            if (!manifest.value("profiles").isArray()) manifest["profiles"] = QJsonArray{};
+            g_manifestCache      = manifest;
+            g_manifestCacheValid = true;
+        }
+        return g_manifestCache;
+    }
+
+    void writeProfilesManifest(const QJsonObject &manifest)
+    {
+        // Write-through: диск + кэш атомарно под одним локом (запись манифеста редка).
+        QMutexLocker lock(&g_manifestMutex);
+        writeJsonObjectFile(Paths::profilesManifest(), manifest);
+        g_manifestCache      = manifest;
+        g_manifestCacheValid = true;
+    }
+
+    void invalidateProfilesManifestCache()
+    {
+        QMutexLocker lock(&g_manifestMutex);
+        g_manifestCache = QJsonObject{};
+        g_manifestCacheValid = false;
     }
 
     void upsertProfileManifest(const QString &profileId, const QString &server, const QString &username,
@@ -166,7 +197,7 @@ namespace Utils
             profiles.append(obj);
         manifest["profiles"] = profiles;
         if (makeLast) manifest["last_profile_id"] = profileId;
-        writeJsonObjectFile(Paths::profilesManifest(), manifest);
+        writeProfilesManifest(manifest);
     }
 
     QJsonObject profileManifestEntry(const QString &profileId)
@@ -189,7 +220,7 @@ namespace Utils
         obj["updated_at"]    = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         *it                  = obj;
         manifest["profiles"] = profiles;
-        writeJsonObjectFile(Paths::profilesManifest(), manifest);
+        writeProfilesManifest(manifest);
         return true;
     }
 

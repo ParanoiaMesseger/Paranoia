@@ -190,7 +190,7 @@ impl SessionHandle {
     }
 
     pub async fn recv_frame(&mut self) -> Option<InboundFrame> {
-        // Для backward-compat (тесты, EasyCli) сначала пробуем voice, потом video.
+        // Демультиплексирование: сначала пробуем voice-канал, потом video (03#56).
         if let Some(rx) = self.voice_inbound_rx.as_mut() {
             match rx.try_recv() {
                 Ok(f) => return Some(f),
@@ -317,10 +317,6 @@ impl SessionHandle {
         }
     }
 
-    pub fn shutdown_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.shutdown)
-    }
-
     pub fn shutdown(&self) {
         self.shutdown.notify_waiters();
     }
@@ -339,63 +335,6 @@ impl SessionHandle {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
-    }
-
-    /// Послать STUN Binding Request через UDP-сокет этой сессии и дождаться
-    /// XOR-MAPPED-ADDRESS от `server`. Использование того же сокета критично:
-    /// NAT-mapping для другого порта почти всегда отличается.
-    pub async fn stun_discover(&self, server: SocketAddr, timeout: Duration) -> Result<SocketAddr> {
-        let (tx, rx) = oneshot::channel();
-        let req = StunRequest {
-            server,
-            reply: tx,
-            timeout,
-        };
-        if self.stun_tx.send(req).await.is_err() {
-            bail!("session stun channel closed");
-        }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => bail!("session stun reply dropped"),
-        }
-    }
-
-    /// Выполнить TURN Allocate через UDP-сокет этой сессии и вернуть relayed
-    /// address. Дальше этот адрес отправляется peer'у через signaling как relay
-    /// candidate.
-    pub async fn turn_allocate(&self, server: SocketAddr, timeout: Duration) -> Result<SocketAddr> {
-        let (tx, rx) = oneshot::channel();
-        let req = TurnRequest::Allocate {
-            server,
-            reply: tx,
-            timeout,
-        };
-        if self.turn_tx.send(req).await.is_err() {
-            bail!("session turn channel closed");
-        }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => bail!("session turn reply dropped"),
-        }
-    }
-
-    /// Переключить исходящие media на TURN Send Indication к `server` с
-    /// `peer_relay` как XOR-PEER-ADDRESS. Входящие Data Indication будут
-    /// распаковываться в том же receive-loop'е.
-    pub async fn set_turn_peer(&self, server: SocketAddr, peer_relay: SocketAddr) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let req = TurnRequest::SetPeer {
-            server,
-            peer: peer_relay,
-            reply: tx,
-        };
-        if self.turn_tx.send(req).await.is_err() {
-            bail!("session turn channel closed");
-        }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => bail!("session turn set-peer reply dropped"),
-        }
     }
 
     /// Дождаться завершения фоновой задачи. Возвращает результат её работы.
@@ -1398,7 +1337,7 @@ mod tests {
         );
 
         let reflexive = h
-            .stun_discover(server_addr, Duration::from_secs(2))
+            .stun_discover_owned(server_addr, Duration::from_secs(2))
             .await
             .expect("stun discover");
         assert_eq!(reflexive, session_local);

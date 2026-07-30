@@ -47,7 +47,11 @@ namespace Utils
 
     void writeJsonObjectFile(const QString &path, const QJsonObject &obj);
 
+    // RAM-кэш манифеста (keystone F): loadProfilesManifest отдаёт кэш; writeProfilesManifest
+    // пишет диск + обновляет кэш (write-through); invalidate — на vault lock/unlock.
     QJsonObject loadProfilesManifest();
+    void writeProfilesManifest(const QJsonObject &manifest);
+    void invalidateProfilesManifestCache();
 
     void upsertProfileManifest(const QString &profileId, const QString &server, const QString &username,
                                const bool makeLast);

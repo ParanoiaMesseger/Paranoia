@@ -2,7 +2,6 @@
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 #include <libssh2.h>
 #include <qlogging.h>
 #if defined(_WIN32)
@@ -17,6 +16,7 @@
 
 #include <QFileInfo>
 #include <QHostAddress>
+#include <QLoggingCategory>
 #include <QRegularExpression>
 #include <QMetaType>
 
@@ -26,6 +26,12 @@
 #define ERR_CONNECT(err_) BLOCK(emit connectionError(err_); return;)
 
 Q_DECLARE_METATYPE(SshConnectionParams)
+
+// Вывод удалённого канала SSH — отдельная категория, ВЫКЛЮЧЕННАЯ по умолчанию
+// (QtWarningMsg): тело установочного скрипта и stdout удалённой установки могут
+// содержать домен/порт/публичный админ-ключ, поэтому в журнал по умолчанию не
+// уходят. Включить: QT_LOGGING_RULES="paranoia.ssh.script.debug=true" (03#34).
+Q_LOGGING_CATEGORY(lcSshScript, "paranoia.ssh.script", QtWarningMsg)
 
 namespace
 {
@@ -223,8 +229,6 @@ void SshWorker::connectToHost(const SshConnectionParams &params)
 
 void SshWorker::runScript(QByteArray scriptContent)
 {
-    std::cout << "RUN>" << scriptContent.toStdString();
-    std::cout.flush();
     if (!connected_ || !session_) ERR_SCRIPT(ClientSSH::tr("Нет активного SSH-соединения"));
 
     auto *sess = static_cast<LIBSSH2_SESSION *>(session_);
@@ -283,8 +287,7 @@ void SshWorker::runScript(QByteArray scriptContent)
             continue;
         }
         if (rc <= 0) break;
-        std::cout << "$>" << QString::fromUtf8(buf, rc).toStdString();
-        std::cout.flush();
+        qCDebug(lcSshScript).noquote() << QString::fromUtf8(buf, rc);
     }
 
     libssh2_channel_wait_eof(ch);

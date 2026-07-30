@@ -9,6 +9,10 @@ Column {
     spacing: 6
 
     property string text: ""
+    // Композ-текст предиктивного ввода (Android): последнее слово сидит в pre-edit
+    // и ещё НЕ в text, пока не закоммичено (пробел/Enter). Нужно при «Сохранить»,
+    // чтобы не потерять последнее слово (см. commitTopicCreate в ChatPage).
+    readonly property string preeditText: root.lineCount <= 1 ? field.preeditText : multiField.preeditText
     property string placeholder: ""
     property alias echoMode: field.echoMode
     property string label: ""

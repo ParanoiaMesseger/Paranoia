@@ -10,7 +10,7 @@ pub mod vault;
 
 pub use io::{
     decrypt_attachment, decrypt_json_bytes, decrypt_json_from_disk, encrypt_attachment,
-    encrypt_json_bytes, encrypt_json_to_disk, ATTACHMENT_HKDF_INFO,
+    encrypt_json_bytes, encrypt_json_to_disk,
 };
 pub use state::VaultState;
 pub use vault::{

@@ -18,12 +18,18 @@ Rectangle {
     function refreshExportDialogs() {
         const dialogs = Backend.getDialogs();
         exportDialogList.model = dialogs;
-        const selected = {};
+        // Экспорт КЛЮЧЕЙ: сохраняем РУЧНОЙ выбор пользователя (02#31). Раньше любое
+        // входящее (dialogsChanged от поллинга) молча возвращало снятые галочки к
+        // «все выбраны» — риск экспортировать больше ключей, чем хотел пользователь.
+        // Существующие пиры — как выбраны (в т.ч. снятые=false), новые с keyring — true.
+        const prev = root.selectedExportPeers || {};
+        const merged = {};
         for (let i = 0; i < dialogs.length; ++i) {
-            if (dialogs[i].hasKey)
-                selected[dialogs[i].peer] = true;
+            const d = dialogs[i];
+            if (!d.hasKey) continue;
+            merged[d.peer] = (d.peer in prev) ? prev[d.peer] : true;
         }
-        selectedExportPeers = selected;
+        root.selectedExportPeers = merged;
     }
 
     function setAllExportDialogs(checked) {
@@ -79,12 +85,24 @@ Rectangle {
                 return;
             }
             const res = Backend.exportProfile(profile, peers, exportReceiverKey.text.trim(), exportFilePath.trim());
-            if (res.ok) {
-                exportFeedback.text = qsTr("✓ Экспорт сохранён: %1").arg(res.path);
-                if (profile !== "admin")
-                    exportFeedback.text += qsTr("\nДиалогов: %1, ключей: %2").arg(res.dialogues).arg(res.keyEntries);
-            } else {
+            // Синхронная ошибка валидации; иначе шифрование+запись идут асинхронно
+            // (01#29) → итог в onExportFinished.
+            if (!res.ok)
                 exportFeedback.text = res.error || qsTr("Ошибка экспорта.");
+            else
+                exportFeedback.text = qsTr("Экспорт…");
+        }
+    }
+
+    Connections {
+        target: Backend
+        function onExportFinished(ok, path, dialogues, keyEntries, error) {
+            if (ok) {
+                exportFeedback.text = qsTr("✓ Экспорт сохранён: %1").arg(path);
+                if (dialogues > 0)
+                    exportFeedback.text += qsTr("\nДиалогов: %1, ключей: %2").arg(dialogues).arg(keyEntries);
+            } else {
+                exportFeedback.text = error || qsTr("Ошибка экспорта.");
             }
         }
     }

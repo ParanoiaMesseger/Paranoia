@@ -67,6 +67,11 @@ public:
     /// файлы → Загрузки/Paranoia), без диалога выбора. QML вызывает это с 0.2.14; C++-
     /// реализация была потеряна (незакоммичена) → скачивание молча падало. Восстановлено.
     Q_INVOKABLE void saveAttachmentToDefault(const QString &messageId);
+    /// Открыть файл-вложение внешним приложением: расшифровать в приватный
+    /// open-кэш с настоящим именем файла и отдать системе (Android — chooser
+    /// через FileProvider, десктоп — ассоциация ОС). Асинхронно: по готовности
+    /// — attachmentOpened(messageId); при ошибке — receiveError.
+    Q_INVOKABLE void openAttachmentExternally(const QString &messageId);
     Q_INVOKABLE void ensureImagePreview(const QString &messageId);
     /// Материализовать видео-вложение в расшифрованный временный mp4 для
     /// проигрывания нативным плеером. Асинхронно: по готовности — сигнал
@@ -75,7 +80,8 @@ public:
     /// Удалить конкретный материализованный playback-файл (расшифрованное
     /// видео/голос) — вызывается при закрытии плеера, чтобы plaintext не залёживался.
     Q_INVOKABLE void releasePlaybackFile(const QString &fileUrl);
-    /// Очистить ВЕСЬ playback-кэш (paranoia_play) — при выходе из диалога.
+    /// Очистить ВЕСЬ playback-кэш (paranoia_play) и open-кэш (paranoia_open)
+    /// — при выходе из диалога.
     Q_INVOKABLE void clearPlaybackCache();
 
     // ── Голосовые сообщения (запись с микрофона) ──
@@ -93,10 +99,6 @@ public:
     /// `messageIds` — id'шники сообщений из модели чата. Для прикреплённых
     /// файлов автоматически включает диапазон чанков `[body_from_seq, body_to_seq]`.
     Q_INVOKABLE void deleteMessages(const QStringList &messageIds);
-    /// Удалить только тела чанков выбранного вложения с сервера (используется
-    /// после успешного скачивания файла, когда пользователь согласился убрать
-    /// файл с сервера).
-    Q_INVOKABLE void removeAttachmentChunksFromServer(const QString &messageId);
     /// Полная история диалога для экрана «Вложения» (без лимита окна чата).
     /// Грузится в отдельном потоке (FFI с большим лимитом), НЕ трогает кэш/окно
     /// чата; результат — сигналом attachmentsHistoryLoaded(peer, messages).
@@ -143,6 +145,8 @@ signals:
     /// Файл успешно скачан (или закеширован) с сервера и доступен локально.
     /// QML по этому сигналу предлагает удалить чанки с сервера.
     void attachmentDownloaded(const QString &messageId, const QString &filename);
+    /// Файл расшифрован и передан системе на открытие (openAttachmentExternally).
+    void attachmentOpened(const QString &messageId);
     /// Сообщения удалены (применили ranged-delete) — UI чистит кэш и
     /// перетягивает messages.
     void messagesDeleted(const QString &peer);
@@ -303,5 +307,18 @@ private:
     int retryActiveNotifyDelayMs() const;
     void sendTextMessage(const QString &text, const QString &replyToId = {}, const QString &replySender = {},
                          const QString &replyText = {});
+    // Контекст резолва имён отправителей. Снимается на GUI-потоке (читает
+    // session->dialogs/serverId/username), чтобы parseMessages мог исполняться на
+    // воркере БЕЗ кросс-поточного чтения изменяемого списка диалогов (01#13).
+    struct ParseContext {
+        QString myId;
+        QString myUsername;
+        QMap<QString, QString> peerIdToUsername;
+    };
+    ParseContext currentParseContext() const;
+    // Разбор JSON истории в QVariantList. Тяжёлый (QJsonDocument + ~30-ключ QVariantMap
+    // на сообщение) — вызывать на воркере с заранее снятым ctx. Перегрузка без ctx
+    // снимает его сама (только с GUI-потока — читает session->dialogs).
+    QVariantList parseMessages(const QString &json, const ParseContext &ctx) const;
     QVariantList parseMessages(const QString &json) const;
 };

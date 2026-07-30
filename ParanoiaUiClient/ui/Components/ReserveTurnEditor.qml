@@ -128,7 +128,10 @@ ColumnLayout {
         }
         function onTurnServerCheckFinished(profileId, url, ok, msg, pingMs) {
             if (profileId !== root.targetId) return
-            root.setTurnStatus(url, { state: ok ? "ok" : "error", pingMs: pingMs, message: msg })
+            // pingMs === -2 — probe не выполнялся (реального turn_probe пока нет):
+            // нейтральный статус «не проверялось», не путать с ошибкой разбора (-1).
+            const state = ok ? "ok" : (pingMs === -2 ? "unchecked" : "error")
+            root.setTurnStatus(url, { state: state, pingMs: pingMs, message: msg })
         }
         function onTurnServerError(msg) {
             root.turnFeedbackError = true
@@ -233,7 +236,7 @@ ColumnLayout {
                     Rectangle {
                         Layout.preferredWidth: 32
                         Layout.preferredHeight: 32
-                        radius: Theme.radiusMd
+                        radius: 16
                         color: removeArea.containsMouse ? Theme.error : Theme.errorBg
                         border.width: 1
                         border.color: Theme.error
@@ -400,9 +403,10 @@ ColumnLayout {
                     Text {
                         Layout.alignment: Qt.AlignVCenter
                         text: {
-                            if (turnState === "checking") return qsTr("проверка…")
-                            if (turnState === "ok")       return qsTr("ok")
-                            if (turnState === "error")    return qsTr("ошибка")
+                            if (turnState === "checking")  return qsTr("проверка…")
+                            if (turnState === "ok")        return qsTr("ok")
+                            if (turnState === "error")     return qsTr("ошибка")
+                            if (turnState === "unchecked") return qsTr("не проверялось")
                             return "—"
                         }
                         color: {
@@ -418,7 +422,7 @@ ColumnLayout {
                     Rectangle {
                         Layout.preferredWidth: 32
                         Layout.preferredHeight: 32
-                        radius: Theme.radiusMd
+                        radius: 16
                         color: turnRemoveArea.containsMouse ? Theme.error : Theme.errorBg
                         border.width: 1
                         border.color: Theme.error

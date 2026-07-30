@@ -229,17 +229,24 @@ Rectangle {
     }
 
     // Горизонтальный свайп — листание галереи. Активен только без зума (когда
-    // photoFlick не перехватывает одно касание для панорамирования).
+    // photoFlick не перехватывает одно касание для панорамирования). Срабатывает по
+    // дистанции ИЛИ по скорости — чтобы быстрый флик (короткий путь пальца) тоже
+    // листал, а не только медленный свайп.
     DragHandler {
+        id: swipeHandler
         target: null
         enabled: root.canSwipe
         xAxis.enabled: true
         yAxis.enabled: false
+        property real _vx: 0
+        onCentroidChanged: _vx = centroid.velocity.x
         onActiveChanged: {
-            if (!active) {
-                if (activeTranslation.x <= -60) root.showNext()
-                else if (activeTranslation.x >= 60) root.showPrev()
-            }
+            if (active) return
+            const dx = activeTranslation.x
+            const fast = Math.abs(_vx) > 280
+            if (dx <= -26 || (fast && _vx < 0)) root.showNext()
+            else if (dx >= 26 || (fast && _vx > 0)) root.showPrev()
+            _vx = 0
         }
     }
 
@@ -311,7 +318,7 @@ Rectangle {
         Rectangle {
             width: 38
             height: 38
-            radius: Theme.radiusSm
+            radius: height / 2
             color: saveViewerArea.containsMouse ? Theme.bgCard : Theme.bgInput
             border.width: 1
             border.color: Theme.border
@@ -335,7 +342,7 @@ Rectangle {
         Rectangle {
             width: 38
             height: 38
-            radius: Theme.radiusSm
+            radius: height / 2
             color: zoomOutArea.containsMouse ? Theme.bgCard : Theme.bgInput
             border.width: 1
             border.color: Theme.border
@@ -358,7 +365,7 @@ Rectangle {
         Rectangle {
             width: 38
             height: 38
-            radius: Theme.radiusSm
+            radius: height / 2
             color: zoomInArea.containsMouse ? Theme.bgCard : Theme.bgInput
             border.width: 1
             border.color: Theme.border
@@ -381,7 +388,7 @@ Rectangle {
         Rectangle {
             width: 38
             height: 38
-            radius: Theme.radiusSm
+            radius: height / 2
             color: closeViewerArea.containsMouse ? Theme.bgCard : Theme.bgInput
             border.width: 1
             border.color: Theme.border

@@ -30,7 +30,9 @@ pub trait Cover: Send + Sync + 'static {
     ) -> anyhow::Result<crate::routes::call_poll::CallPollRequest>;
 
     fn wrap_push_response(&self, resp: &crate::routes::push::ApiResponse) -> serde_json::Value;
-    fn wrap_pull_response(&self, resp: &crate::routes::pull::ApiResponse) -> serde_json::Value;
+    // Взят по значению (не по ссылке): cover перекладывает payload'ы move'ом, без
+    // копии всех пакетов на горячем пути выдачи истории (02#2).
+    fn wrap_pull_response(&self, resp: crate::routes::pull::ApiResponse) -> serde_json::Value;
     fn wrap_map_response(&self, resp: &crate::routes::map::ApiResponse) -> serde_json::Value;
     fn wrap_notify_response(&self, resp: &crate::routes::notify::ApiResponse) -> serde_json::Value;
     fn wrap_determinate_response(

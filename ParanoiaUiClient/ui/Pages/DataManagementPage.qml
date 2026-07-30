@@ -12,13 +12,24 @@ Rectangle {
     property real totalBytes: 0
     property bool destructing: false
     property bool clearingCache: false
+    property bool loadingBreakdown: false
 
     function refresh() {
-        breakdown = Backend.storageBreakdown()
-        var t = 0
-        for (var i = 0; i < breakdown.length; ++i) t += breakdown[i].bytes
-        totalBytes = t
-        pie.requestPaint()
+        // Подсчёт размеров идёт на воркере (01#10) — держим спиннер до сигнала.
+        loadingBreakdown = true
+        Backend.storageBreakdown()
+    }
+
+    Connections {
+        target: Backend
+        function onStorageBreakdownReady(list) {
+            root.breakdown = list
+            var t = 0
+            for (var i = 0; i < list.length; ++i) t += list[i].bytes
+            root.totalBytes = t
+            root.loadingBreakdown = false
+            pie.requestPaint()
+        }
     }
     function fmtBytes(b) {
         b = b || 0
@@ -45,7 +56,7 @@ Rectangle {
                 anchors.rightMargin: 16
                 spacing: 8
                 Rectangle {
-                    width: 40; height: 40; radius: Theme.radiusSm
+                    width: 40; height: 40; radius: height / 2
                     color: backArea.containsMouse ? Theme.bgCard : "transparent"
                     AppIcon {
                         anchors.centerIn: parent
@@ -137,9 +148,16 @@ Rectangle {
                                 ctx.fillStyle = Theme.bgPrimary; ctx.fill()
                             }
                         }
+                        BusyIndicator {
+                            anchors.centerIn: parent
+                            width: 44; height: 44
+                            running: root.loadingBreakdown
+                            visible: root.loadingBreakdown
+                        }
                         Column {
                             anchors.centerIn: parent
                             spacing: 0
+                            visible: !root.loadingBreakdown
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 text: root.fmtBytes(root.totalBytes)

@@ -17,6 +17,8 @@ Rectangle {
     // bgPrimary (#F2E8DF) — в светлой теме читался почти белым (правка Иванова 0.2.15).
     color: Theme.bgSecondary
     focus: visible
+    // Пока ридер открыт — C++ WheelRouter трактует Ctrl+колесо как зум (см. Connections).
+    onVisibleChanged: WheelRouter.setReaderActive(visible)
 
     property string bodyText: ""
     property string senderName: ""
@@ -88,10 +90,29 @@ Rectangle {
 
     // Фон гасит случайные тапы — чтобы не проваливались в ленту под оверлеем.
     // Объявлен первым → лежит ниже шапки/тела/подвала (они получают клики).
+    // hoverEnabled + AllButtons: перехватываем И hover, И правый клик — иначе на
+    // десктопе hover ПРОТЕКАЛ на делегаты ленты ПОД оверлеем, у них всплывала
+    // hover-панель реакций, и клик ставил реакцию на скрытое сообщение (репро
+    // Иванова). Оверлей непрозрачный и модальный по вводу.
     MouseArea {
         anchors.fill: parent
-        hoverEnabled: false
+        hoverEnabled: true
+        acceptedButtons: Qt.AllButtons
+        onPressed: function(mouse) { mouse.accepted = true }
         onClicked: function(mouse) { mouse.accepted = true }
+    }
+
+    // Ctrl+колесо → зум ловит C++ WheelRouter (фильтр на qApp): QML WheelHandler не
+    // получает hi-res/pixelDelta-колесо, его съедает Flickable тела раньше (репро
+    // Иванова на Wayland/libinput — обработчик не срабатывал вовсе). Пока ридер открыт,
+    // сообщаем роутеру setReaderActive(true) (см. onVisibleChanged ниже), и он шлёт
+    // zoomStep. Не-Ctrl колесо роутер не трогает — тело (bodyFlick) скроллится само.
+    Connections {
+        target: WheelRouter
+        function onZoomStep(dir) {
+            if (!root.visible) return
+            root.zoomBy(dir > 0 ? 1.12 : 1 / 1.12)
+        }
     }
 
     // ── Шапка: имя автора + закрыть ──────────────────────────────────────
@@ -128,7 +149,7 @@ Rectangle {
             spacing: 4
 
             Rectangle {
-                width: 34; height: 34; radius: Theme.radiusSm
+                width: 34; height: 34; radius: height / 2
                 anchors.verticalCenter: parent.verticalCenter
                 color: zoomOutArea.containsMouse ? Theme.bgCard : Theme.bgInput
                 border.width: 1; border.color: Theme.border
@@ -156,7 +177,7 @@ Rectangle {
             }
 
             Rectangle {
-                width: 34; height: 34; radius: Theme.radiusSm
+                width: 34; height: 34; radius: height / 2
                 anchors.verticalCenter: parent.verticalCenter
                 color: zoomInArea.containsMouse ? Theme.bgCard : Theme.bgInput
                 border.width: 1; border.color: Theme.border
@@ -179,7 +200,7 @@ Rectangle {
             anchors.rightMargin: 12
             anchors.verticalCenter: parent.verticalCenter
             width: 38; height: 38
-            radius: Theme.radiusSm
+            radius: height / 2
             color: closeArea.containsMouse ? Theme.bgCard : "transparent"
             border.width: 1
             border.color: Theme.border
@@ -251,15 +272,8 @@ Rectangle {
             onActiveScaleChanged: if (active) root.textScale = root.clampScale(root.pinchStartScale * activeScale)
         }
 
-        // Ctrl + колесо — зум текста (десктоп). Без Ctrl колесо прокручивает как обычно.
-        WheelHandler {
-            target: null
-            acceptedModifiers: Qt.ControlModifier
-            onWheel: function(event) {
-                root.zoomBy(event.angleDelta.y > 0 ? 1.12 : 1 / 1.12)
-                event.accepted = true
-            }
-        }
+        // Ctrl+колесо (зум) обрабатывает C++ WheelRouter — см. Connections выше.
+        // Пинч (тач) остаётся здесь; обычное колесо скроллит тело как Flickable.
     }
 
     // ── Тело (режим ВЫДЕЛЕНИЯ): сырой текст + СВОИ ручки выделения ─────────
@@ -401,7 +415,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             width: selectRow.implicitWidth + 22
             height: 34
-            radius: Theme.radiusSm
+            radius: height / 2
             color: root.selectMode ? Theme.accent
                                    : (selectArea.containsMouse ? Theme.bgCard : Theme.bgInput)
             border.width: 1
@@ -449,7 +463,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             width: copyRow.implicitWidth + 22
             height: 34
-            radius: Theme.radiusSm
+            radius: height / 2
             color: copyArea.containsMouse ? Theme.bgCard : Theme.bgInput
             border.width: 1
             border.color: Theme.border

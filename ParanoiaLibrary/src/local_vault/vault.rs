@@ -343,11 +343,9 @@ pub fn rekey_begin(new_pin: &str) -> Result<()> {
 
 fn save_manifest(staging: &Path, manifest: &RekeyManifest) -> Result<()> {
     let path = staging.join(STAGING_MANIFEST);
-    let tmp = staging.join(format!("{}.tmp", STAGING_MANIFEST));
     let bytes = serde_json::to_vec(manifest)?;
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    // Единый атомарный writer крейта (03#26).
+    crate::atomic_io::write_bytes_atomic(&path, &bytes)
 }
 
 fn backup_filename_for(path: &Path) -> String {
@@ -384,13 +382,9 @@ fn stage_backup(pending: &PendingVault, path: &Path) -> Result<()> {
         .staging_dir
         .join(STAGING_BACKUPS_SUBDIR)
         .join(&backup_name);
-    // Сначала пишем .tmp + rename, чтобы прерывание не оставило половинный backup.
-    let tmp = pending
-        .staging_dir
-        .join(STAGING_BACKUPS_SUBDIR)
-        .join(format!("{backup_name}.tmp"));
-    std::fs::copy(path, &tmp)?;
-    std::fs::rename(&tmp, &backup_path)?;
+    // Атомарная копия общим хелпером (uuid-tmp + rename), чтобы прерывание не
+    // оставило половинный backup (03#26).
+    crate::atomic_io::copy_file(path, &backup_path)?;
     // Только теперь фиксируем в манифесте.
     let mut m = pending.manifest.lock().unwrap();
     let backup_str = backup_path.to_string_lossy().to_string();
@@ -614,16 +608,8 @@ pub fn recover_pending_rekey() -> Result<()> {
 }
 
 fn write_atomic_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = match path.file_name() {
-        Some(name) => path.with_file_name(format!("{}.tmp", name.to_string_lossy())),
-        None => bail!("invalid path: {:?}", path),
-    };
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    // Единый атомарный writer крейта — uuid-tmp + чистый rename (03#26).
+    crate::atomic_io::write_bytes_atomic(path, bytes)
 }
 
 fn install_master(

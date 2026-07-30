@@ -109,6 +109,16 @@ ApplicationWindow {
             appWindow.hide();
             return;
         }
+        // Android: на корневой странице «назад» = свернуть в фон (как Home), НЕ
+        // закрывать окно. Закрытие единственного окна на Android запускает
+        // Qt-teardown (terminateQt синхронно ждёт Qt-поток с возможно висящим
+        // сетевым FFI/poll) → surface гибнет, остаётся белый экран и зависание
+        // (см. ParanoiaActivity.onDestroy). moveToBackground оставляет процесс
+        // тёплым; следующий запуск переиспользует тот же Qt-инстанс.
+        if (Qt.platform.os === "android") {
+            Backend.moveToBackground();
+            return; // close.accepted остаётся false — окно не закрывается
+        }
         close.accepted = true;
     }
 
@@ -244,6 +254,17 @@ ApplicationWindow {
         }
         function onVaultLocked() {
             Qt.callLater(function() { stackView.replace(null, unlockPinPage) })
+        }
+        // rc != 0 — создать хранилище не удалось; показываем ошибку прямо на
+        // экране SetPin (через его banner), иначе диалог просто молчит и
+        // пользователь остаётся без реакции UI (03#72). Успех (rc == 0) роутит
+        // onVaultStatusChanged выше.
+        function onVaultSetPinResult(rc) {
+            if (rc !== 0 && stackView.currentItem
+                    && stackView.currentItem.objectName === "SetPin") {
+                stackView.currentItem.banner =
+                    qsTr("Не удалось создать хранилище. Попробуйте ещё раз.")
+            }
         }
     }
 
@@ -381,6 +402,7 @@ ApplicationWindow {
             onOpenChangePin: stackView.push(changePinPage)
             onOpenMasking: stackView.push(maskingPage)
             onOpenDataManagement: stackView.push(dataManagementPage)
+            onOpenSettings: stackView.push(settingsPage)
         }
     }
 
@@ -451,6 +473,17 @@ ApplicationWindow {
         id: profileSettingsPage
         ProfileSettingsPage {
             onBack: stackView.pop()
+        }
+    }
+
+    Component {
+        id: settingsPage
+        SettingsPage {
+            onBack: stackView.pop()
+            onOpenMasking: stackView.push(maskingPage)
+            onOpenChangePin: stackView.push(changePinPage)
+            onOpenVersionInfo: stackView.push(versionInfoPage)
+            onOpenDataManagement: stackView.push(dataManagementPage)
         }
     }
 

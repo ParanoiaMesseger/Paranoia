@@ -155,37 +155,18 @@ impl Cover for SchemaCover {
         )
     }
 
-    fn wrap_pull_response(&self, resp: &PullResp) -> Value {
-        let core = if resp.success {
-            let packets = resp
-                .message
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            Some(PacketCore {
-                                seq: item.get("seq")?.as_u64()?,
-                                payload: item.get("payload")?.as_str()?.to_string(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            PullRespCore {
-                ok: true,
-                packets,
-                message: String::new(),
-            }
-        } else {
-            PullRespCore {
-                ok: false,
-                packets: Vec::new(),
-                message: resp
-                    .message
-                    .as_str()
-                    .unwrap_or("error")
-                    .to_string(),
-            }
+    fn wrap_pull_response(&self, resp: PullResp) -> Value {
+        // Пакеты уже типизированы (`Vec<(seq, base64)>`) — перекладываем поля move'ом
+        // прямо в `PullRespCore`, без повторного парса `Value` и без второй копии
+        // payload'ов (02#2). На ошибке `packets` пуст, `message` несёт текст.
+        let core = PullRespCore {
+            ok: resp.success,
+            packets: resp
+                .packets
+                .into_iter()
+                .map(|(seq, payload)| PacketCore { seq, payload })
+                .collect(),
+            message: resp.message,
         };
         self.seal(kind::PULL_RESP, &core)
     }
@@ -323,9 +304,10 @@ mod tests {
     #[test]
     fn wrap_pull_response_carries_packets() {
         let cover = SchemaCover::new(test_profile());
-        let body = cover.wrap_pull_response(&PullResp {
+        let body = cover.wrap_pull_response(PullResp {
             success: true,
-            message: json!([{"seq": 3, "payload": "YWJj"}]),
+            packets: vec![(3, "YWJj".to_string())],
+            message: String::new(),
         });
         let inner = paranoia_cover::unwrap(&cover.profile, kind::PULL_RESP, &body).unwrap();
         let resp: PullRespCore = serde_json::from_slice(&inner).unwrap();

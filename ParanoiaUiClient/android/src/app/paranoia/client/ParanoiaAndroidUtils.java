@@ -219,6 +219,23 @@ public final class ParanoiaAndroidUtils {
         }
     }
 
+    /// Свернуть приложение в фон (как нажатие Home), НЕ завершая процесс. Зовём на
+    /// корневой странице по жесту/кнопке «назад»: закрытие единственного окна на
+    /// Android рвёт штатный Qt-teardown (terminateQt синхронно ждёт Qt-поток, в
+    /// котором может висеть сетевой FFI/poll) → surface гибнет, остаётся белый экран
+    /// и зависание. moveTaskToBack оставляет процесс тёплым в фоне — следующий
+    /// запуск переиспользует тот же Qt-инстанс. Если context — не Activity, no-op.
+    public static void moveTaskToBack(Context context) {
+        if (!(context instanceof Activity)) return;
+        try {
+            Activity activity = (Activity) context;
+            activity.runOnUiThread(() -> activity.moveTaskToBack(true));
+            Log.i(TAG, "moveTaskToBack");
+        } catch (Exception e) {
+            Log.w(TAG, "moveTaskToBack failed: " + e.getMessage());
+        }
+    }
+
     public static void requestFileAccessIfNeeded(Context context) {
         if (!(context instanceof Activity) || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return;
@@ -481,6 +498,24 @@ public final class ParanoiaAndroidUtils {
             context.startActivity(intent);
         } catch (Exception e) {
             Log.e("ParanoiaAndroidUtils", "installApk failed: " + e.getMessage(), e);
+        }
+    }
+
+    // Открыть расшифрованный файл (в files-каталоге, покрыт FileProvider'ом)
+    // системным выбором приложения. Вызывается из ChatBackend по JNI.
+    public static void openFileWithChooser(Context context, String path, String mime) {
+        try {
+            File file = new File(path);
+            Uri uri = FileProvider.getUriForFile(
+                context, context.getPackageName() + ".qtprovider", file);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, (mime == null || mime.isEmpty()) ? "*/*" : mime);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent chooser = Intent.createChooser(intent, null);
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(chooser);
+        } catch (Exception e) {
+            Log.e("ParanoiaAndroidUtils", "openFileWithChooser failed: " + e.getMessage(), e);
         }
     }
 }

@@ -54,24 +54,6 @@ public:
                                                            QS_RS(target_id), QS_RS(emoji)));
     }
 
-    QString send_file_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path, QSTR mime_type)
-    {
-        return RS_QS(::paranoia_send_file_json_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json),
-                                                       QS_RS(file_path), QS_RS(mime_type)));
-    }
-
-    // Вариант с прогресс-callback'ом. progress будет дёрнут из runtime-потока
-    // FFI; вызывающая сторона должна сама перенести результат в свой UI-thread
-    // (через QMetaObject::invokeMethod(..., Qt::QueuedConnection)).
-    QString send_file_json_keyring_with_progress(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path,
-                                                 QSTR mime_type, ::paranoia_progress_callback progress,
-                                                 void *user_data)
-    {
-        return RS_QS(::paranoia_send_file_json_keyring_with_progress(
-            ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type),
-            progress, user_data));
-    }
-
     // ── Фото-группы ──────────────────────────────────────────────────────
     QString send_photo_group_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR group_id, QSTR caption)
     {
@@ -86,21 +68,6 @@ public:
         return RS_QS(::paranoia_send_photo_grouped_file_json_keyring_with_progress(
             ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type),
             QS_RS(group_id), progress, user_data));
-    }
-
-    // ── Эфемерные большие файлы ──────────────────────────────────────────
-    QString blob_limits_json_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json)
-    {
-        return RS_QS(::paranoia_blob_limits_json_keyring(ptr, QS_RS3(user_a, user_b, keyring_json)));
-    }
-
-    QString send_large_file_json_keyring_with_progress(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path,
-                                                       QSTR mime_type, ::paranoia_progress_callback progress,
-                                                       void *user_data)
-    {
-        return RS_QS(::paranoia_send_large_file_json_keyring_with_progress(
-            ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), QS_RS(file_path), QS_RS(mime_type),
-            progress, user_data));
     }
 
     QString send_file_auto_json_keyring_with_progress(QSTR user_a, QSTR user_b, QSTR keyring_json, QSTR file_path,
@@ -127,9 +94,6 @@ public:
     // Блокирует — вызывать на воркере.
     int notify_count_wait_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, quint32 long_poll_ms, uint64_t &out_count)
     { return ::paranoia_notify_count_wait_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), long_poll_ms, &out_count); }
-
-    int notify_unread_count_keyring(QSTR user_a, QSTR user_b, QSTR keyring_json, uint64_t &out_count)
-    { return ::paranoia_notify_unread_count_keyring(ptr, QS_RS(user_a), QS_RS(user_b), QS_RS(keyring_json), &out_count); }
 
     // MULTI-notify: ОДИН long-poll-запрос на N диалогов. items_json =
     // [{"peer":"<server_id>","keyring":[…]}, …]. Возвращает JSON [{"peer","n"}, …]
@@ -202,9 +166,6 @@ public:
 
     int delete_local_dialogue(QSTR user_a, QSTR user_b)
     { return ::paranoia_delete_local_dialogue(ptr, QS_RS2(user_a, user_b)); }
-
-    int callSignalSend(QSTR from_user, QSTR to_user, QSTR master_key_b64, unsigned char kind, QSTR payload_json)
-    { return paranoia_call_signal_send(ptr, QS_RS3(from_user, to_user, master_key_b64), kind, QS_RS(payload_json)); }
 
     int callSignalSendAsync(QSTR from_user, QSTR to_user, QSTR master_key_b64, unsigned char kind, QSTR payload_json,
                             paranoia_call_signal_cb cb, void *userdata)
@@ -418,9 +379,6 @@ public:
     static QString sign_masking_profile(QSTR profile_json, QSTR extended_secret_b64)
     { return RS_QS(::paranoia_sign_masking_profile(QS_RS2(profile_json, extended_secret_b64))); }
 
-    int fetch_and_apply_signed_profile(QSTR url, QSTR trusted_pubkey_b64, QSTR bearer_token)
-    { return ::paranoia_fetch_and_apply_signed_profile(ptr, QS_RS3(url, trusted_pubkey_b64, bearer_token)); }
-
     // Активный masking-профиль для admin/reg-трафика (глобально). "" — очистить.
     static int admin_set_masking_profile(QSTR profile_json)
     { return ::paranoia_admin_set_masking_profile(QS_RS(profile_json)); }
@@ -478,12 +436,6 @@ public:
         ::paranoia_free_string(ptr);
         return copy;
     }
-
-    static int vault_encrypt_attachment(QSTR salt_str, QSTR src_path, QSTR dst_path)
-    { return ::paranoia_vault_encrypt_attachment(QS_RS(salt_str), QS_RS(src_path), QS_RS(dst_path)); }
-
-    static int vault_decrypt_attachment(QSTR salt_str, QSTR src_path, QSTR dst_path)
-    { return ::paranoia_vault_decrypt_attachment(QS_RS(salt_str), QS_RS(src_path), QS_RS(dst_path)); }
 
 private:
     ParanoiaHandle *ptr = nullptr;

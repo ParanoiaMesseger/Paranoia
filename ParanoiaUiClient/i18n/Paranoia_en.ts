@@ -8,6 +8,30 @@
         <translation>Add contact</translation>
     </message>
     <message>
+        <source>Доступные диалоги</source>
+        <translation>Available chats</translation>
+    </message>
+    <message>
+        <source>Нет доступных диалогов</source>
+        <translation>No available chats</translation>
+    </message>
+    <message>
+        <source>Обновить</source>
+        <translation>Refresh</translation>
+    </message>
+    <message>
+        <source>Добавлен</source>
+        <translation>Added</translation>
+    </message>
+    <message>
+        <source>Добавить</source>
+        <translation>Add</translation>
+    </message>
+    <message>
+        <source>Загрузка ключа…</source>
+        <translation>Downloading key…</translation>
+    </message>
+    <message>
         <source>Имя собеседника (локальная метка)</source>
         <translation>Contact name (local label)</translation>
     </message>
@@ -23,22 +47,6 @@
 <context>
     <name>AddReserveDomainPage</name>
     <message>
-        <source>Резервный домен добавлен: %1</source>
-        <translation>Backup domain added: %1</translation>
-    </message>
-    <message>
-        <source>Резервный домен удалён: %1</source>
-        <translation>Backup domain removed: %1</translation>
-    </message>
-    <message>
-        <source>TURN-сервер добавлен: %1</source>
-        <translation>TURN server added: %1</translation>
-    </message>
-    <message>
-        <source>TURN-сервер удалён: %1</source>
-        <translation>TURN server removed: %1</translation>
-    </message>
-    <message>
         <source>Резерв клиента</source>
         <translation>Client backup</translation>
     </message>
@@ -47,72 +55,8 @@
         <translation>Admin backup</translation>
     </message>
     <message>
-        <source>Резервные адреса используются при проблемах с доступом к основному адресу.</source>
-        <translation>Backup addresses are used when there are problems reaching the primary address.</translation>
-    </message>
-    <message>
         <source>Основной адрес: %1</source>
         <translation>Primary address: %1</translation>
-    </message>
-    <message>
-        <source>Текущие резервные адреса</source>
-        <translation>Current backup addresses</translation>
-    </message>
-    <message>
-        <source>Резервные адреса ещё не добавлены.</source>
-        <translation>No backup addresses added yet.</translation>
-    </message>
-    <message>
-        <source>проверка…</source>
-        <translation>checking…</translation>
-    </message>
-    <message>
-        <source>недоступен</source>
-        <translation>unavailable</translation>
-    </message>
-    <message>
-        <source>Новый резервный домен</source>
-        <translation>New backup domain</translation>
-    </message>
-    <message>
-        <source>Добавить резервный домен</source>
-        <translation>Add backup domain</translation>
-    </message>
-    <message>
-        <source>Укажите резервный домен.</source>
-        <translation>Specify a backup domain.</translation>
-    </message>
-    <message>
-        <source>Резервные TURN-серверы используются для звонков, когда не удается установить прямое соединение между собеседниками и основной TURN сервер недоступен.</source>
-        <translation>Backup TURN servers are used for calls when a direct connection between participants cannot be established and the primary TURN server is unavailable.</translation>
-    </message>
-    <message>
-        <source>Текущие TURN-серверы</source>
-        <translation>Current TURN servers</translation>
-    </message>
-    <message>
-        <source>Резервные TURN-серверы не добавлены.</source>
-        <translation>No backup TURN servers added.</translation>
-    </message>
-    <message>
-        <source>ok</source>
-        <translation>ok</translation>
-    </message>
-    <message>
-        <source>ошибка</source>
-        <translation>error</translation>
-    </message>
-    <message>
-        <source>Новый TURN-сервер</source>
-        <translation>New TURN server</translation>
-    </message>
-    <message>
-        <source>Добавить TURN-сервер</source>
-        <translation>Add TURN server</translation>
-    </message>
-    <message>
-        <source>Укажите адрес TURN-сервера.</source>
-        <translation>Specify the TURN server address.</translation>
     </message>
 </context>
 <context>
@@ -255,12 +199,12 @@
 <context>
     <name>ChatBackend</name>
     <message>
-        <source>Вложение загружено на сервер не полностью. Попросите отправить файл повторно.</source>
-        <translation>The attachment was not fully uploaded to the server. Ask the sender to resend the file.</translation>
-    </message>
-    <message>
         <source>Вложение повреждено. Попросите отправить файл повторно.</source>
         <translation>The attachment is corrupted. Ask the sender to resend the file.</translation>
+    </message>
+    <message>
+        <source>Не удалось удалить тему: </source>
+        <translation>Could not delete topic: </translation>
     </message>
     <message>
         <source>Нет активного диалога.</source>
@@ -379,6 +323,10 @@
         <translation>You</translation>
     </message>
     <message>
+        <source>Файл ещё дозагружается отправителем. Повторите через несколько секунд.</source>
+        <translation>The sender is still uploading the file. Try again in a few seconds.</translation>
+    </message>
+    <message>
         <source>Ошибка синхронизации seq. Обновите диалог и повторите.</source>
         <translation>Sequence sync error. Refresh the chat and try again.</translation>
     </message>
@@ -458,8 +406,8 @@
         <translation>Messages deleted</translation>
     </message>
     <message>
-        <source>Получено вложений: %1 — идёт отправка</source>
-        <translation>Attachments received: %1 — sending</translation>
+        <source>вложение</source>
+        <translation>attachment</translation>
     </message>
     <message>
         <source>Выберите файл</source>
@@ -538,6 +486,10 @@
         <translation>Voice</translation>
     </message>
     <message>
+        <source>Новая тема</source>
+        <translation>New topic</translation>
+    </message>
+    <message>
         <source> сообщение</source>
         <translation> message</translation>
     </message>
@@ -552,6 +504,18 @@
     <message>
         <source>Поиск по диалогу…</source>
         <translation>Search in dialogue…</translation>
+    </message>
+    <message>
+        <source>Название новой темы…</source>
+        <translation>New topic name…</translation>
+    </message>
+    <message>
+        <source>Все</source>
+        <translation>All</translation>
+    </message>
+    <message>
+        <source>Главная</source>
+        <translation>Main</translation>
     </message>
     <message>
         <source>Загрузка превью</source>
@@ -646,6 +610,14 @@
         <translation>Cancel</translation>
     </message>
     <message>
+        <source>Удалить тему «%1»?</source>
+        <translation>Delete the topic “%1”?</translation>
+    </message>
+    <message>
+        <source>Все сообщения этой темы (включая вложения) будут удалены и с сервера, и у собеседника при следующей синхронизации.</source>
+        <translation>All messages in this topic (including attachments) will be deleted both from the server and from the other party on the next sync.</translation>
+    </message>
+    <message>
         <source>Удалить файл с сервера?</source>
         <translation>Delete the file from the server?</translation>
     </message>
@@ -656,6 +628,10 @@
     <message>
         <source>Оставить</source>
         <translation>Keep</translation>
+    </message>
+    <message>
+        <source>Отпустите файлы, чтобы отправить</source>
+        <translation>Drop the files to send</translation>
     </message>
 </context>
 <context>
@@ -1262,6 +1238,13 @@ Delete the file manually: %1 (%2)</translation>
     </message>
 </context>
 <context>
+    <name>LanguageController</name>
+    <message>
+        <source>Системный</source>
+        <translation>System</translation>
+    </message>
+</context>
+<context>
     <name>LinuxNotifier</name>
     <message>
         <source>Новых сообщений: %1</source>
@@ -1456,6 +1439,38 @@ Update now?</translation>
         <translation>Keyring is empty</translation>
     </message>
     <message>
+        <source>Профиль не корпоративный</source>
+        <translation>The profile is not corporate</translation>
+    </message>
+    <message>
+        <source>Ростер пуст</source>
+        <translation>The roster is empty</translation>
+    </message>
+    <message>
+        <source>Ростер: </source>
+        <translation>Roster: </translation>
+    </message>
+    <message>
+        <source>Пустой идентификатор диалога</source>
+        <translation>Empty chat identifier</translation>
+    </message>
+    <message>
+        <source>Ключ диалога недоступен</source>
+        <translation>The chat key is unavailable</translation>
+    </message>
+    <message>
+        <source>Диалог: </source>
+        <translation>Chat: </translation>
+    </message>
+    <message>
+        <source>Повреждённый ключ диалога</source>
+        <translation>Corrupted chat key</translation>
+    </message>
+    <message>
+        <source>Диалог добавлен</source>
+        <translation>Chat added</translation>
+    </message>
+    <message>
         <source>Синхронизация: </source>
         <translation>Sync: </translation>
     </message>
@@ -1546,6 +1561,30 @@ Update now?</translation>
     <message>
         <source>Кэш</source>
         <translation>Cache</translation>
+    </message>
+    <message>
+        <source>Не указан профиль.</source>
+        <translation>No profile specified.</translation>
+    </message>
+    <message>
+        <source>Профиль не загружен.</source>
+        <translation>The profile is not loaded.</translation>
+    </message>
+    <message>
+        <source>Неверный адрес сервера.</source>
+        <translation>Invalid server address.</translation>
+    </message>
+    <message>
+        <source>Адрес совпадает с текущим.</source>
+        <translation>The address is the same as the current one.</translation>
+    </message>
+    <message>
+        <source>Профиль для этого адреса уже существует.</source>
+        <translation>A profile for this address already exists.</translation>
+    </message>
+    <message>
+        <source>Не удалось перенести данные профиля.</source>
+        <translation>Could not migrate the profile data.</translation>
     </message>
     <message>
         <source>Неподдерживаемый тип профиля экспорта.</source>
@@ -1711,6 +1750,10 @@ Update now?</translation>
         <translation>Search by name…</translation>
     </message>
     <message>
+        <source>Подключение…</source>
+        <translation>Connecting…</translation>
+    </message>
+    <message>
         <source>Нет сообщений</source>
         <translation>No messages</translation>
     </message>
@@ -1749,22 +1792,6 @@ Update now?</translation>
     <message>
         <source>Установить свой сервер</source>
         <translation>Install your own server</translation>
-    </message>
-    <message>
-        <source>Маскировка трафика</source>
-        <translation>Traffic masking</translation>
-    </message>
-    <message>
-        <source>Сменить PIN-код</source>
-        <translation>Change PIN code</translation>
-    </message>
-    <message>
-        <source>Версия приложения</source>
-        <translation>App version</translation>
-    </message>
-    <message>
-        <source>Управление данными</source>
-        <translation>Data management</translation>
     </message>
     <message>
         <source>Переименовать</source>
@@ -1960,6 +1987,120 @@ Update now?</translation>
     <message>
         <source>Ошибка</source>
         <translation>Error</translation>
+    </message>
+</context>
+<context>
+    <name>PollModeController</name>
+    <message>
+        <source>60 сек</source>
+        <translation>60 sec</translation>
+    </message>
+    <message>
+        <source>5 мин</source>
+        <translation>5 min</translation>
+    </message>
+</context>
+<context>
+    <name>ProfileSettingsPage</name>
+    <message>
+        <source>Ник сохранён</source>
+        <translation>Nickname saved</translation>
+    </message>
+    <message>
+        <source>Скопировано</source>
+        <translation>Copied</translation>
+    </message>
+    <message>
+        <source>Аватар обновлён</source>
+        <translation>Avatar updated</translation>
+    </message>
+    <message>
+        <source>Не удалось установить аватар</source>
+        <translation>Could not set the avatar</translation>
+    </message>
+    <message>
+        <source>Настройки профиля</source>
+        <translation>Profile settings</translation>
+    </message>
+    <message>
+        <source>Изменить аватар</source>
+        <translation>Change avatar</translation>
+    </message>
+    <message>
+        <source>Убрать</source>
+        <translation>Remove</translation>
+    </message>
+    <message>
+        <source>Ник профиля</source>
+        <translation>Profile nickname</translation>
+    </message>
+    <message>
+        <source>Отображаемое имя</source>
+        <translation>Display name</translation>
+    </message>
+    <message>
+        <source>Сохранить ник</source>
+        <translation>Save nickname</translation>
+    </message>
+    <message>
+        <source>Подключение</source>
+        <translation>Connection</translation>
+    </message>
+    <message>
+        <source>Адрес сервера</source>
+        <translation>Server address</translation>
+    </message>
+    <message>
+        <source>https://example.com</source>
+        <translation>https://example.com</translation>
+    </message>
+    <message>
+        <source>Смена адреса переносит данные профиля (диалоги, ключи) на новый адрес и перелогинивает профиль. Для переезда сервера на другой домен — личность (server_id) не меняется.</source>
+        <translation>Changing the address migrates the profile data (chats, keys) to the new address and re-signs the profile in. For moving the server to another domain — the identity (server_id) does not change.</translation>
+    </message>
+    <message>
+        <source>Сменить адрес сервера</source>
+        <translation>Change server address</translation>
+    </message>
+    <message>
+        <source>Идентификатор (server_id)</source>
+        <translation>Identifier (server_id)</translation>
+    </message>
+    <message>
+        <source>Резервные адреса и TURN</source>
+        <translation>Backup addresses and TURN</translation>
+    </message>
+    <message>
+        <source>Сменить адрес сервера?</source>
+        <translation>Change the server address?</translation>
+    </message>
+    <message>
+        <source>Профиль будет перенесён на «%1» и перелогинен. Диалоги и ключи сохранятся.</source>
+        <translation>The profile will be migrated to “%1” and re-signed in. Chats and keys will be preserved.</translation>
+    </message>
+    <message>
+        <source>Отмена</source>
+        <translation>Cancel</translation>
+    </message>
+    <message>
+        <source>Сменить</source>
+        <translation>Change</translation>
+    </message>
+    <message>
+        <source>Не удалось сменить адрес</source>
+        <translation>Could not change the address</translation>
+    </message>
+    <message>
+        <source>Выберите аватар</source>
+        <translation>Choose an avatar</translation>
+    </message>
+    <message>
+        <source>Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)</source>
+        <translation>Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.tiff *.heic *.heif)</translation>
+    </message>
+    <message>
+        <source>Все файлы (*)</source>
+        <translation>All files (*)</translation>
     </message>
 </context>
 <context>
@@ -2257,6 +2398,89 @@ Update now?</translation>
     </message>
 </context>
 <context>
+    <name>ReserveTurnEditor</name>
+    <message>
+        <source>Резервный домен добавлен: %1</source>
+        <translation>Backup domain added: %1</translation>
+    </message>
+    <message>
+        <source>Резервный домен удалён: %1</source>
+        <translation>Backup domain removed: %1</translation>
+    </message>
+    <message>
+        <source>TURN-сервер добавлен: %1</source>
+        <translation>TURN server added: %1</translation>
+    </message>
+    <message>
+        <source>TURN-сервер удалён: %1</source>
+        <translation>TURN server removed: %1</translation>
+    </message>
+    <message>
+        <source>Резервные адреса используются при проблемах с доступом к основному адресу.</source>
+        <translation>Backup addresses are used when there are problems reaching the primary address.</translation>
+    </message>
+    <message>
+        <source>Текущие резервные адреса</source>
+        <translation>Current backup addresses</translation>
+    </message>
+    <message>
+        <source>Резервные адреса ещё не добавлены.</source>
+        <translation>No backup addresses added yet.</translation>
+    </message>
+    <message>
+        <source>проверка…</source>
+        <translation>checking…</translation>
+    </message>
+    <message>
+        <source>недоступен</source>
+        <translation>unavailable</translation>
+    </message>
+    <message>
+        <source>Новый резервный домен</source>
+        <translation>New backup domain</translation>
+    </message>
+    <message>
+        <source>Добавить резервный домен</source>
+        <translation>Add backup domain</translation>
+    </message>
+    <message>
+        <source>Укажите резервный домен.</source>
+        <translation>Specify a backup domain.</translation>
+    </message>
+    <message>
+        <source>Резервные TURN-серверы используются для звонков, когда не удается установить прямое соединение между собеседниками и основной TURN сервер недоступен.</source>
+        <translation>Backup TURN servers are used for calls when a direct connection between participants cannot be established and the primary TURN server is unavailable.</translation>
+    </message>
+    <message>
+        <source>Текущие TURN-серверы</source>
+        <translation>Current TURN servers</translation>
+    </message>
+    <message>
+        <source>Резервные TURN-серверы не добавлены.</source>
+        <translation>No backup TURN servers added.</translation>
+    </message>
+    <message>
+        <source>ok</source>
+        <translation>ok</translation>
+    </message>
+    <message>
+        <source>ошибка</source>
+        <translation>error</translation>
+    </message>
+    <message>
+        <source>Новый TURN-сервер</source>
+        <translation>New TURN server</translation>
+    </message>
+    <message>
+        <source>Добавить TURN-сервер</source>
+        <translation>Add TURN server</translation>
+    </message>
+    <message>
+        <source>Укажите адрес TURN-сервера.</source>
+        <translation>Specify the TURN server address.</translation>
+    </message>
+</context>
+<context>
     <name>SetPin</name>
     <message>
         <source>Установите PIN-код</source>
@@ -2361,6 +2585,41 @@ Update now?</translation>
     <message>
         <source>Введите PIN для оценки</source>
         <translation>Enter a PIN to evaluate</translation>
+    </message>
+</context>
+<context>
+    <name>SettingsPage</name>
+    <message>
+        <source>Настройки</source>
+        <translation>Settings</translation>
+    </message>
+    <message>
+        <source>Язык приложения</source>
+        <translation>Language</translation>
+    </message>
+    <message>
+        <source>Фоновые уведомления</source>
+        <translation>Background notifications</translation>
+    </message>
+    <message>
+        <source>Уведомления и звонки приходят только при открытом приложении</source>
+        <translation>Notifications and calls only arrive while the app is open</translation>
+    </message>
+    <message>
+        <source>Маскировка трафика</source>
+        <translation>Traffic masking</translation>
+    </message>
+    <message>
+        <source>Сменить PIN-код</source>
+        <translation>Change PIN</translation>
+    </message>
+    <message>
+        <source>Версия приложения</source>
+        <translation>App version</translation>
+    </message>
+    <message>
+        <source>Управление данными</source>
+        <translation>Data management</translation>
     </message>
 </context>
 <context>

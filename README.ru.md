@@ -61,7 +61,7 @@ Paranoia разделён на независимые компоненты:
 | [`ParanoiaLibrary`](ParanoiaLibrary) | Rust | Ядро криптографии и протокола, доступно клиентам через FFI |
 | [`ParanoiaUiClient`](ParanoiaUiClient) | C++ / Qt6 / QML | Кроссплатформенный десктоп- и мобильный клиент |
 | [`ParanoiaEasyCli`](ParanoiaEasyCli) | Rust | Клиент командной строки |
-| [`ParanoiaCover`](ParanoiaCover) | — | Слой маскировки / cover-трафика |
+| [`ParanoiaCover`](ParanoiaCover) | Rust | Слой маскировки / cover-трафика |
 
 ## Сборка из исходников
 
@@ -75,7 +75,7 @@ cd ParanoiaServer && cargo build --release
 cd ParanoiaUiClient && cmake --preset linux-release && cmake --build build/linux-release
 ```
 
-Подробные руководства — в [`docs/`](docs) (сборка под Android, маршрутизация nginx, cover-слой, обмен ключами и т.д.).
+Подробные руководства и диаграммы архитектуры — в [`docs/`](docs) (сборка под Android, маршрутизация nginx, плюс `.puml`-диаграммы cover-слоя, обмена ключами, протоколов сообщений и регистрации).
 
 ## Документация и политики
 

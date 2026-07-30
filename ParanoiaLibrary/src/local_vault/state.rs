@@ -102,13 +102,10 @@ impl VaultState {
     }
 
     pub fn save_atomic(&self, app_data_root: &Path) -> Result<()> {
-        fs::create_dir_all(app_data_root)?;
         let path = app_data_root.join(VAULT_STATE_FILE);
-        let tmp = app_data_root.join(format!("{}.tmp", VAULT_STATE_FILE));
         let bytes = serde_json::to_vec(self)?;
-        fs::write(&tmp, &bytes)?;
-        fs::rename(&tmp, &path)?;
-        Ok(())
+        // Единый атомарный writer крейта — uuid-tmp + rename, сам создаёт каталог (03#26).
+        crate::atomic_io::write_bytes_atomic(&path, &bytes)
     }
 }
 

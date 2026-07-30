@@ -645,21 +645,6 @@ namespace paranoia::voip
 #endif
     }
 
-    bool CallEngine::start(const QString &localBind, const QString &peerAddr, const QString &masterKeyB64,
-                           const QString &sessionIdB64, int role)
-    {
-        if (prepare(localBind, masterKeyB64, sessionIdB64, role) == 0 && !session_) { return false; }
-        if (!setPeer(peerAddr)) {
-            teardownAll();
-            return false;
-        }
-        if (!attachAudio()) {
-            teardownAll();
-            return false;
-        }
-        return true;
-    }
-
     void CallEngine::stop() { teardownAll(); }
 
     void CallEngine::onPcmFrameFromMic(const QByteArray &pcm)

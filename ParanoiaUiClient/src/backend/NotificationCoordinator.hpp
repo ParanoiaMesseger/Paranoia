@@ -11,6 +11,7 @@
 #include <memory>
 #include <vector>
 
+class PollModeController;
 class ServerSession;
 
 class NotificationCoordinator : public QObject
@@ -39,6 +40,12 @@ public:
     void clearProfile(const QString &profileId);
     void resetActiveContext();
     void schedulePoll(int delayMs = -1);
+    // Координатор — владелец жизненного цикла фоновой доставки: каждый
+    // schedulePoll сверяется с режимом ("off" — не стартовать Android-сервис/
+    // iOS BGTask/фоновый таймер трея, "battery_saving" — редкий фоновый таймер
+    // на десктопе), смена режима применяется немедленно через pollModeChanged.
+    // Без этой сверки любой schedulePoll воскрешал бы сервис вопреки «Выкл».
+    void setPollModeController(PollModeController *controller);
 
 signals:
     void notificationAvailable(quint64 count, const QString &profileId, const QString &peer);
@@ -71,6 +78,8 @@ private:
         QString peer;
         QString peerServerId;
         QString keyringJson;
+        // Снимок Dialog::notificationsMuted (для воркер-потока, без лазанья в сессию).
+        bool muted = false;
     };
 
     struct NotifyCount {
@@ -97,11 +106,20 @@ private:
     int m_notifyRetryCount               = 0;
     bool m_notifyPollInFlight            = false;
     std::atomic_bool m_applicationActive = false;
+    PollModeController *m_pollModeController = nullptr;
 
     mutable QMutex m_bgPollSnapshotMutex;
     std::vector<PollTarget> m_bgPollSnapshot;
 
     bool applicationIsActive() const;
+    // Уведомления по диалогу выключены пользователем: фильтруется ТОЛЬКО показ
+    // системного уведомления; бейджи/сортировка (m_notifiedPendingByPeer,
+    // m_lastActivityByPeer) живут как обычно. GUI-поток.
+    bool isMuted(const QString &profileId, const QString &peer) const;
+    // Сумма непрочитанного БЕЗ mute-диалогов — счёт для системного уведомления.
+    quint64 notifiableTotal() const;
+    // "normal", если контроллер ещё не подключён (защитный дефолт).
+    QString backgroundPollMode() const;
     bool setNotificationHint(const QString &profileId, const QString &peer);
     void pollForegroundNotifications();
     void pollBackgroundNotifications();
@@ -114,7 +132,8 @@ private:
     // с воркер-потока, не трогает члены координатора.
     static QList<NotifyCount> pollCountsGrouped(const QList<PollTarget> &targets, bool &anyFailed,
                                                 QString &error);
-    void applyNotifyCounts(PollMode mode, const QList<NotifyCount> &counts, bool anyFailed, const QString &error);
+    void applyNotifyCounts(PollMode mode, const QList<PollTarget> &targets, const QList<NotifyCount> &counts,
+                           bool anyFailed, const QString &error);
     void presentNotification(PollMode mode, quint64 total, const QString &profileId, const QString &peer);
     void rebuildBackgroundPollSnapshot();
     void runBackgroundPollFromService();

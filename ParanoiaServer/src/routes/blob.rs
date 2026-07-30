@@ -156,17 +156,30 @@ pub async fn do_blob(state: &Arc<AppState>, req: BlobRequest) -> Value {
                 Err(_) => return err("bad payload encoding"),
             };
             let dialogue_id = crypto::make_dialogue_id(&req.user, &req.peer);
-            match state.store.ephemeral_put_chunk(
-                &dialogue_id,
-                &req.file_id,
-                req.chunk_index,
-                req.total_chunks,
-                req.total_size,
-                &data,
-                retention,
-            ) {
-                Ok(_) => json!({ "success": true }),
-                Err(e) => err(&format!("store error: {e}")),
+            // Крупный чанк (до large_file_max = 2 ГиБ) может упереться в write-stall/
+            // компакцию RocksDB — пишем на spawn_blocking, не на tokio-воркере (01#3).
+            let put_result = {
+                let state = Arc::clone(state);
+                let file_id = req.file_id.clone();
+                let (chunk_index, total_chunks, total_size) =
+                    (req.chunk_index, req.total_chunks, req.total_size);
+                tokio::task::spawn_blocking(move || {
+                    state.store.ephemeral_put_chunk(
+                        &dialogue_id,
+                        &file_id,
+                        chunk_index,
+                        total_chunks,
+                        total_size,
+                        &data,
+                        retention,
+                    )
+                })
+                .await
+            };
+            match put_result {
+                Ok(Ok(_)) => json!({ "success": true }),
+                Ok(Err(e)) => err(&format!("store error: {e}")),
+                Err(e) => err(&format!("join error: {e}")),
             }
         }
         "get" => {
@@ -174,18 +187,26 @@ pub async fn do_blob(state: &Arc<AppState>, req: BlobRequest) -> Value {
                 return err("bad request");
             }
             let dialogue_id = crypto::make_dialogue_id(&req.user, &req.peer);
-            match state
-                .store
-                .ephemeral_get_chunk(&dialogue_id, &req.file_id, req.chunk_index)
-            {
-                Ok(Some(data)) => json!({
+            // Чтение крупного чанка тоже на spawn_blocking (01#3).
+            let get_result = {
+                let state = Arc::clone(state);
+                let file_id = req.file_id.clone();
+                let chunk_index = req.chunk_index;
+                tokio::task::spawn_blocking(move || {
+                    state.store.ephemeral_get_chunk(&dialogue_id, &file_id, chunk_index)
+                })
+                .await
+            };
+            match get_result {
+                Ok(Ok(Some(data))) => json!({
                     "success": true,
                     "payload": crypto::encode_b64(&data),
                 }),
                 // Просрочен/нет файла — отдельный флаг, чтобы клиент показал
                 // «срок хранения истёк», а не «сетевая ошибка».
-                Ok(None) => json!({ "success": false, "expired": true, "message": "expired or not found" }),
-                Err(e) => err(&format!("store error: {e}")),
+                Ok(Ok(None)) => json!({ "success": false, "expired": true, "message": "expired or not found" }),
+                Ok(Err(e)) => err(&format!("store error: {e}")),
+                Err(e) => err(&format!("join error: {e}")),
             }
         }
         _ => err("unknown op"),

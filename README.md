@@ -61,7 +61,7 @@ Paranoia is split into independent components:
 | [`ParanoiaLibrary`](ParanoiaLibrary) | Rust | Core cryptography and protocol, exposed to clients via FFI |
 | [`ParanoiaUiClient`](ParanoiaUiClient) | C++ / Qt6 / QML | Cross-platform desktop & mobile client |
 | [`ParanoiaEasyCli`](ParanoiaEasyCli) | Rust | Command-line client |
-| [`ParanoiaCover`](ParanoiaCover) | — | Masquerade / cover-traffic layer |
+| [`ParanoiaCover`](ParanoiaCover) | Rust | Masquerade / cover-traffic layer |
 
 ## Building from source
 
@@ -75,7 +75,7 @@ cd ParanoiaServer && cargo build --release
 cd ParanoiaUiClient && cmake --preset linux-release && cmake --build build/linux-release
 ```
 
-Deeper guides live in [`docs/`](docs) (Android build, nginx target routing, cover layer, key exchange, …).
+Deeper guides and architecture diagrams live in [`docs/`](docs) (Android build, nginx target routing, plus `.puml` diagrams for the cover layer, key exchange, message protocols and registration).
 
 ## Documentation & policies
 

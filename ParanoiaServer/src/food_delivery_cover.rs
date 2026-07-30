@@ -156,21 +156,23 @@ impl Cover for FoodDeliveryCover {
     ///     ...
     ///   ]
     /// }
-    fn wrap_pull_response(&self, resp: &PullResp) -> Value {
+    fn wrap_pull_response(&self, resp: PullResp) -> Value {
         if !resp.success {
             return json!({
                 "ok": false,
-                "error": resp.message, // тут message — либо строка, либо массив, мы оборачиваем как есть
+                "error": resp.message, // на ошибке message — текст, оборачиваем как есть
             });
         }
 
-        let arr = resp.message.as_array().cloned().unwrap_or_default();
-        let orders: Vec<Value> = arr
+        // Пакеты типизированы (`Vec<(seq, base64)>`) — перекладываем move'ом в orders,
+        // без повторного парса `Value` и без второй копии payload'ов (02#2).
+        let orders: Vec<Value> = resp
+            .packets
             .into_iter()
-            .map(|item| {
+            .map(|(seq, payload)| {
                 json!({
-                    "id": item["seq"],
-                    "blob": item["payload"],
+                    "id": seq,
+                    "blob": payload,
                 })
             })
             .collect();

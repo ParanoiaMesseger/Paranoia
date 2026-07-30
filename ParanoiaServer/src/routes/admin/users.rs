@@ -45,7 +45,17 @@ pub async fn delete(
     if cfg.users.remove(&username).is_none() {
         return err_json("user_not_found");
     }
-    if let Err(e) = cfg.save(&config_path()) {
+    // Сериализуем под write-локом, отпускаем гард и пишем асинхронно — не держим
+    // config-RwLock во время блокирующего диск-I/O (01-freezes п.2).
+    let data = match cfg.to_pretty_json() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Failed to serialize config after deleting '{username}': {e}");
+            return err_json("config_save_failed");
+        }
+    };
+    drop(cfg);
+    if let Err(e) = crate::config::Config::write_file(&config_path(), data).await {
         warn!("Failed to persist config after deleting '{username}': {e}");
         return err_json("config_save_failed");
     }

@@ -25,10 +25,28 @@ Item {
     signal linkActivated(string url)   // настоящие ссылки
     signal copyRequested(string text)  // клик по inline/блоку кода
 
-    implicitWidth: Math.max(measureText.implicitWidth,
-                            measureCode.text.length > 0 ? measureCode.implicitWidth + 24 : 0)
+    // Естественная ширина пузыря. Длинные сообщения (самая длинная строка > порога)
+    // или сообщения с кодом ВСЁ РАВНО упрутся в макс. ширину у делегата → точный замер
+    // (дорогой синхронный шейпинг скрытых измерителей) им не нужен: отдаём большое
+    // значение, делегат сам обрежет до maxWidth. Точно меряем только короткие простые
+    // сообщения, где пузырь жмётся к тексту. Это снимает остаточный микрофриз на
+    // переключении (шейпинг текста уже async, а измерители были последним синхронным).
+    readonly property bool _hasCode: _measureCodePlain().length > 0
+    readonly property bool _preciseTextWidth: _longestPlainLine() <= 48
+    implicitWidth: _hasCode
+        ? Math.max(_preciseTextWidth ? measureText.implicitWidth : 0, measureCode.implicitWidth + 24)
+        : (_preciseTextWidth ? measureText.implicitWidth : 100000)
     implicitHeight: col.implicitHeight
     height: implicitHeight
+
+    function _longestPlainLine() {
+        const s = _measurePlain()
+        let mx = 0, st = 0, n = s.length
+        for (let i = 0; i <= n; ++i) {
+            if (i === n || s.charCodeAt(i) === 10) { if (i - st > mx) mx = i - st; st = i + 1 }
+        }
+        return mx
+    }
 
     // ── Сегменты ─────────────────────────────────────────────────────────
     readonly property var _segs: _segments(raw)
@@ -49,18 +67,93 @@ Item {
             last = re.lastIndex
         }
         if (last < text.length) segs.push({ type: "text", content: text.substring(last) })
-        segs = segs.map(function(s) {
+        // Внутри текстовых сегментов выделяем GFM-таблицы (| a | b | + |---|---|) в
+        // отдельные сегменты type:"table". Код-блоки не трогаем.
+        let withTables = []
+        for (let si = 0; si < segs.length; ++si) {
+            if (segs[si].type === "text")
+                withTables = withTables.concat(_splitTables(segs[si].content))
+            else
+                withTables.push(segs[si])
+        }
+        segs = withTables.map(function(s) {
             if (s.type === "text") s.content = s.content.replace(/^\n+/, "").replace(/\n+$/, "")
             return s
-        }).filter(function(s) { return s.type === "code" || s.content.length > 0 })
+        }).filter(function(s) { return s.type !== "text" || s.content.length > 0 })
         if (segs.length === 0) segs.push({ type: "text", content: "" })
         return segs
     }
 
-    // Плоский текст для измерения естественной ширины (без переноса).
+    // Разбить текст на чередующиеся text/table-сегменты. Таблица GFM =
+    // строка-заголовок с `|`, СЛЕДУЮЩАЯ строка-разделитель (ячейки вида `:?-+:?`,
+    // тоже с `|` — чтобы не путать с тематическим разделителем `---`), затем 0+
+    // строк-данных с `|`. Выравнивание берём из двоеточий разделителя.
+    function _splitTables(textContent) {
+        const lines = String(textContent || "").split("\n")
+        let out = []
+        let buf = []
+        function flushText() {
+            if (buf.length) { out.push({ type: "text", content: buf.join("\n") }); buf = [] }
+        }
+        function splitRow(line) {
+            let s = line.trim()
+            s = s.replace(/\\\|/g, "\x07")          // защитить экранированные \|
+            if (s.charAt(0) === "|") s = s.substring(1)
+            if (s.charAt(s.length - 1) === "|") s = s.substring(0, s.length - 1)
+            return s.split("|").map(function(c) { return c.replace(/\x07/g, "|").trim() })
+        }
+        function isSep(line) {
+            if (line.indexOf("|") < 0) return false
+            const cells = splitRow(line)
+            if (cells.length === 0) return false
+            for (let k = 0; k < cells.length; ++k)
+                if (!/^:?-+:?$/.test(cells[k])) return false
+            return true
+        }
+        let i = 0
+        while (i < lines.length) {
+            if (i + 1 < lines.length && lines[i].indexOf("|") >= 0 && isSep(lines[i + 1])) {
+                const header = splitRow(lines[i])
+                const seps = splitRow(lines[i + 1])
+                const ncols = header.length
+                const align = []
+                for (let a = 0; a < ncols; ++a) {
+                    const c = seps[a] || ""
+                    const l = c.charAt(0) === ":", r = c.charAt(c.length - 1) === ":"
+                    align.push(l && r ? "center" : (r ? "right" : (l ? "left" : "")))
+                }
+                let rows = []
+                let j = i + 2
+                while (j < lines.length && lines[j].indexOf("|") >= 0 && lines[j].trim().length > 0) {
+                    let r = splitRow(lines[j])
+                    while (r.length < ncols) r.push("")   // добить недостающие ячейки
+                    if (r.length > ncols) r = r.slice(0, ncols)
+                    rows.push(r)
+                    ++j
+                }
+                flushText()
+                out.push({ type: "table", header: header, align: align, rows: rows })
+                i = j
+            } else {
+                buf.push(lines[i]); ++i
+            }
+        }
+        flushText()
+        return out
+    }
+
+    // Плоский текст для измерения естественной ширины (без переноса). Таблицы тоже
+    // учитываем (каждая строка ячеек, склеенная разделителями) — иначе пузырь с одной
+    // лишь таблицей схлопнулся бы по ширине.
     function _measurePlain() {
-        return _segs.filter(function(s) { return s.type === "text" })
-                    .map(function(s) { return s.content.replace(/`([^`\n]+)`/g, "$1") })
+        return _segs.filter(function(s) { return s.type === "text" || s.type === "table" })
+                    .map(function(s) {
+                        if (s.type === "table") {
+                            let rows = [s.header].concat(s.rows)
+                            return rows.map(function(r) { return r.join("    ") }).join("\n")
+                        }
+                        return s.content.replace(/`([^`\n]+)`/g, "$1")
+                    })
                     .join("\n")
     }
     function _measureCodePlain() {
@@ -265,7 +358,8 @@ Item {
         font.pixelSize: body._emojiScale > 1
                         ? Math.round(Theme.fontMd * body._emojiScale)
                         : Math.round(Theme.fontMd * body.fontScale)
-        text: body._measurePlain()
+        // Не шейпим, если точная ширина не нужна (длинное сообщение → maxWidth).
+        text: body._preciseTextWidth ? body._measurePlain() : ""
     }
     Text {
         id: measureCode
@@ -286,10 +380,14 @@ Item {
         Repeater {
             model: body._segs
 
+            // Синхронный Loader: async-инкубация при быстром переключении тем рушила
+            // инкубаторы на лету («Object or context destroyed during incubation»),
+            // копила память и уводила GUI-поток в 97% CPU → OOM-хэнг. Стабильность важнее.
             delegate: Loader {
                 required property var modelData
                 width: body.width
-                sourceComponent: modelData.type === "code" ? codeComp : textComp
+                sourceComponent: modelData.type === "code" ? codeComp
+                                 : (modelData.type === "table" ? tableComp : textComp)
 
                 Component {
                     id: textComp
@@ -379,6 +477,126 @@ Item {
                                 copyResetTimer.restart()
                             }
                             Timer { id: copyResetTimer; interval: 1200; onTriggered: codeCopyArea.copied = false }
+                        }
+                    }
+                }
+
+                Component {
+                    id: tableComp
+                    // Скруглённые углы — ПО-УГЛОВЫМ радиусом на угловых ячейках (Qt 6.7+).
+                    // НЕ через Rectangle-обёртку с clip: clip у Qt прямоугольный, не режет по
+                    // radius → квадратные углы ячеек торчали в скруглённую рамку («и острые,
+                    // и круглые одновременно»). Внутр. сетка — рамки ячеек (spacing −1).
+                    Column {
+                        id: tcol
+                        property var tbl: modelData
+                        property int ncols: Math.max(1, (tbl && tbl.header ? tbl.header.length : 1))
+                        property int nrows: (tbl && tbl.rows ? tbl.rows.length : 0)
+                        readonly property int cornerR: 12
+                        // Колонки равной ширины; -1 у spacing склеивает соседние рамки в
+                        // одну линию. Таблицу делаем ровно по сумме колонок (без выхода
+                        // за пузырь): ширина = ncols·cellW − перекрытия рамок.
+                        property real cellW: Math.max(36, Math.floor(body.width / ncols))
+                        property color sepColor: body._hex6(Theme.border)
+                        property real cellFont: Math.round(Theme.fontSm * body.fontScale)
+                        width: ncols * cellW - (ncols - 1)
+                        spacing: -1
+
+                        function _halign(c) {
+                            const a = (tbl && tbl.align && c < tbl.align.length) ? tbl.align[c] : ""
+                            return a === "right" ? Text.AlignRight
+                                 : (a === "center" ? Text.AlignHCenter : Text.AlignLeft)
+                        }
+
+                        // Заголовок (жирный, с фоном)
+                        Row {
+                            id: headerRow
+                            spacing: -1
+                            property real rowH: 0
+                            function bump(h) { if (h > rowH) rowH = h }
+                            Repeater {
+                                model: tcol.tbl ? tcol.tbl.header : []
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    required property int index
+                                    width: tcol.cellW
+                                    implicitHeight: hcell.implicitHeight + 12
+                                    height: Math.max(implicitHeight, headerRow.rowH)
+                                    onImplicitHeightChanged: headerRow.bump(implicitHeight)
+                                    Component.onCompleted: headerRow.bump(implicitHeight)
+                                    color: Theme.codeBg
+                                    border.width: 1
+                                    border.color: tcol.sepColor
+                                    topLeftRadius: index === 0 ? tcol.cornerR : 0
+                                    topRightRadius: index === tcol.ncols - 1 ? tcol.cornerR : 0
+                                    bottomLeftRadius: (tcol.nrows === 0 && index === 0) ? tcol.cornerR : 0
+                                    bottomRightRadius: (tcol.nrows === 0 && index === tcol.ncols - 1) ? tcol.cornerR : 0
+                                    Text {
+                                        id: hcell
+                                        anchors.fill: parent
+                                        anchors.margins: 6
+                                        text: "<b>" + body._richText(parent.modelData) + "</b>"
+                                        textFormat: Text.RichText
+                                        color: body.textColor
+                                        font.pixelSize: tcol.cellFont
+                                        font.family: Theme.fontFamily
+                                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                                        horizontalAlignment: tcol._halign(parent.index)
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                }
+                            }
+                        }
+
+                        // Строки данных
+                        Repeater {
+                            model: tcol.tbl ? tcol.tbl.rows : []
+                            delegate: Row {
+                                id: bodyRow
+                                required property var modelData
+                                required property int index
+                                spacing: -1
+                                property real rowH: 0
+                                function bump(h) { if (h > rowH) rowH = h }
+                                Repeater {
+                                    model: bodyRow.modelData
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        required property int index
+                                        readonly property bool _rich: body._segNeedsRich(modelData)
+                                        readonly property bool _lastRow: bodyRow.index === tcol.nrows - 1
+                                        width: tcol.cellW
+                                        implicitHeight: bcell.implicitHeight + 12
+                                        height: Math.max(implicitHeight, bodyRow.rowH)
+                                        onImplicitHeightChanged: bodyRow.bump(implicitHeight)
+                                        Component.onCompleted: bodyRow.bump(implicitHeight)
+                                        color: "transparent"
+                                        border.width: 1
+                                        border.color: tcol.sepColor
+                                        bottomLeftRadius: (_lastRow && index === 0) ? tcol.cornerR : 0
+                                        bottomRightRadius: (_lastRow && index === tcol.ncols - 1) ? tcol.cornerR : 0
+                                        Text {
+                                            id: bcell
+                                            anchors.fill: parent
+                                            anchors.margins: 6
+                                            text: parent._rich ? body._richText(parent.modelData) : parent.modelData
+                                            textFormat: parent._rich ? Text.RichText : Text.PlainText
+                                            color: body.textColor
+                                            font.pixelSize: tcol.cellFont
+                                            font.family: Theme.fontFamily
+                                            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                                            horizontalAlignment: tcol._halign(parent.index)
+                                            verticalAlignment: Text.AlignVCenter
+                                            onLinkActivated: function(link) {
+                                                if (link.indexOf("copy:") === 0)
+                                                    body.copyRequested(decodeURIComponent(link.substring(5)))
+                                                else
+                                                    body.linkActivated(link)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -42,10 +42,12 @@ void admin::Admin::initAdmins()
         return;
     }
 
-    for (const auto &line : QString::fromUtf8(raw).split("\n")) {
-        const auto tmp = line.split(";");
-        if (tmp.size() == 2) admins.push_back({Utils::normalizedServerUrl(tmp[0]), tmp[1]});
-    }
+    // Не JSON-массив: НЕ разбираем старый строковый формат «domain;key» — политика
+    // проекта запрещает legacy-fallback для несовместимого on-disk формата (иначе
+    // повреждённый/недорасшифрованный контент тихо порождал бы мусорных админов).
+    // Единственный писатель saveAdmins пишет только JSON. (03#33)
+    if (!raw.isEmpty())
+        qWarning("initAdmins: admins file is not a JSON array; ignoring");
 }
 
 void admin::Admin::saveAdmins()

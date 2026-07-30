@@ -6,7 +6,7 @@ VoIP-стек Paranoia требует `libopus`. Системного `libopus` 
 - **Android**: `scripts/build_opus_android.sh`
 - **iOS**:     `scripts/build_opus_ios.sh`
 
-`build_android.sh` вызывает Android-скрипт сам. GitLab CI (`.gitlab-ci.yml`) вызывает оба и кеширует артефакты.
+`build_android.sh` вызывает Android-скрипт сам. GitLab CI (`.gitlab-ci.yml`) вызывает оба скрипта, но в основном берёт готовые prebuilt-артефакты из CI-образов (Android) или кеша (iOS) — детали в разделе [CI](#ci).
 
 ## Layout
 
@@ -53,10 +53,19 @@ OPUS_IOS_SDK=iphonesimulator OPUS_IOS_ARCHS=x86_64 ./scripts/build_opus_ios.sh
 ## CI
 
 В `.gitlab-ci.yml`:
-- `build:client:linux` — apt установка `libopus-dev` в `before_script`.
-- `build:client:android` — вызов `scripts/build_opus_android.sh` после установки NDK; кеш `ParanoiaUiClient/deps/opus/` под ключом `opus-android-1.5.2-<NDK>`.
+- `build:client:linux` — `libopus-dev` вшит в образ `ci-linux-qt-u22`
+  (`ci/docker/ci-linux-qt-u22.Dockerfile`), CMake находит его через pkg-config;
+  `scripts/bundle_linux_libs.sh` добандливает `libopus` в пакет. Отдельной
+  apt-установки в `before_script` больше нет.
+- `build:client:android` — NDK и prebuilt opus/openh264/ffmpeg (arm64-v8a) вшиты
+  в образ `ci-linux-qt-android`; `before_script` копирует их из
+  `/opt/android-prebuilt`, а `scripts/build_opus_android.sh` отрабатывает
+  идемпотентно (видит готовый `libopus.a` — пропускает пересборку). Отдельного
+  кеша opus у android-джобы нет.
 - `build:client:macos` — `brew install opus` в общем `.apple_shell_setup`.
-- `build:client:ios` — вызов `scripts/build_opus_ios.sh` перед cmake; кеш `opus-ios-1.5.2`.
+- `build:client:ios` — вызов `scripts/build_opus_ios.sh` перед cmake; кеш
+  `ParanoiaUiClient/deps/{opus,ffmpeg,hunspell}/` под составным ключом
+  `opus-ios-1.5.2-ffmpeg-ios-7.1.2-avfilter-…-hunspell-ios-1.7.2`.
 - `build:client:windows` — опционально через переменную `VCPKG_ROOT`.
 
 ## Проверка

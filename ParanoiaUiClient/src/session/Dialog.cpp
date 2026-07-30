@@ -25,9 +25,6 @@ QString Dialog::keyringJson() const
     return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
 }
 
-QByteArray Dialog::deriveKey(const QString &sharedSecret)
-{ return QCryptographicHash::hash(sharedSecret.toUtf8(), QCryptographicHash::Sha256); }
-
 QList<Dialog> Dialog::loadFromPath(const QString &path)
 {
     QList<Dialog> dialogs;
@@ -43,6 +40,7 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
         QString avatar        = obj["avatar"].toString();
         qint64 lastActivityMs = static_cast<qint64>(obj["lastActivityMs"].toDouble(0));
         QString lastTopic     = obj["lastTopic"].toString();
+        bool muted            = obj["muted"].toBool(false);
         QList<DialogKeyEntry> keyring;
 
         const QJsonArray keyringJson = obj["keyring"].toArray();
@@ -58,7 +56,7 @@ QList<Dialog> Dialog::loadFromPath(const QString &path)
                   [](const DialogKeyEntry &lhs, const DialogKeyEntry &rhs) { return lhs.startSeq < rhs.startSeq; });
         if (!peer.isEmpty())
             dialogs.append({peer, peerServerId, keyring, lastMsg, draft, receiptsEnabled, localName, avatar,
-                            lastActivityMs, lastTopic});
+                            lastActivityMs, lastTopic, muted});
     }
     return dialogs;
 }
@@ -88,6 +86,7 @@ void Dialog::saveToPath(const QString &path, const QList<Dialog> &dialogs)
         if (!d.avatar.isEmpty()) o["avatar"] = d.avatar;
         if (d.lastActivityMs > 0) o["lastActivityMs"] = static_cast<double>(d.lastActivityMs);
         if (!d.lastTopic.isEmpty()) o["lastTopic"] = d.lastTopic;
+        if (d.notificationsMuted) o["muted"] = true;
         arr.append(QJsonValue(o));
     }
     // Через Utils::writeFile — для путей внутри profiles/ это уйдёт в

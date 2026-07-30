@@ -8,7 +8,7 @@ Rectangle {
 
     implicitWidth: 40
     implicitHeight: 40
-    radius: Theme.radiusMd
+    radius: height / 2
     color: refreshArea.containsMouse && root.enabled ? Theme.bgCard : Theme.bgSecondary
     border.width: 1
     border.color: Theme.border

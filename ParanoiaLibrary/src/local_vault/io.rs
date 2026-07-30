@@ -2,28 +2,15 @@
 //! Все ключи берутся из активного `vault`.
 
 use anyhow::{anyhow, bail, Result};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 use super::{crypto, vault};
-
-pub const ATTACHMENT_HKDF_INFO: &[u8] = b"attachment-v1";
 
 const FILE_MAGIC: &[u8; 4] = b"PVL1"; // Paranoia Vault Local v1
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp: PathBuf = match path.file_name() {
-        Some(name) => path.with_file_name(format!("{}.tmp", name.to_string_lossy())),
-        None => bail!("invalid path: {:?}", path),
-    };
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    // Единый атомарный writer крейта — uuid-tmp + чистый rename (03#26).
+    crate::atomic_io::write_bytes_atomic(path, bytes)
 }
 
 /// Зашифровать байты JSON (или любые plaintext bytes) текущим json_key.

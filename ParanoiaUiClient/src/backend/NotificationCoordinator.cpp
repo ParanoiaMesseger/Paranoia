@@ -1,5 +1,6 @@
 #include "NotificationCoordinator.hpp"
 
+#include "PollModeController.hpp"
 #include "platform/PlatformNotifications.hpp"
 #include "session/Dialog.hpp"
 #include "session/ServerSession.hpp"
@@ -192,12 +193,13 @@ void NotificationCoordinator::onBackgroundMessagesReceived(const QString &profil
     m_locallyReceivedPendingByPeer[key] = m_locallyReceivedPendingByPeer.value(key, 0) + count;
     m_notifiedPendingByPeer[key]        = m_notifiedPendingByPeer.value(key, 0) + count;
     m_lastActivityByPeer[key]           = QDateTime::currentMSecsSinceEpoch();
-    quint64 total                       = 0;
-    for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it)
-        total += it.value();
+    if (isMuted(profileId, peer)) {
+        emit dialogsChanged();
+        return;
+    }
     setNotificationHint(profileId, peer);
     emit dialogsChanged();
-    presentNotification(PollMode::Background, total, profileId, peer);
+    presentNotification(PollMode::Background, notifiableTotal(), profileId, peer);
 }
 
 void NotificationCoordinator::onPollTimer()
@@ -239,18 +241,52 @@ void NotificationCoordinator::onApplicationStateChanged(Qt::ApplicationState sta
         m_locallyReceivedPendingByPeer.clear();
         if (setNotificationHint({}, {}) || hadPending) emit dialogsChanged();
     } else {
-        quint64 total = 0;
-        for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it)
-            total += it.value();
+        const quint64 total = notifiableTotal();
         if (total > 0)
             presentNotification(PollMode::Background, total, m_notificationHintProfileId, m_notificationHintPeer);
     }
     schedulePoll(0);
 }
 
+bool NotificationCoordinator::isMuted(const QString &profileId, const QString &peer) const
+{
+    for (const auto &session : SessionStore::instance()->allSessions()) {
+        if (!session || session->profileId != profileId) continue;
+        const Dialog *dlg = session->findDialog(peer);
+        return dlg && dlg->notificationsMuted;
+    }
+    return false;
+}
+
+quint64 NotificationCoordinator::notifiableTotal() const
+{
+    quint64 total = 0;
+    for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it) {
+        const int sep = it.key().indexOf(QLatin1Char(':'));
+        if (sep >= 0 && isMuted(it.key().left(sep), it.key().mid(sep + 1))) continue;
+        total += it.value();
+    }
+    return total;
+}
+
 bool NotificationCoordinator::applicationIsActive() const
 {
     return m_applicationActive.load(std::memory_order_relaxed);
+}
+
+void NotificationCoordinator::setPollModeController(PollModeController *controller)
+{
+    if (m_pollModeController == controller) return;
+    m_pollModeController = controller;
+    if (!controller) return;
+    // Смена режима применяется немедленно, не дожидаясь следующего poll-тика:
+    // "off" тут же гасит сервис/BGTask/фоновый таймер, выход из "off" — поднимает.
+    connect(controller, &PollModeController::pollModeChanged, this, [this]() { schedulePoll(0); });
+}
+
+QString NotificationCoordinator::backgroundPollMode() const
+{
+    return m_pollModeController ? m_pollModeController->pollMode() : QStringLiteral("normal");
 }
 
 bool NotificationCoordinator::setNotificationHint(const QString &profileId, const QString &peer)
@@ -292,10 +328,10 @@ void NotificationCoordinator::pollNotifications(PollMode mode)
         bool anyFailed                = false;
         const QList<NotifyCount> counts = pollCountsGrouped(targets, anyFailed, error);
         if (!self) return;
-        QMetaObject::invokeMethod(self, [self, counts, anyFailed, error, mode]() {
+        QMetaObject::invokeMethod(self, [self, targets, counts, anyFailed, error, mode]() {
             if (!self) return;
             self->m_notifyPollInFlight = false;
-            self->applyNotifyCounts(mode, counts, anyFailed, error);
+            self->applyNotifyCounts(mode, targets, counts, anyFailed, error);
         });
     });
 }
@@ -382,13 +418,15 @@ QList<NotificationCoordinator::PollTarget> NotificationCoordinator::buildPollTar
             const QString keyringJson = dialog.keyringJson();
             if (!session->serverId.isEmpty() && !dialog.peer.isEmpty() && !dialog.peerServerId.isEmpty() &&
                 !keyringJson.isEmpty())
-                targets.append({session, profileId, dialog.peer, dialog.peerServerId, keyringJson});
+                targets.append({session, profileId, dialog.peer, dialog.peerServerId, keyringJson,
+                                dialog.notificationsMuted});
         }
     }
     return targets;
 }
 
-void NotificationCoordinator::applyNotifyCounts(PollMode mode, const QList<NotifyCount> &counts, bool anyFailed,
+void NotificationCoordinator::applyNotifyCounts(PollMode mode, const QList<PollTarget> &targets,
+                                                const QList<NotifyCount> &counts, bool anyFailed,
                                                 const QString &error)
 {
     bool hasNewPending  = false;
@@ -405,18 +443,17 @@ void NotificationCoordinator::applyNotifyCounts(PollMode mode, const QList<Notif
         const quint64 serverCount   = item.count;
         const quint64 localCount    = m_locallyReceivedPendingByPeer.value(key, 0);
         const quint64 combinedCount = localCount + serverCount;
-        if (combinedCount == 0) {
-            pendingChanged = m_notifiedPendingByPeer.remove(key) > 0 || pendingChanged;
-            continue;
-        }
+        const bool muted            = isMuted(item.profileId, item.peer);
 
-        ++pendingPeers;
-        if (pendingPeers == 1) {
-            hintProfileId = item.profileId;
-            hintPeer      = item.peer;
-        } else {
-            hintProfileId.clear();
-            hintPeer.clear();
+        if (!muted) {
+            ++pendingPeers;
+            if (pendingPeers == 1) {
+                hintProfileId = item.profileId;
+                hintPeer      = item.peer;
+            } else {
+                hintProfileId.clear();
+                hintPeer.clear();
+            }
         }
 
         const quint64 previousCombined = m_notifiedPendingByPeer.value(key, 0);
@@ -427,22 +464,48 @@ void NotificationCoordinator::applyNotifyCounts(PollMode mode, const QList<Notif
             // Новое серверное сообщение для этого пира — бампаем свежесть, чтобы
             // диалог поднялся в списке (in-memory, как и счётчики непрочитанного).
             m_lastActivityByPeer[key] = QDateTime::currentMSecsSinceEpoch();
-            hasNewPending = true;
-            ++newPendingPeers;
-            if (newPendingPeers == 1) {
-                newPendingProfileId = item.profileId;
-                newPendingPeer      = item.peer;
-            } else {
-                newPendingProfileId.clear();
-                newPendingPeer.clear();
+            if (!muted) {
+                hasNewPending = true;
+                ++newPendingPeers;
+                if (newPendingPeers == 1) {
+                    newPendingProfileId = item.profileId;
+                    newPendingPeer      = item.peer;
+                } else {
+                    newPendingProfileId.clear();
+                    newPendingPeer.clear();
+                }
             }
         }
         m_notifiedPendingByPeer[key] = combinedCount;
     }
 
-    quint64 total = 0;
-    for (auto it = m_notifiedPendingByPeer.constBegin(); it != m_notifiedPendingByPeer.constEnd(); ++it)
-        total += it.value();
+    // Сервер присылает записи ТОЛЬКО для пиров с непрочитанным (notify.rs: n>0),
+    // поэтому пир, чей счётчик обнулился на сервере (прочитан с другого
+    // устройства/CLI), просто выпадает из counts — цикл выше его не видит, и без
+    // сверки его запись в m_notifiedPendingByPeer висит вечно (завышенный бейдж/
+    // hint до открытия диалога). Сверяем опрошенный набор с ответом: у
+    // опрошенного-и-отсутствующего пира серверная часть = 0 — оставляем лишь
+    // локальную (m_locallyReceivedPendingByPeer) либо удаляем ключ. Только при
+    // успешном опросе (иначе неполные данные могли бы стереть валидный бейдж).
+    // Активный пир в Foreground не опрашивается → сюда не попадёт.
+    if (!anyFailed) {
+        QSet<QString> inCounts;
+        inCounts.reserve(counts.size());
+        for (const auto &item : counts) inCounts.insert(item.key);
+        for (const auto &t : targets) {
+            const QString key = t.profileId + QLatin1Char(':') + t.peer;
+            if (inCounts.contains(key)) continue;
+            const quint64 localCount = m_locallyReceivedPendingByPeer.value(key, 0);
+            if (localCount == 0) {
+                if (m_notifiedPendingByPeer.remove(key) > 0) pendingChanged = true;
+            } else if (m_notifiedPendingByPeer.value(key, 0) != localCount) {
+                m_notifiedPendingByPeer[key] = localCount;
+                pendingChanged = true;
+            }
+        }
+    }
+
+    const quint64 total = notifiableTotal();
     if (hintPeer.isEmpty() && newPendingPeers == 1) {
         hintProfileId = newPendingProfileId;
         hintPeer      = newPendingPeer;
@@ -496,16 +559,39 @@ void NotificationCoordinator::schedulePoll(int delayMs)
         return;
     }
 
+    const QString bgMode = backgroundPollMode();
 #if defined(Q_OS_ANDROID)
-    PlatformNotifications::startBackgroundPollingService();
-#else
-    if (applicationIsActive())
+    // В "off" сервис не стартуем (и гасим, если жив): schedulePoll зовётся
+    // часто (poll-тики, сеть, смена состояния) и без этой проверки воскрешал
+    // бы его вопреки настройке. Опрос при открытом приложении (m_pollTimer)
+    // при этом живёт — «Выкл» отключает только фоновую доставку.
+    if (bgMode == QLatin1String("off"))
         PlatformNotifications::stopBackgroundPollingService();
     else
         PlatformNotifications::startBackgroundPollingService();
+#else
+    if (applicationIsActive()) {
+        PlatformNotifications::stopBackgroundPollingService();
+    } else if (bgMode == QLatin1String("off")) {
+        // "off" в фоне: BGTask (iOS) отменяем, таймер трея (desktop) не взводим —
+        // уведомления только при открытом приложении. Реарм при возврате в
+        // Active: onApplicationStateChanged → schedulePoll(0).
+        PlatformNotifications::stopBackgroundPollingService();
+        m_pollTimer.stop();
+        return;
+    } else {
+        PlatformNotifications::startBackgroundPollingService();
+    }
 #endif
 
     if (delayMs < 0) delayMs = randomNotifyDelayMs();
+#if !defined(Q_OS_ANDROID)
+    // Desktop-трей: экономный режим = редкий фоновый таймер, 5 мин ±30% jitter
+    // (210–390 с, как у Android-сервиса). В foreground интервал обычный.
+    // На iOS процесс в фоне заморожен и таймер не тикает — ветка безвредна.
+    if (!applicationIsActive() && bgMode == QLatin1String("battery_saving"))
+        delayMs = 210'000 + int(QRandomGenerator::global()->bounded(180'000));
+#endif
     m_pollTimer.start(delayMs);
 }
 
@@ -519,7 +605,8 @@ void NotificationCoordinator::rebuildBackgroundPollSnapshot()
             if (session->serverId.isEmpty() || dialog.peer.isEmpty() || dialog.peerServerId.isEmpty() ||
                 keyringJson.isEmpty())
                 continue;
-            next.push_back({session, session->profileId, dialog.peer, dialog.peerServerId, keyringJson});
+            next.push_back({session, session->profileId, dialog.peer, dialog.peerServerId, keyringJson,
+                            dialog.notificationsMuted});
         }
     }
     QMutexLocker lock(&m_bgPollSnapshotMutex);
@@ -622,8 +709,12 @@ void NotificationCoordinator::runBackgroundPollFromService()
     bool anyFailed                  = false;
     const QList<NotifyCount> counts = pollCountsGrouped(QList<PollTarget>(targets.begin(), targets.end()),
                                                         anyFailed, firstError);
+    // mute-фильтр по снимку targets (мы на воркере — в сессию не лазаем).
+    QSet<QString> mutedKeys;
+    for (const auto &t : targets)
+        if (t.muted) mutedKeys.insert(t.profileId + QLatin1Char(':') + t.peer);
     for (const auto &c : counts) {
-        if (c.count == 0) continue;
+        if (c.count == 0 || mutedKeys.contains(c.key)) continue;
         total += c.count;
         ++pendingPeers;
         if (pendingPeers == 1) {

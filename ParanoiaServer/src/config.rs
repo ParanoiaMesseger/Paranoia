@@ -124,6 +124,25 @@ impl Config {
         Ok(())
     }
 
+    /// Сериализовать конфиг в pretty-JSON. Делать под удерживаемым config-локом,
+    /// а саму запись на диск — уже без него, через `write_file`: синхронный
+    /// `save` держит `RwLock` во время блокирующего диск-I/O, и все хендлеры,
+    /// начинающие с `config.read().await`, встают в очередь (01-freezes п.2).
+    pub fn to_pretty_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Асинхронно записать заранее сериализованный (`to_pretty_json`) конфиг,
+    /// создав родительский каталог. Вызывать уже БЕЗ удерживаемого config-лока —
+    /// тогда блокирующего диск-I/O на tokio-воркере под локом нет.
+    pub async fn write_file(path: &str, data: String) -> anyhow::Result<()> {
+        if let Some(parent) = Path::new(path).parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, data).await?;
+        Ok(())
+    }
+
     /// Decoded admin pubkey bytes (32 bytes).
     pub fn admin_pubkey_bytes(&self) -> anyhow::Result<[u8; 32]> {
         let v = B64.decode(&self.admin_key)?;

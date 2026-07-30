@@ -104,7 +104,6 @@ namespace paranoia::media
         AVCodecContext *dec = nullptr;
         SwsContext *sws     = nullptr;
         AVFrame *frame      = av_frame_alloc();
-        AVFrame *rgb        = av_frame_alloc();
         AVPacket *pkt       = av_packet_alloc();
 
         do {
@@ -156,7 +155,6 @@ namespace paranoia::media
         if (sws)
             sws_freeContext(sws);
         av_frame_free(&frame);
-        av_frame_free(&rgb);
         av_packet_free(&pkt);
         if (dec)
             avcodec_free_context(&dec);
