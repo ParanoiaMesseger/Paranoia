@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import ParanoiaUiClient
-import QtQuick.VectorImage
 
 Rectangle {
     id: root
@@ -17,22 +16,22 @@ Rectangle {
         anchors.margins: 20
         spacing: 0
 
-        VectorImage {
+        Item {
             id: logoLockup
             Layout.alignment: Qt.AlignHCenter
             Layout.fillWidth: true
             Layout.preferredHeight: 104
 
-            source: "qrc:/logo_lockup_animated.svg"
-            fillMode: VectorImage.PreserveAspectFit
-            preferredRendererType: VectorImage.CurveRenderer
-
-            animations.loops: Animation.Infinite
-            assumeTrustedSource: true
-
             scale: lockupArea.containsPress ? 0.94 : 1.0
             Behavior on scale {
                 NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+            }
+
+            // Вписывание с сохранением пропорций (как PreserveAspectFit).
+            LogoLockupGlitch {
+                anchors.centerIn: parent
+                width: Math.min(parent.width, parent.height * implicitWidth / implicitHeight)
+                height: width * implicitHeight / implicitWidth
             }
 
             MouseArea {

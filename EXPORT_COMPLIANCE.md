@@ -63,7 +63,7 @@ Description:     End-to-end encryption (custom protocol) for messaging/calls.
                  free of charge, at the URL above.
 
 Submitter:      <name or project entity>
-Contact e-mail: <role-based contact, e.g. security@paranoia.app>
+Contact e-mail: support@paranoia.run
 ```
 
 > Note: only the *source code* is rendered "not subject to the EAR" by this
@@ -92,6 +92,10 @@ Contact e-mail: <role-based contact, e.g. security@paranoia.app>
 
 - [x] `ITSAppUsesNonExemptEncryption = true` (honest declaration)
 - [x] Source published under MIT (`LICENSE`)
-- [ ] One-time §740.13(e) e-mail to BIS + ENC (when repo is public) — keep proof
+- [ ] One-time §740.13(e) e-mail to BIS + ENC — **deferred (2026-08-24)** until the
+      first App Store submission: the project is not a U.S. person and publishes
+      only on public code hosting, where no export declaration is requested. The
+      notification is a prerequisite for the App Store answers in § 5 and is to be
+      sent before that submission, not after.
 - [ ] App Store Connect export-compliance wizard answered to match this document
 - [ ] (Optional, for binary certainty) CCATS / annual self-classification report

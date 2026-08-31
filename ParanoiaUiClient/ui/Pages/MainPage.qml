@@ -4,7 +4,6 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Window
 import ParanoiaUiClient
-import QtQuick.VectorImage
 
 Rectangle {
     id: root
@@ -176,6 +175,41 @@ Rectangle {
         anchors.fill: parent
         spacing:      0
 
+        // ── Хранилище только для чтения (vault-файл не расшифровался) ─────
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Backend.vaultReadOnly ? 56 : 0
+            visible: Backend.vaultReadOnly
+            color: Theme.accentDim
+
+            Column {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                anchors.topMargin: 8
+                spacing: 2
+                Text {
+                    width: parent.width
+                    text: qsTr("Хранилище доступно только для чтения")
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                }
+                Text {
+                    width: parent.width
+                    text: qsTr("Данные профиля не расшифровались (повреждение или несовместимое обновление) — изменения не сохраняются")
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontXs
+                    font.family: Theme.fontFamily
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
         // ── Share-target banner ───────────────────────────
         Rectangle {
             id: shareBanner
@@ -311,17 +345,12 @@ Rectangle {
 
             // Анимированное лого — слева вплотную к слову (декоративное),
             // надпись при этом остаётся центрированной.
-            VectorImage {
+            LogoSymbolGlitch {
                 id: logoSymbol
                 anchors.right:          wordmark.left
                 anchors.rightMargin:    8
                 anchors.verticalCenter: parent.verticalCenter
                 width: 28; height: 28
-                source: "qrc:/logo_symbol_animated.svg"
-                fillMode: VectorImage.PreserveAspectFit
-                preferredRendererType: VectorImage.CurveRenderer
-                animations.loops: Animation.Infinite
-                assumeTrustedSource: true
             }
 
             Rectangle {
@@ -1265,6 +1294,35 @@ Rectangle {
                 }
             }
 
+            // ── Обрезать историю (keep-last-N) ─────────────────────────────
+            Rectangle {
+                width: contextMenuColumn.width
+                height: 34
+                radius: Theme.radiusMd
+                color: trimArea.containsMouse ? Theme.bgButton : "transparent"
+                Text {
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 10; anchors.rightMargin: 10
+                    text: qsTr("Обрезать историю…")
+                    color: trimArea.containsMouse ? Theme.textOnButton : Theme.textPrimary
+                    font.pixelSize: Theme.fontSm
+                    font.family: Theme.fontFamily
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: trimArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                        trimHistoryPopup.peer = dlgContextMenu.selectedPeer
+                        trimHistoryPopup.dialogName = dlgContextMenu.selectedDisplayName
+                        dlgContextMenu.close()
+                        trimHistoryPopup.open()
+                    }
+                }
+            }
+
             // ── Separator ──────────────────────────────────────────────────
             Rectangle {
                 width: contextMenuColumn.width
@@ -1934,6 +1992,79 @@ Rectangle {
                     secondary: true
                     onClicked: renamePopup.close()
                 }
+            }
+        }
+    }
+
+    // ── Попап: обрезать историю диалога (оставить последние N) ─
+    Popup {
+        id: trimHistoryPopup
+        parent: Overlay.overlay
+        anchors.centerIn: Overlay.overlay
+        width: 320; padding: 24
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+        property string peer: ""
+        property string dialogName: ""
+
+        background: Rectangle {
+            radius: Theme.radiusLg
+            color:  Theme.bgSecondary
+            border.color: Theme.border
+        }
+
+        function trim(keep) {
+            Chat.trimHistoryKeepLast(trimHistoryPopup.peer, keep)
+            trimHistoryPopup.close()
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            Text {
+                Layout.alignment: Qt.AlignHCenter
+                text:  qsTr("Обрезать историю")
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLg
+                font.family:    Theme.fontFamily
+                font.weight:    Font.Medium
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: qsTr("«%1»: оставить только последние сообщения. Остальное удаляется локально, с сервера и у собеседника при синхронизации — без возврата.").arg(trimHistoryPopup.dialogName)
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontXs
+                font.family:    Theme.fontFamily
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "200"
+                    onClicked: trimHistoryPopup.trim(200)
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "500"
+                    onClicked: trimHistoryPopup.trim(500)
+                }
+                ParaButton {
+                    Layout.fillWidth: true
+                    text: "1000"
+                    onClicked: trimHistoryPopup.trim(1000)
+                }
+            }
+
+            ParaButton {
+                Layout.fillWidth: true
+                text: qsTr("Отмена")
+                secondary: true
+                onClicked: trimHistoryPopup.close()
             }
         }
     }

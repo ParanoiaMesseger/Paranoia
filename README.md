@@ -21,9 +21,9 @@
 
 Paranoia is a secure messenger designed for a world where you trust no one in the middle — not the network, not the server, not even the certificate authority. Messages are end-to-end encrypted on the client; the server is a *zero-trust* relay that never sees plaintext, and even a fully compromised server cannot forge, replay, or silently rewrite history.
 
-On top of confidentiality, Paranoia focuses on **stealth**: service, administrative and call traffic are wrapped in a masquerade ("cover") layer so that to an outside observer — including DPI/ML traffic analysis — the connection looks like ordinary HTTPS to a regular website.
+On top of confidentiality, Paranoia focuses on **stealth**: service, administrative and call traffic are wrapped in a masquerade ("cover") layer so that to an outside observer the connection looks like ordinary HTTPS to a regular website. The goal is to raise the cost of detection, not to be provably indistinguishable.
 
-> Full threat model and design rationale: **[docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)**.
+> Full threat model, design rationale and the limitations that remain: **[docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)**.
 
 ## Key features
 
@@ -83,7 +83,7 @@ Deeper guides and architecture diagrams live in [`docs/`](docs) (Android build, 
 - [Local storage encryption](LocalStorageEncryptionPolicy.md)
 - [Message delivery status](MessageDeliveryStatusPolicy.md) · [Notifications](NotificationsPolicy.md) · [Multi-device](MultiDevicePolicy.md)
 - [Username privacy](UsernamePrivacyPolicy.md) · [Reserve server URLs](ReserveServerUrlPolicy.md) · [VoIP](VoipPolicy.md)
-- [Export compliance](EXPORT_COMPLIANCE.md)
+- [Export compliance](EXPORT_COMPLIANCE.md) · [Disclaimer](DISCLAIMER.md) · [Security policy](SECURITY.md)
 
 ## License
 

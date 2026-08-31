@@ -460,6 +460,9 @@ void MainBackend::onVaultUnlocked()
     loadDeviceKey();
     loadClientConfig();
     setHasStoredClientProfiles(hasStoredClientProfileOnDisk());
+    // Vault-файл не расшифровался (несовместимый формат / повреждение) — writeFile
+    // уже отказывает молча; поднимаем явную индикацию «только чтение» в UI.
+    if (Utils::vaultIoFailureDetected()) emit vaultReadOnlyChanged();
     emit vaultUnlocked();
     // Снапшот для notifications-сервиса: сессии уже подняты loadClientConfig().
     publishServiceSnapshot();
@@ -1564,6 +1567,11 @@ void MainBackend::setConnectionOnline(bool online)
     if (m_connectionState == next) return;
     m_connectionState = next;
     emit connectionStateChanged();
+}
+
+bool MainBackend::vaultReadOnly() const
+{
+    return Utils::vaultIoFailureDetected();
 }
 
 QVariantMap MainBackend::activeMaskingConfig() const

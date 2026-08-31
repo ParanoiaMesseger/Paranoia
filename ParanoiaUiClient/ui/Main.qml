@@ -20,6 +20,17 @@ ApplicationWindow {
     property var sharePendingFiles: []
     readonly property bool hasShareTarget: sharePendingText.length > 0 || (sharePendingFiles && sharePendingFiles.length > 0)
     readonly property bool startOnMainPage: Backend.hasStoredClientProfiles || Backend.loggedIn || Backend.hasAdminAccess
+    // Сессию/профиль бекенд может поднять ПОЗЖЕ одноразового выбора экрана в
+    // onVaultStatusChanged — тогда пользователь с живыми данными застревает на
+    // HelloPage «профилей нет». Поздний флип переигрывает застрявший Hello.
+    onStartOnMainPageChanged: {
+        if (!startOnMainPage) return
+        Qt.callLater(function() {
+            if (Backend.vaultStatus === 2 && stackView.currentItem
+                    && stackView.currentItem.objectName === "HelloPage")
+                stackView.replace(null, mainPage)
+        })
+    }
     readonly property bool virtualKeyboardEnabled: VirtualKeyboardAvailable && (Qt.platform.os === "android" || Qt.platform.os === "ios")
     // Авто-проверка обновлений при входе (раз за сессию) + плашка-уведомление.
     property bool _updateCheckStarted: false

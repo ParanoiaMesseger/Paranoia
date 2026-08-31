@@ -94,7 +94,10 @@ public:
     /// Синхронно перерисовать модель из ТЕКУЩЕГО кэша (без FFI-раунда). Нужно
     /// для мгновенного показа оптимистичной мозаики при старте отправки.
     Q_INVOKABLE void emitCachedMessages();
-    Q_INVOKABLE void deleteMessagesUntil(quint64 cutSeq);
+    /// Обрезать историю диалога: оставить последние `keep` сообщений, всё старее
+    /// удалить локально и на сервере (у собеседника пропадёт при синхронизации).
+    Q_INVOKABLE void trimHistoryKeepLast(const QString &peer, int keep);
+    void deleteMessagesUntil(const QString &peer, quint64 cutSeq);
     /// Удалить выделенные сообщения сразу на сервере и в локальной БД.
     /// `messageIds` — id'шники сообщений из модели чата. Для прикреплённых
     /// файлов автоматически включает диапазон чанков `[body_from_seq, body_to_seq]`.
