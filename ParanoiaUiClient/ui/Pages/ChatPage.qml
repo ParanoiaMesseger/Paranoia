@@ -1207,7 +1207,7 @@ Rectangle {
              + String(m.text || "") + "" + String(m.reactions_json || "") + ""
              + String(m.edited || "") + "" + String(m.preview_source || "") + ""
              + String(m.photos_json || "") + "" + String(m.kind || "")
-             + "" + String(m.daySep || "")
+             + "" + String(m.daySep || "") + "" + String(m.downloaded || "")
     }
 
     // Инкрементальная сверка модели с окном (newest-first) — минимум операций
@@ -3170,7 +3170,12 @@ Rectangle {
                         radius: 14
                         readonly property bool active: root.topicFilter === modelData.f
                         readonly property bool named: modelData.f !== root._topicAll && modelData.f !== root._topicMain
+                        // Длинное имя темы усекается в чипе; полное — тултипом при зажатии.
+                        readonly property bool truncated: modelData.label.length > 30
                         width: chipLabel.implicitWidth + 24
+                        ToolTip.visible: chipArea.pressed && truncated
+                        ToolTip.delay: 300
+                        ToolTip.text: modelData.label
                         color: active ? Theme.accent : Theme.bgCard
                         border.color: active ? Theme.accent : Theme.border
                         border.width: 1
@@ -3181,7 +3186,8 @@ Rectangle {
                         Text {
                             id: chipLabel
                             anchors.centerIn: parent
-                            text: chip.modelData.label
+                            text: chip.truncated ? chip.modelData.label.substring(0, 30) + "…"
+                                                 : chip.modelData.label
                             color: chip.active ? "#FFFFFF" : Theme.textPrimary
                             font.pixelSize: 13
                             font.bold: chip.active
@@ -3201,6 +3207,7 @@ Rectangle {
                             anchors.rightMargin: -1
                         }
                         MouseArea {
+                            id: chipArea
                             anchors.fill: parent
                             onClicked: root.selectTopic(chip.modelData.f)
                             onPressAndHold: {

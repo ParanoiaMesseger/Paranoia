@@ -31,6 +31,9 @@ class MainBackend : public QObject
     // Состояние связи с сервером для индикатора «Подключение»: "online" |
     // "connecting" (поллинг не достучался — нет сети/сервер недоступен).
     Q_PROPERTY(QString connectionState READ connectionState NOTIFY connectionStateChanged)
+    /// Хранилище в режиме «только чтение» (vault-файл не расшифровался —
+    /// повреждение или несовместимый формат): изменения не сохраняются.
+    Q_PROPERTY(bool vaultReadOnly READ vaultReadOnly NOTIFY vaultReadOnlyChanged)
 
 public:
     explicit MainBackend(NotificationCoordinator &notifications, QObject *parent = nullptr);
@@ -47,6 +50,7 @@ public:
     QString maskingState() const { return m_maskingState; }
     QString maskingProfileName() const { return m_maskingProfileName; }
     QString connectionState() const { return m_connectionState; }
+    bool vaultReadOnly() const;
     /// Обновить состояние связи (зовётся из NotificationCoordinator по результату
     /// форграунд-поллинга). online → "online", иначе "connecting".
     void setConnectionOnline(bool online);
@@ -334,6 +338,7 @@ signals:
     void corporateDialogueAdded(bool ok, const QString &partnerServerId, const QString &message);
     void maskingStateChanged();
     void connectionStateChanged();
+    void vaultReadOnlyChanged();
     /// Результат применения/сверки маскировки. ok, сообщение для UI.
     void maskingApplied(bool ok, const QString &message);
     /// Результат асинхронного applyMaskingFromFile (01#6): needsUnsignedConfirm —

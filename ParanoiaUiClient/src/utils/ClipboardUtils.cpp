@@ -8,6 +8,10 @@
 #include <QMimeData>
 #include <QStandardPaths>
 
+#if defined(PARANOIA_IOS)
+#include "../platform/IosClipboard.hpp"
+#endif
+
 bool ClipboardUtils::hasImage() const
 {
     const QClipboard *cb = QGuiApplication::clipboard();
@@ -35,6 +39,10 @@ QString ClipboardUtils::saveImageToTemp() const
 
 QString ClipboardUtils::text() const
 {
+#if defined(PARANOIA_IOS)
+    return paranoiaIosClipboardText();
+#else
     const QClipboard *cb = QGuiApplication::clipboard();
     return cb ? cb->text() : QString();
+#endif
 }

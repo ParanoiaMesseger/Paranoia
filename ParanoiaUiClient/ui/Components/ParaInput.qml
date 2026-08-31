@@ -305,9 +305,7 @@ Column {
                         if (parent.animating) return
 
                         // Вставка из буфера обмена
-                        copyHelper.text = ""
-                        copyHelper.paste()
-                        const pasted = copyHelper.text
+                        const pasted = ClipboardUtils.text()
                         if (root.lineCount > 1) multiField.text = pasted
                         else field.text = pasted
 
@@ -317,11 +315,6 @@ Column {
                     }
                 }
             }
-        }
-
-        TextEdit {
-            id: copyHelper
-            visible: false
         }
     }
 

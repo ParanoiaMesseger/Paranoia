@@ -1842,15 +1842,62 @@ void ChatBackend::cacheVideoForPlayback(const QString &messageId)
         });
 }
 
-void ChatBackend::deleteMessagesUntil(quint64 cutSeq)
+void ChatBackend::trimHistoryKeepLast(const QString &peer, int keep)
 {
-    if (m_activePeer.isEmpty() || cutSeq == 0) return;
+    if (peer.isEmpty() || keep <= 0) return;
     auto session = SessionStore::instance()->activeSession();
     if (!session) return;
-    const auto *dlg = session->findDialog(m_activePeer);
+    const auto *dlg = session->findDialog(peer);
     if (!dlg) return;
 
-    const QString peer         = m_activePeer;
+    const QString serverId     = session->serverId;
+    const QString peerServerId = dlg->peerServerId;
+    const QString keyringJson  = dlg->keyringJson();
+    QPointer self(this);
+    QThreadPool::globalInstance()->start([self, session, peer, serverId, peerServerId, keyringJson, keep]() {
+        if (!self) return;
+        // хэндл под мгновенным локом → чтение истории без ffiMutex (01#32)
+        std::shared_ptr<ParanoiaFFI> ffi;
+        {
+            QMutexLocker locker(&session->ffiMutex);
+            ffi = session->ffi;
+        }
+        if (!ffi) return;
+        const QString peerId = peerServerId.isEmpty() ? peer : peerServerId;
+        const QString json   = ffi->history_keyring(serverId, peerId, keyringJson, 10000);
+        // cutSeq = seq (keep+1)-го с конца; delete_local_until удалит всё <= cutSeq,
+        // включая хвост старее лимита чтения.
+        QList<quint64> seqs;
+        const auto doc = QJsonDocument::fromJson(json.toUtf8());
+        for (const auto &val : doc.array()) {
+            const QVariantMap msg = val.toObject().toVariantMap();
+            // Считаем только видимые пузыри (фильтр как в parseMessages), иначе
+            // служебные записи (приёмки чтения и пр.) сдвигают границу N.
+            const QString kind = msg.value(QStringLiteral("kind")).toString();
+            if (kind == QLatin1String("read_receipt") || kind == QLatin1String("delete")
+                || kind == QLatin1String("file_header") || kind == QLatin1String("file_chunk")
+                || kind == QLatin1String("reaction"))
+                continue;
+            const quint64 seq = msg.value(QStringLiteral("seq")).toULongLong();
+            if (seq > 0) seqs.append(seq);
+        }
+        std::sort(seqs.begin(), seqs.end(), std::greater<quint64>());
+        if (seqs.size() <= keep) return; // истории меньше лимита — обрезать нечего
+        const quint64 cutSeq = seqs.at(keep);
+        QMetaObject::invokeMethod(self, [self, peer, cutSeq]() {
+            if (self) self->deleteMessagesUntil(peer, cutSeq);
+        });
+    });
+}
+
+void ChatBackend::deleteMessagesUntil(const QString &peer, quint64 cutSeq)
+{
+    if (peer.isEmpty() || cutSeq == 0) return;
+    auto session = SessionStore::instance()->activeSession();
+    if (!session) return;
+    const auto *dlg = session->findDialog(peer);
+    if (!dlg) return;
+
     const QString serverId     = session->serverId;
     const QString peerServerId = dlg->peerServerId;
     const QString keyringJson  = dlg->keyringJson();

@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.VectorImage
 import QtCore
 import ParanoiaUiClient
 
@@ -81,17 +80,19 @@ Rectangle {
 
                 Item { Layout.preferredHeight: 20 }
 
-                VectorImage {
+                Item {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.leftMargin: 20
                     Layout.rightMargin: 20
                     Layout.preferredWidth: 220
                     Layout.preferredHeight: 64
-                    source: "qrc:/logo_lockup_animated.svg"
-                    fillMode: VectorImage.PreserveAspectFit
-                    preferredRendererType: VectorImage.CurveRenderer
-                    animations.loops: Animation.Infinite
-                    assumeTrustedSource: true
+
+                    // Вписывание с сохранением пропорций (как PreserveAspectFit).
+                    LogoLockupGlitch {
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width, parent.height * implicitWidth / implicitHeight)
+                        height: width * implicitHeight / implicitWidth
+                    }
                 }
 
                 Text {
