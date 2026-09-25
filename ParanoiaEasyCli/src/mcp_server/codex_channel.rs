@@ -570,3 +570,6 @@ async fn channel_loop(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
