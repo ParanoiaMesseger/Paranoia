@@ -817,6 +817,11 @@ impl Dialogue {
         self.store.max_server_seq(&self.key)
     }
 
+    pub async fn server_seq_exists(&self, seq: u64) -> Result<bool> {
+        let map = self.fetch_map(seq.saturating_sub(1), seq).await?;
+        Ok(seq_in_runs(&map.runs, seq))
+    }
+
     /// `PRAGMA data_version` стора — дёшево детектит записи из другого процесса.
     pub fn data_version(&self) -> Result<i64> {
         self.store.data_version()

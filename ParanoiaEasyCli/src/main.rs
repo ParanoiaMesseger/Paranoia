@@ -1355,6 +1355,7 @@ async fn cmd_mcp(
     username: Option<String>,
     peer: Option<String>,
     log: Option<PathBuf>,
+    codex: Option<mcp_server::codex_channel::Options>,
 ) -> Result<()> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let username = username
@@ -1391,7 +1392,10 @@ async fn cmd_mcp(
         channel,
         channel_topic,
     };
-    mcp_server::serve(cfg).await
+    match codex {
+        Some(options) => mcp_server::codex_channel::run(cfg, options).await,
+        None => mcp_server::serve(cfg).await,
+    }
 }
 
 #[derive(Parser)]
@@ -1637,6 +1641,8 @@ enum InstallSource {
 
 #[derive(Subcommand)]
 enum McpCmd {
+    /// Автодоставка одной темы в существующую сессию Codex.
+    CodexChannel(mcp_server::codex_channel::Options),
     /// Мастер установки: провижининг профиля + регистрация в MCP-хостах.
     /// Интерактивен для человека; с флагами/`--non-interactive` — для агента.
     Install {
@@ -1881,6 +1887,18 @@ async fn main() -> Result<()> {
             log,
             cmd,
         } => match cmd {
+            Some(McpCmd::CodexChannel(options)) => {
+                cmd_mcp(
+                    &cli.server_url,
+                    &cli.reserve_server_urls,
+                    &cli.db_path,
+                    username,
+                    peer,
+                    log,
+                    Some(options),
+                )
+                .await?;
+            }
             Some(McpCmd::Install {
                 workdir,
                 pin,
@@ -1921,6 +1939,7 @@ async fn main() -> Result<()> {
                     username,
                     peer,
                     log,
+                    None,
                 )
                 .await?;
             }

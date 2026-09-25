@@ -24,6 +24,8 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use paranoia_lib::{Message, MessageContent};
 
+pub mod codex_channel;
+
 const SERVER_NAME: &str = "paranoia-cli";
 const SERVER_VERSION: &str = "0.5.1";
 const DEFAULT_PROTOCOL: &str = "2025-06-18";
