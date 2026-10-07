@@ -20,7 +20,7 @@ use crate::{
     },
     types::{
         AttachmentKind, CHUNK_SIZE_MAX, CHUNK_SIZE_MIN, ClientConfig, DialogueConfig, DialogueKey,
-        FileAttachment, Message, MessageContent, MessageStatus,
+        FileAttachment, Message, MessageContent, MessageStatus, RedactedString,
     },
 };
 
@@ -309,9 +309,10 @@ impl Dialogue {
         })
     }
 
-    /// Отправить большой файл ЭФЕМЕРНО: тело по чанкам уходит в blob-хранилище
-    /// сервера (TTL), затем в историю пушится reference-сообщение (Image/File с
-    /// `ephemeral_file_id`), по которому получатель скачивает файл. `>large_file_max`
+    /// Отправить большой файл ЭФЕМЕРНО: тело по чанкам, зашифрованное случайным
+    /// файловым ключом, уходит в blob-хранилище сервера (TTL), затем в историю
+    /// пушится reference-сообщение (Image/File с `ephemeral_file_id` и ключом), по
+    /// которому получатель скачивает и расшифровывает файл. `>large_file_max`
     /// отклоняется.
     pub async fn send_large_file_path_with_progress<F>(
         &self,
@@ -342,6 +343,8 @@ impl Dialogue {
 
         let file_id = Uuid::new_v4().to_string();
         let total_chunks = total_size.div_ceil(BLOB_CHUNK_SIZE as u64).max(1) as u32;
+        let mut file_key = [0u8; 32];
+        rand::rngs::OsRng.fill(&mut file_key);
 
         let mut reader =
             BufReader::new(File::open(path).map_err(|_| anyhow::anyhow!("file_read_error"))?);
@@ -353,7 +356,12 @@ impl Dialogue {
             reader
                 .read_exact(&mut buf)
                 .map_err(|_| anyhow::anyhow!("file_read_error"))?;
-            let payload = crypto::encode_b64(&buf);
+            let sealed = crypto::encrypt_aad(
+                &file_key,
+                &blob_chunk_aad(&file_id, index, total_chunks),
+                &buf,
+            )?;
+            let payload = crypto::encode_b64(&sealed);
             let nonce = Uuid::new_v4().to_string();
             let canon = format!(
                 "blob.put|{user}|{partner}|{file_id}|{index}|{total_chunks}|{total_size}|{nonce}|{payload}"
@@ -400,18 +408,33 @@ impl Dialogue {
             group_id: None,
             ephemeral_file_id: Some(file_id),
             ephemeral_expires_at: Some(expires_at),
+            ephemeral_file_key: Some(RedactedString(crypto::encode_b64(&file_key))),
         };
         let msg = self.send(attachment_content(kind, attachment)).await?;
         Ok(vec![msg])
     }
 
-    /// Скачать эфемерный файл по `file_id` (loop blob `get`) и собрать байты.
-    /// Возвращает ошибку `ephemeral_expired`, если TTL на сервере истёк.
-    pub async fn download_ephemeral_file(&self, file_id: &str, chunk_count: u32) -> Result<Vec<u8>> {
+    /// Скачать эфемерный файл (loop blob `get`), расшифровать чанки ключом из
+    /// reference-сообщения и собрать байты. Возвращает ошибку `ephemeral_expired`,
+    /// если TTL на сервере истёк.
+    pub async fn download_ephemeral_file(&self, file: &FileAttachment) -> Result<Vec<u8>> {
+        let file_id = file
+            .ephemeral_file_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("ephemeral_file_id_missing"))?;
+        let file_key: [u8; 32] = crypto::decode_b64(
+            &file
+                .ephemeral_file_key
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("ephemeral_file_key_missing"))?
+                .0,
+        )?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("ephemeral_file_key_invalid"))?;
         let user = self.client_cfg.username.clone();
         let partner = self.partner().to_string();
         let mut out = Vec::new();
-        for index in 0..chunk_count {
+        for index in 0..file.chunk_count {
             let nonce = Uuid::new_v4().to_string();
             let canon = format!("blob.get|{user}|{partner}|{file_id}|{index}|{nonce}");
             let sig =
@@ -439,7 +462,12 @@ impl Dialogue {
                 .get("payload")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("blob_get_no_payload"))?;
-            out.extend_from_slice(&crypto::decode_b64(payload)?);
+            let sealed = crypto::decode_b64(payload)?;
+            out.extend_from_slice(&crypto::decrypt_aad(
+                &file_key,
+                &blob_chunk_aad(file_id, index, file.chunk_count),
+                &sealed,
+            )?);
         }
         Ok(out)
     }
@@ -971,10 +999,8 @@ impl Dialogue {
         //      blob-хранилище по file_id. Без этой ветки превью/инлайн-проигрывание
         //      эфемерного видео/голосового падало бы (transfer_id=None → ниже
         //      attachment_not_downloaded). Качаем blob, кэшируем зашифрованно.
-        if let Some(file_id) = file.ephemeral_file_id.clone() {
-            let plaintext = self
-                .download_ephemeral_file(&file_id, file.chunk_count)
-                .await?;
+        if file.ephemeral_file_id.is_some() {
+            let plaintext = self.download_ephemeral_file(file).await?;
             let sealed =
                 crate::local_vault::encrypt_attachment(message_id.as_bytes(), &plaintext)?;
             ensure_parent_dir(&enc_path)?;
@@ -1238,6 +1264,7 @@ impl Dialogue {
                     group_id,
                     ephemeral_file_id: None,
                     ephemeral_expires_at: None,
+                    ephemeral_file_key: None,
                 },
             ),
             timestamp: now,
@@ -1317,6 +1344,7 @@ impl Dialogue {
                     group_id: group_id.clone(),
                     ephemeral_file_id: None,
                     ephemeral_expires_at: None,
+                    ephemeral_file_key: None,
                 },
             ),
             timestamp: now,
@@ -1580,10 +1608,8 @@ impl Dialogue {
 
         // Эфемерный большой файл: тело не в истории, а в blob-хранилище сервера
         // (по file_id, с TTL). Скачиваем loop blob `get`, собираем, пишем в target.
-        if let Some(file_id) = file.ephemeral_file_id.clone() {
-            let bytes = self
-                .download_ephemeral_file(&file_id, file.chunk_count)
-                .await?;
+        if file.ephemeral_file_id.is_some() {
+            let bytes = self.download_ephemeral_file(&file).await?;
             ensure_parent_dir(path)?;
             write_bytes_atomic(path, &bytes)?;
             if let Some(cache_path) = cache_path {
@@ -1832,6 +1858,7 @@ impl Dialogue {
                             group_id: group_id.clone(),
                             ephemeral_file_id: None,
                             ephemeral_expires_at: None,
+                            ephemeral_file_key: None,
                         },
                     ),
                     timestamp: ts,
@@ -1903,6 +1930,7 @@ impl Dialogue {
                             group_id: None,
                             ephemeral_file_id: None,
                             ephemeral_expires_at: None,
+                            ephemeral_file_key: None,
                         }),
                         timestamp: assembled.timestamp,
                         status: MessageStatus::Delivered,
@@ -1959,6 +1987,12 @@ fn random_chunks(data: &[u8]) -> Vec<&[u8]> {
         offset += size;
     }
     chunks
+}
+
+/// AAD чанка эфемерного файла: сервер не может переставить чанки или подсунуть
+/// чанк другого файла.
+fn blob_chunk_aad(file_id: &str, index: u32, total_chunks: u32) -> Vec<u8> {
+    format!("{file_id}|{index}|{total_chunks}").into_bytes()
 }
 
 fn random_chunk_sizes(total_size: usize) -> Vec<usize> {
@@ -2096,6 +2130,7 @@ mod tests {
             group_id: None,
             ephemeral_file_id: None,
             ephemeral_expires_at: None,
+            ephemeral_file_key: None,
         });
 
         strip_remote_local_attachment_state(&mut content);

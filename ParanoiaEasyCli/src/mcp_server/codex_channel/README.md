@@ -75,6 +75,25 @@ python3 ParanoiaEasyCli/codex-channel.py \
 автодоставку. Сессия Codex и ручные MCP-инструменты остаются доступны. После
 возобновления запускают ту же команду; курсоры не удаляют и бинарь живого MCP не заменяют.
 
+Для новой сессии unit можно подготовить отдельно от его запуска:
+
+```bash
+python3 ParanoiaEasyCli/codex-channel-unit.py \
+  --binary /absolute/path/to/paranoia-easy-cli \
+  --thread EXISTING_THREAD_ID \
+  --topic 'Имя темы' \
+  --after-message ALREADY_HANDLED_MESSAGE_ID \
+  --output-dir /absolute/path/to/prepared-units
+```
+
+Из инструмента текущего агента `--thread` можно опустить: используется
+`CODEX_THREAD_ID`. В обычном терминале ID задают явно. Генератор не читает секреты,
+не запускает сервис и не перезаписывает существующий unit. Команды включения и
+отключения печатаются в ответе. Сессии выделяют собственную тему; начальной
+отметкой служит уже обработанное сообщение, а не произвольное новое.
+Рабочий каталог задает `cwd` MCP-профиля; без него user-unit работает из домашнего
+каталога пользователя. Пути в MCP-профиле должны учитывать это правило.
+
 Состояние рядом с БД:
 
 ```json
@@ -113,6 +132,7 @@ python3 ParanoiaEasyCli/codex-channel.py \
 ```bash
 cargo test --offline --locked --manifest-path ParanoiaEasyCli/Cargo.toml -j 8 codex_channel
 python3 ParanoiaEasyCli/tests/codex_protocol.py
+python3 -m unittest discover -s ParanoiaEasyCli/tests -p test_codex_channel_unit.py
 ```
 
 Второй прогон создает временный профиль Codex и локальный Responses API. Прокси

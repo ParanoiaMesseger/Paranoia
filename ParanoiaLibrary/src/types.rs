@@ -42,12 +42,29 @@ pub struct FileAttachment {
     /// временном blob-хранилище сервера под этим `file_id`, а не в seq-истории.
     /// Скачивание идёт через blob-эндпоинт (см. [`crate::transport::Transport::blob`]),
     /// а не history-pull. `body_from_seq/to_seq` для таких вложений не используются.
-    #[serde(default)]
+    /// Имя на проводе сменено вместе с шифрованием тела: клиенты до 0.2.23 не узнают
+    /// ссылку и не сохранят шифртекст как файл.
+    #[serde(default, rename = "ephemeral_blob_id")]
     pub ephemeral_file_id: Option<String>,
     /// Unix-время (сек), до которого эфемерный файл доступен для скачивания (TTL
     /// сервера). Для UI «доступно до …».
     #[serde(default)]
     pub ephemeral_expires_at: Option<u64>,
+    /// Ключ (base64, 32 байта) шифрования чанков эфемерного файла. Передаётся
+    /// внутри E2E-сообщения-ссылки, сервер хранит чанки шифртекстом.
+    #[serde(default)]
+    pub ephemeral_file_key: Option<RedactedString>,
+}
+
+/// Строка-секрет: в `Debug` не печатается.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RedactedString(pub String);
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
