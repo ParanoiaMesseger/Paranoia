@@ -115,7 +115,6 @@ Rectangle {
                 id: rosterList
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                visible: !root.loading && root.rosterModel.length > 0
                 clip: true
                 model: root.rosterModel
                 spacing: 0

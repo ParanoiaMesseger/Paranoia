@@ -3865,9 +3865,10 @@ Rectangle {
                         implicitHeight: height
 
                         Image {
+                            id: previewImage
                             anchors.fill: parent
                             source: previewSource
-                            visible: previewSource.length > 0
+                            visible: previewSource.length > 0 && status !== Image.Error
                             asynchronous: true
                             // cache=false: расшифрованные превью идут через
                             // image://secure/<id>, держим их только в
@@ -3877,6 +3878,11 @@ Rectangle {
                             fillMode: Image.PreserveAspectCrop
                             sourceSize.width: 640
                             sourceSize.height: 640
+                        }
+
+                        ImageLoadFailed {
+                            anchors.centerIn: parent
+                            visible: previewImage.status === Image.Error
                         }
 
                         Column {

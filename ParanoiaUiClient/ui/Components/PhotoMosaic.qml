@@ -139,14 +139,21 @@ Item {
                     onSourceChanged: maybeRequestPreview()
 
                     Image {
+                        id: tileImage
                         anchors.fill: parent
                         source: tile.source
-                        visible: source.toString().length > 0
+                        visible: source.toString().length > 0 && status !== Image.Error
                         asynchronous: true
                         cache: false
                         fillMode: Image.PreserveAspectCrop
                         sourceSize.width: Math.round(mosaic.cell * 2)
                         sourceSize.height: Math.round(mosaic.cell * 2)
+                    }
+
+                    ImageLoadFailed {
+                        anchors.centerIn: parent
+                        visible: tileImage.status === Image.Error
+                        showText: false
                     }
 
                     // Плейсхолдер для committed-плитки без превью (ленивая загрузка).

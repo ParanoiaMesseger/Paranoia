@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::RngCore;
@@ -11,12 +11,21 @@ use sha2::{Digest, Sha256};
 /// Зашифровать plaintext с помощью ChaCha20-Poly1305.
 /// Возвращает: nonce(12 байт) || ciphertext
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
+    encrypt_aad(key, &[], plaintext)
+}
+
+/// Как [`encrypt`], но шифртекст привязан к `aad`: с другим `aad` не расшифруется.
+pub fn encrypt_aad(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     let mut nonce_bytes = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
+    let payload = Payload {
+        msg: plaintext,
+        aad,
+    };
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(nonce, payload)
         .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
     let mut result = Vec::with_capacity(12 + ciphertext.len());
     result.extend_from_slice(&nonce_bytes);
@@ -26,14 +35,23 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
 
 /// Расшифровать данные формата nonce(12) || ciphertext.
 pub fn decrypt(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
+    decrypt_aad(key, &[], data)
+}
+
+/// Пара к [`encrypt_aad`].
+pub fn decrypt_aad(key: &[u8; 32], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 12 {
         bail!("Ciphertext too short");
     }
     let (nonce_bytes, ciphertext) = data.split_at(12);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     let nonce = Nonce::from_slice(nonce_bytes);
+    let payload = Payload {
+        msg: ciphertext,
+        aad,
+    };
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(nonce, payload)
         .map_err(|_| anyhow::anyhow!("Decryption failed — wrong key or corrupted data"))
 }
 

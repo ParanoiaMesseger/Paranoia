@@ -182,6 +182,7 @@ Rectangle {
         contentHeight: Math.max(height, height * root.zoom)
 
         Image {
+            id: fullImage
             source: root.source
             asynchronous: true
             // cache=false: расшифрованные байты идут через
@@ -194,6 +195,11 @@ Rectangle {
             y: (photoFlick.contentHeight - height) / 2
             scale: root.zoom
             transformOrigin: Item.Center
+        }
+
+        ImageLoadFailed {
+            anchors.centerIn: parent
+            visible: fullImage.status === Image.Error
         }
 
         WheelHandler {

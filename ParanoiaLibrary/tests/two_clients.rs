@@ -446,6 +446,123 @@ async fn multi_megabyte_file_sends_and_downloads_in_small_requests() {
     server.wait().ok();
 }
 
+#[tokio::test]
+async fn ephemeral_file_body_is_stored_encrypted_on_server() {
+    let server_bin = match std::env::var("CARGO_BIN_EXE_paranoia") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+
+    let admin = AdminKeyPair::generate();
+    let temp = TempDir::new().expect("create temp dir");
+    let (server_url, mut server) =
+        start_server(&server_bin, temp.path(), &admin.pubkey_b64()).await;
+
+    let alice_key = signing_key();
+    let bob_key = signing_key();
+    let alice_pub = B64.encode(alice_key.verifying_key().to_bytes());
+    let bob_pub = B64.encode(bob_key.verifying_key().to_bytes());
+
+    let alice = build_client(temp.path(), &server_url, "alice", alice_key.clone());
+    let bob = build_client(temp.path(), &server_url, "bob", bob_key.clone());
+    alice
+        .transport()
+        .reg(
+            "alice",
+            &alice_pub,
+            &admin.sign_user_registration("alice", &alice_pub),
+        )
+        .await
+        .expect("register alice");
+    bob.transport()
+        .reg(
+            "bob",
+            &bob_pub,
+            &admin.sign_user_registration("bob", &bob_pub),
+        )
+        .await
+        .expect("register bob");
+
+    let session_key = [7u8; 32];
+    let alice_dialogue = alice.open_dialogue(dialogue_config("alice", "bob", session_key));
+    let bob_dialogue = bob.open_dialogue(dialogue_config("bob", "alice", session_key));
+
+    let mut data = vec![0u8; 3 * 512 * 1024 + 1000];
+    rand::rngs::OsRng.fill_bytes(&mut data);
+    let source_path = temp.path().join("ephemeral-source.bin");
+    fs::write(&source_path, &data).expect("write source file");
+    let sent = alice_dialogue
+        .send_large_file_path_with_progress(
+            "ephemeral.bin",
+            "application/octet-stream",
+            &source_path,
+            |_, _| {},
+        )
+        .await
+        .expect("alice sends ephemeral file");
+    let file_key_b64 = match &sent[0].content {
+        MessageContent::File(file) => file.ephemeral_file_key.clone().expect("file key").0,
+        other => panic!("expected ephemeral file message, got {other:?}"),
+    };
+    let file_key = B64.decode(&file_key_b64).expect("decode file key");
+    assert!(!format!("{:?}", sent[0].content).contains(&file_key_b64));
+
+    let server_store = temp.path().join("store");
+    let secrets: [(&str, &[u8]); 5] = [
+        ("body start", &data[..64]),
+        ("body middle", &data[512 * 1024 + 100..512 * 1024 + 164]),
+        ("body end", &data[data.len() - 64..]),
+        ("file key", &file_key),
+        ("file key base64", file_key_b64.as_bytes()),
+    ];
+    for (what, secret) in secrets {
+        assert!(
+            !dir_contains(&server_store, secret),
+            "server store holds {what}"
+        );
+    }
+
+    let (received, decrypt_errors) = bob_dialogue.receive().await.expect("bob receives");
+    assert_eq!(decrypt_errors, 0);
+    assert_eq!(received.len(), 1);
+    let file_msg = &received[0];
+    match &file_msg.content {
+        MessageContent::File(file) => assert!(file.ephemeral_file_id.is_some()),
+        other => panic!("expected ephemeral file message, got {other:?}"),
+    }
+
+    let target_path = temp.path().join("downloaded-ephemeral.bin");
+    bob_dialogue
+        .download_attachment(file_msg.id.as_str(), target_path.to_str().unwrap())
+        .await
+        .expect("download ephemeral attachment");
+    assert_eq!(fs::read(&target_path).expect("read downloaded file"), data);
+    assert_eq!(
+        bob_dialogue
+            .cache_attachment_bytes(file_msg.id.as_str())
+            .await
+            .expect("load ephemeral attachment bytes"),
+        data
+    );
+
+    server.kill().ok();
+    server.wait().ok();
+}
+
+fn dir_contains(dir: &Path, needle: &[u8]) -> bool {
+    fs::read_dir(dir).expect("read dir").any(|entry| {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            return dir_contains(&path, needle);
+        }
+        match fs::read(&path) {
+            Ok(bytes) => bytes.windows(needle.len()).any(|window| window == needle),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => panic!("read {}: {e}", path.display()),
+        }
+    })
+}
+
 fn signing_key() -> SigningKey {
     let mut secret = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut secret);
